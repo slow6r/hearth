@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network security config for the hearth fork.
+
+  The SimpleX core does its own TLS with the relay CA pinned inside the smp:// address,
+  so this file is not what protects the messenger traffic. It is here to make the
+  *absence* of anything else explicit: no cleartext anywhere, and no trust in
+  user-installed CAs, so a corporate/MDM root cannot be used to inspect the app.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

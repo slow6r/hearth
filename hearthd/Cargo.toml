@@ -1,0 +1,78 @@
+[package]
+name = "hearthd"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "AGPL-3.0-or-later"
+description = "Control plane for a private, home-only SimpleX relay node (hearth)"
+publish = false
+
+[lib]
+name = "hearthd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hearthd"
+path = "src/bin/hearthd.rs"
+
+[[bin]]
+name = "hearthctl"
+path = "src/bin/hearthctl.rs"
+
+[dependencies]
+# --- async runtime -----------------------------------------------------------
+tokio = { version = "1.53", features = [
+    "rt-multi-thread", "macros", "net", "time", "process", "fs", "sync", "io-util", "signal",
+] }
+
+# --- admin API (server side only; no outbound HTTP client crates) -----------
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "matched-path"] }
+hyper = { version = "1.11", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "client", "client-legacy", "http1", "service"] }
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+# --- TLS / PKI (ring provider: no C toolchain, clean musl static build) -----
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2.2"
+rustls-pki-types = "1"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+
+# --- serialization -----------------------------------------------------------
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+
+# --- crypto / encoding -------------------------------------------------------
+age = { version = "0.12", default-features = false }
+sha2 = "0.10"
+sha1 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+hex = "0.4"
+rand = "0.9"
+
+# --- archives (backup / migrate) --------------------------------------------
+tar = "0.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+# --- misc --------------------------------------------------------------------
+qrcode = { version = "0.14", default-features = false }
+ipnet = { version = "2", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std", "ansi"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

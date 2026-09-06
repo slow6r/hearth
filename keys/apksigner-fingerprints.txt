@@ -1,0 +1,5 @@
+# Отпечатки ключа подписи Android-сборки (ТЗ §8.4).
+#
+#   apksigner verify --print-certs hearth-release.apk
+#
+# SHA-256: <заполнить после первой подписи>

@@ -1,0 +1,57 @@
+# coturn — hearth (ТЗ §6.4).
+#
+# Rendered by hearthd on every `POST /rotate/turn-secret` (monthly, ТЗ §6.4) from
+# /etc/hearth/templates/turnserver.conf.tmpl to /etc/turnserver.conf.
+# Placeholders: {{LISTEN_IP}} {{LISTEN_PORT}} {{REALM}} {{TURN_SECRET}}
+#
+# DO NOT edit /etc/turnserver.conf by hand — the next rotation overwrites it.
+
+# --- binding ---------------------------------------------------------------
+# ТЗ §5.1 / A1: never 0.0.0.0. One address, inside the home network.
+listening-ip={{LISTEN_IP}}
+relay-ip={{LISTEN_IP}}
+listening-port={{LISTEN_PORT}}
+# No alternate ports: coturn's RFC 5780 behaviour needs a second address we do not have.
+no-multicast-peers
+
+# --- transport -------------------------------------------------------------
+# ТЗ §6.4: no-tcp. Calls run over UDP inside WireGuard, which already provides
+# transport encryption and authentication; TLS/DTLS here would only add a second,
+# separately-managed certificate for no gain inside the tunnel.
+no-tcp
+no-tls
+no-dtls
+fingerprint
+
+# --- authentication --------------------------------------------------------
+# Long-term credentials derived from a rotating static secret (TURN REST scheme).
+# hearthd mints per-device credentials into the bundle; no static users exist.
+use-auth-secret
+static-auth-secret={{TURN_SECRET}}
+realm={{REALM}}
+stale-nonce=600
+
+# --- relay containment -----------------------------------------------------
+# A TURN server is by definition a packet forwarder, i.e. a potential egress path.
+# nftables already drops anything leaving the home networks; this is the second lock:
+# coturn itself will only ever relay to 10.66.0.0/16.
+denied-peer-ip=0.0.0.0-255.255.255.255
+denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+allowed-peer-ip=10.66.0.0-10.66.255.255
+no-loopback-peers
+
+# --- limits ----------------------------------------------------------------
+# A family-sized контур: generous per device, bounded in total.
+total-quota=100
+user-quota=6
+max-bps=2000000
+
+# --- privacy / operations --------------------------------------------------
+# ТЗ §3.1: no client metadata beyond what is needed to run. Keep logging minimal and
+# rotate it; coturn logs allocations, which include client addresses.
+simple-log
+log-file=/var/log/coturn/turnserver.log
+no-cli
+proc-user=turnserver
+proc-group=turnserver
+pidfile=/run/coturn/turnserver.pid

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Manifest fragment for the hearth fork (ТЗ §8.2 п.6, §3.1, A9).
+
+  These attributes are merged into the upstream AndroidManifest.xml by
+  patches/0005-manifest-security.md. They are listed separately here so a reviewer can
+  see the entire security-relevant manifest delta on one screen.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          xmlns:tools="http://schemas.android.com/tools">
+
+    <application
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/hearth_data_extraction_rules"
+        android:networkSecurityConfig="@xml/hearth_network_security_config"
+        tools:replace="android:allowBackup,android:fullBackupContent">
+
+        <!-- ТЗ §8.2 п.9: no in-app update check, no store, no Play Services.
+             Updates come from the internal F-Droid repo reachable only over WG. -->
+        <meta-data android:name="hearth.updates" android:value="internal-fdroid" />
+    </application>
+
+    <!-- Never requested by this fork; listed with tools:node="remove" so a merged
+         upstream/library manifest cannot reintroduce them (ТЗ §8.3, A5). -->
+    <uses-permission android:name="com.google.android.c2dm.permission.RECEIVE"
+                     tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+                     tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"
+                     tools:node="remove" />
+</manifest>

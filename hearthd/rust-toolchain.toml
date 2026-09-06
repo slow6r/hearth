@@ -1,0 +1,8 @@
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+# Production target is a fully static musl binary (no glibc, no dynamic loader on the node):
+#   rustup target add x86_64-unknown-linux-musl
+#   cargo build --release --target x86_64-unknown-linux-musl
+# It is intentionally NOT listed under `targets` here so that developer machines
+# (incl. Windows) do not download it on every cargo invocation.

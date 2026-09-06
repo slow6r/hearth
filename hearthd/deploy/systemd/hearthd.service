@@ -1,0 +1,58 @@
+[Unit]
+Description=hearth control plane (supervisor, egress watchdog, integrity, backup)
+Documentation=file:///opt/hearth/docs/architecture.md
+After=network-online.target nftables.service
+Wants=network-online.target
+Requires=nftables.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/hearthd --config /etc/hearth/hearthd.toml run
+Restart=on-failure
+RestartSec=5s
+
+User=hearth
+Group=hearth
+# Reads nft counters and journal, controls the relay units.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+SupplementaryGroups=systemd-journal
+
+# --- sandbox -----------------------------------------------------------------
+# hearthd is the one piece of code written for this project; it gets the tightest
+# box that still lets it do its job (ТЗ §7.2).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# No outbound sockets outside the home networks are possible anyway (nftables +
+# EgressPolicy); this keeps the address families minimal as well.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+# Writable state only where it belongs (ТЗ §10.1).
+ReadWritePaths=/var/lib/hearth /var/opt/hearth /etc/hearth
+ReadOnlyPaths=/etc/opt/simplex /etc/opt/simplex-xftp
+
+# journald is the alert journal of record.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hearthd
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,57 @@
+# smp-server.ini — эталон намерений hearth (ТЗ §6.2).
+#
+# ЭТО НЕ ГОТОВЫЙ ФАЙЛ. Источник истины — ini, который сгенерировал `smp-server init`
+# вашего пинованного тега. Имена ключей между версиями upstream менялись; сверяйте:
+#
+#   ./verify-ini-keys.sh /etc/opt/simplex/smp-server.ini smp/smp-server.ini.example
+#
+# Каждый параметр снабжён комментарием «зачем», чтобы при переходе на новую версию
+# было понятно, что именно нужно сохранить, даже если ключ переименовали.
+
+[STORE_LOG]
+# ТЗ §6.2: store log включён. Без него узел, выключенный на 10 минут, теряет
+# недоставленные сообщения — это ломает acceptance-тест A7.
+enable: on
+# Восстанавливать очереди из лога при старте.
+restore_messages: on
+# Статистика по очередям — это метаданные. Не нужна (ТЗ §3.1).
+log_stats: off
+# ТЗ §6.2: TTL сообщений 21 день. То же окно используется при ротации адреса (§10.5).
+expire_messages_days: 21
+# Уведомлений в контуре нет, но если ключ присутствует — минимальный TTL.
+expire_ntfs_hours: 24
+
+[AUTH]
+# ТЗ §6.2: новые очереди разрешены (иначе новое устройство не заведётся)...
+new_queues: on
+# ...но только с паролем. Это то, что проверяет acceptance-тест A3.
+# Значение подставляет init-smp.sh; копия — в /etc/hearth/secrets/smp-create-password.
+create_password: REPLACE_WITH_GENERATED_PASSWORD
+
+[TRANSPORT]
+# ТЗ §5.1 / A1: только адрес узла. Никаких 0.0.0.0.
+host: 10.66.10.10
+port: 5223
+# ТЗ §6.2: control port только на loopback — его опрашивает hearthd (health-check).
+control_port: 5224
+# WebSockets не нужны: браузерных клиентов в контуре нет, это лишняя поверхность.
+websockets: off
+# В TLS-ошибки попадают адреса клиентов. Не логируем (ТЗ §3.1).
+log_tls_errors: off
+
+[INACTIVE_CLIENTS]
+# Телефон в WG может «молчать» часами при экономии батареи. Не выкидываем его.
+disconnect: off
+
+[PROXY]
+# ТЗ §6.2: private message routing включён (релей >= 5.8). Отправитель не раскрывает
+# свой релей получателю, и наоборот.
+# Имена ключей (own_servers / own_server_domains / sock_proxy) сверить с версией.
+own_servers: smp://10.66.10.10:5223
+
+[INFORMATION]
+# ТЗ §6.2: минимальная information page. Ссылка на исходники — требование AGPL.
+source_code: https://github.com/simplex-chat/simplexmq
+# Всё остальное (operator, admin_email, hosting, website, country) — пустое.
+# Никаких реальных имён, адресов и контактов: страница видна каждому, кто дотянулся
+# до порта, а контур семейный.

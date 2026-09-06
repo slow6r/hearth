@@ -1,0 +1,47 @@
+[Unit]
+Description=SimpleX SMP relay (upstream binary, unmodified)
+Documentation=https://github.com/simplex-chat/simplexmq
+After=network-online.target nftables.service
+Wants=network-online.target
+Requires=nftables.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/smp-server start
+Restart=on-failure
+RestartSec=5s
+# Give the store log time to flush on stop; losing it loses undelivered messages.
+TimeoutStopSec=60
+KillSignal=SIGINT
+
+User=simplex
+Group=simplex
+LimitNOFILE=65535
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+ReadWritePaths=/var/opt/simplex
+ReadOnlyPaths=/etc/opt/simplex
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=smp-server
+
+[Install]
+WantedBy=multi-user.target

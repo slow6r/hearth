@@ -1,0 +1,56 @@
+# hearth — pinned upstream artefacts (ТЗ §6.1, §7.3 integrity, A12).
+#
+# ONE source of truth for what may run on the node. `latest` is rejected by
+# Manifest::validate(). Deployed to /etc/hearth/manifest.toml.
+#
+# The sha256 values below are ZEROED placeholders on purpose: nobody should copy a
+# hash out of a document. Fill them on the node, from artefacts you verified yourself:
+#
+#   1. Download the release binary and its signature from
+#      https://github.com/simplex-chat/simplexmq/releases/tag/<tag>
+#   2. gpg --verify smp-server-ubuntu-22_04-x86-64.asc smp-server-ubuntu-22_04-x86-64
+#      The signature must be from the key in `upstream.gpg_identity`.
+#   3. hearthctl manifest pin --name smp-server --path /usr/local/bin/smp-server
+#      (writes the measured sha256 into this file; requires --force to overwrite)
+#
+# Until a hash is filled in, the integrity module reports a mismatch and — with
+# integrity.stop_relays_on_mismatch = true — refuses to keep the relays running.
+# That is the intended fail-closed behaviour.
+
+[upstream]
+# simplexmq provides smp-server and xftp-server. Pin a `stable` tag, never a branch.
+simplexmq_tag = "REPLACE-WITH-PINNED-TAG"
+# Tag the Android config-fork is rebased onto (ТЗ §8.1).
+simplex_chat_tag = "REPLACE-WITH-PINNED-TAG"
+# GPG identity whose signature was verified for the release artefacts (ТЗ §6.1).
+gpg_identity = "chat@simplex.chat"
+# Date this pin was last reviewed against the upstream changelog (ТЗ §10.6).
+reviewed = "2026-09-06"
+
+[[binary]]
+name = "smp-server"
+path = "/usr/local/bin/smp-server"
+version = "REPLACE-WITH-PINNED-TAG"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+source = "https://github.com/simplex-chat/simplexmq/releases"
+
+[[binary]]
+name = "xftp-server"
+path = "/usr/local/bin/xftp-server"
+version = "REPLACE-WITH-PINNED-TAG"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+source = "https://github.com/simplex-chat/simplexmq/releases"
+
+[[binary]]
+name = "turnserver"
+path = "/usr/bin/turnserver"
+version = "distro"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+source = "debian:coturn"
+
+[[binary]]
+name = "hearthd"
+path = "/usr/local/bin/hearthd"
+version = "0.1.0"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+source = "built-from-source"

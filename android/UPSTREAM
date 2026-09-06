@@ -1,0 +1,12 @@
+# Пинованный upstream (ТЗ §6.1, §8.1). `latest` запрещён.
+#
+# Значения должны совпадать с [upstream] в hearthd/manifest.toml — это один и тот же
+# факт, записанный в двух местах, и расходиться им нельзя.
+#
+# Обновление: android/scripts/rebase-upstream.sh <tag>, порядок — ТЗ §10.6.
+
+simplex_chat_tag=REPLACE-WITH-PINNED-TAG
+simplexmq_tag=REPLACE-WITH-PINNED-TAG
+
+# Ветка форка: hearth/<simplex_chat_tag>
+# Подпись тега проверяется в rebase-upstream.sh (git verify-tag).

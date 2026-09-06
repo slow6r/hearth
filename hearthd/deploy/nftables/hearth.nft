@@ -1,0 +1,119 @@
+#!/usr/sbin/nft -f
+#
+# hearth — node firewall (ТЗ §5.3, §5.4).
+#
+# Two jobs:
+#   1. let in only what the family needs, from inside the home/WG networks;
+#   2. make any attempt to LEAVE those networks impossible AND visible.
+#
+# Difference from the ТЗ sketch: the counters are NAMED. Anonymous counters
+# (`counter log ... drop`) cannot be read back by name, and hearthd polls
+# `nft -j list counters table inet hearth` every 30 seconds. Same packets, same drop,
+# readable result.
+#
+# Install:
+#   install -m 0644 hearth.nft /etc/hearth/nftables/hearth.nft
+#   nft -f /etc/hearth/nftables/hearth.nft
+#   # persist: /etc/nftables.conf -> include "/etc/hearth/nftables/hearth.nft"
+#   systemctl enable --now nftables
+#
+# Verify (acceptance test A2):
+#   nft list counters table inet hearth      # egress_drop must stay at 0
+#
+# NOTE ON ADDRESSES: the node must have a STATIC address, not a DHCP lease.
+# The UDM Pro reservation pins 10.66.10.10 to the MAC, but a DHCP client also needs to
+# broadcast to 255.255.255.255, which this output policy drops. Configure the address
+# statically on the node and keep the reservation as belt and braces (see
+# docs/runbook-phase0.md). If you insist on DHCP, uncomment the DHCP rules below —
+# and expect `egress_drop` to stop being a clean zero.
+
+table inet hearth {
+    # ---------------------------------------------------------------- counters
+    # hearthd reads these. `egress_drop` is THE number: expected 0 forever.
+    counter egress_drop { }
+    counter input_drop { }
+    counter forward_drop { }
+    counter smp_in { }
+    counter xftp_in { }
+    counter turn_in { }
+    counter admin_in { }
+    counter ssh_in { }
+
+    # ------------------------------------------------------------------- sets
+    # Home + WireGuard space (ТЗ §5.1). Everything else does not exist for this node.
+    set home_nets {
+        type ipv4_addr
+        flags interval
+        elements = { 10.66.0.0/16 }
+    }
+
+    # Admin subnet: admin API and ssh only (ТЗ §5.3).
+    set admin_nets {
+        type ipv4_addr
+        flags interval
+        elements = { 10.66.0.0/24 }
+    }
+
+    # ------------------------------------------------------------------ input
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        iif lo accept
+        ct state established,related accept
+        ct state invalid counter name input_drop drop
+
+        # Diagnostics from home only. No ICMP from anywhere else, no timestamps.
+        ip saddr @home_nets icmp type { echo-request, destination-unreachable, time-exceeded } accept
+        ip6 nexthdr icmpv6 icmpv6 type { echo-request, nd-neighbor-solicit, nd-neighbor-advert } accept
+
+        # SMP relay (ТЗ §6.2).
+        ip saddr @home_nets tcp dport 5223 counter name smp_in accept
+        # XFTP relay (ТЗ §6.3).
+        ip saddr @home_nets tcp dport 5443 counter name xftp_in accept
+        # STUN/TURN control (ТЗ §6.4).
+        ip saddr @home_nets udp dport 3478 counter name turn_in accept
+        # coturn relay allocations. Keep in sync with min-port/max-port in turnserver.conf.
+        ip saddr @home_nets udp dport 49152-65535 accept
+
+        # hearthd admin API and ssh: admin subnet only.
+        ip saddr @admin_nets tcp dport 7443 counter name admin_in accept
+        ip saddr @admin_nets tcp dport 22 counter name ssh_in accept
+
+        # Everything else: counted, rate-limited log, then dropped by policy.
+        counter name input_drop limit rate 10/second burst 20 packets \
+            log prefix "hearth-in-drop " level warn
+        drop
+    }
+
+    # ---------------------------------------------------------------- forward
+    # The node is not a router. Nothing is forwarded, ever.
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        counter name forward_drop limit rate 5/second burst 10 packets \
+            log prefix "hearth-fwd-drop " level warn
+        drop
+    }
+
+    # ----------------------------------------------------------------- output
+    # ТЗ §5.4: this chain is the leak detector. If a relay ever tries to phone home,
+    # this is where it dies and where hearthd sees it.
+    chain output {
+        type filter hook output priority filter; policy drop;
+
+        oif lo accept
+        ct state established,related accept
+
+        # The only permitted destinations on the planet.
+        ip daddr @home_nets accept
+        # Multicast DNS / SSDP noise from the OS: dropped like everything else, but not
+        # logged, so it cannot drown the signal.
+        ip daddr { 224.0.0.0/4, 255.255.255.255 } udp dport { 5353, 1900, 137, 138 } drop
+
+        # --- DHCP (only if the node really must use a lease; see the note above) ---
+        # udp sport 68 udp dport 67 accept
+
+        counter name egress_drop limit rate 10/second burst 20 packets \
+            log prefix "hearth-egress-drop " level warn
+        drop
+    }
+}

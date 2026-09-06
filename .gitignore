@@ -1,0 +1,41 @@
+# --- Rust ---
+/hearthd/target/
+**/*.rs.bk
+
+# --- Android ---
+/android/simplex-chat/          # submodule форка, если добавлен не как submodule
+*.apk
+*.aab
+*.keystore
+*.jks
+local.properties
+.gradle/
+build/
+
+# --- Секреты (дублирует keys/.gitignore; лучше два замка, чем один) ---
+*.key
+*.pem
+*identity*
+age-key*.txt
+*secret*
+*.p12
+*.pfx
+# Исключения: шаблоны и примеры, в которых секретов нет
+!**/*.example
+!**/*.tmpl
+
+# --- Локальное состояние узла, если кто-то запустил hearthd из репозитория ---
+/var/
+/etc/
+devices.json
+alerts.jsonl
+egress-incidents.jsonl
+*.tar.gz.age
+
+# --- Мусор ОС и редакторов ---
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
