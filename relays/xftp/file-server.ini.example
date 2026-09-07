@@ -8,6 +8,8 @@
 [STORE_LOG]
 enable = on
 log_stats = off
+# Метрики в <log_path>/xftp-server-metrics.txt
+prometheus_interval = 60
 # TTL файлов. 7 суток: достаточно, чтобы забрать, и не превращает узел в файлопомойку.
 expire_files_hours = 168
 
@@ -28,4 +30,5 @@ log_tls_errors = off
 
 [FILES]
 # Общая квота хранилища. Размер одного файла ограничен upstream и здесь не настраивается.
-storage_quota = 32gb
+# 20 человек с фотографиями. Диск 500 ГБ это выдержит вместе с ОС и бэкапами.
+storage_quota = 150gb

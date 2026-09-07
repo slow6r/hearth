@@ -105,7 +105,15 @@ table inet hearth {
 
     # ----------------------------------------------------------------- output
     # The leak detector. Clients connect IN; nothing on this host has a reason to
-    # start a connection out, with exactly one exception below.
+    # start a connection out, with the explicit exceptions below.
+    #
+    # This machine is multi-purpose: it also drives a TV, runs video-call apps and
+    # whatever else the owner installs. So the rule is not "nothing goes out" but
+    # "everything that goes out is named, and the relay stack is not on the list".
+    #
+    # `egress_drop` therefore means: THE RELAY STACK tried to reach the internet.
+    # That is a narrower claim than before, and it is the one that matters — the
+    # relays are the third-party code nobody here audits line by line.
     chain output {
         type filter hook output priority filter; policy drop;
 
@@ -115,17 +123,27 @@ table inet hearth {
         # The LAN: backup target, alert channel, NTP on the router.
         ip daddr @lan_nets accept
 
-        # --- the one real exception: TURN media -------------------------------
+        # --- exception 1: TURN media -------------------------------------------
         # A relayed call means coturn sends packets to the *other* participant, who
-        # is somewhere on the internet. That is genuinely new outbound traffic, not a
-        # reply, so it has to be permitted explicitly.
-        #
-        # Scoped as tightly as the mechanism allows: only the turnserver user, only
-        # UDP, only from the allocation range. Everything else on this host — the
-        # relays included — still cannot open an outbound connection without landing
-        # in egress_drop.
-        meta skuid "turnserver" udp sport $TURN_MIN-$TURN_MAX accept
+        # is somewhere on the internet. Genuinely new outbound traffic, not a reply.
+        # Scoped as tightly as the mechanism allows: one user, UDP only, only from
+        # the allocation range.
+        meta skuid "turnserver" udp sport $TURN_MIN-$TURN_MAX \
+            counter name turn_egress accept
 
+        # --- exception 2: everything else the owner runs on purpose --------------
+        # ==> ADJUST. Add the users your own services run as. Keep this list short
+        #     and explicit: every name here is a hole you opened knowingly.
+        #
+        #   gym        the desktop session driving the TV (browser, Zoom, VK)
+        #   root       apt / system updates
+        #   prometheus monitoring, if you scrape anything outside the LAN
+        #
+        # Counted separately so `egress_drop` stays readable. If you ever wonder
+        # "is that number growing?", it should be THIS one, never egress_drop.
+        meta skuid { "gym", "root" } counter name app_egress accept
+
+        # --- everything else, notably `simplex` and `hearth` ---------------------
         # Noise the OS emits that would otherwise drown the signal.
         ip daddr { 224.0.0.0/4, 255.255.255.255 } udp dport { 5353, 1900, 137, 138 } drop
 
@@ -143,10 +161,13 @@ table inet hearth {
 # * If this host is behind NAT, coturn needs `external-ip=<public>/<private>` or it
 #   will advertise an unreachable candidate and calls will fail after signalling.
 #
-# * The node has no resolver (see the runbook). If node.host is a dynamic DNS name,
-#   the *router* updates it, not this machine — that keeps egress_drop clean.
+# * `meta skuid` resolves user NAMES when the ruleset is loaded. If a user does not
+#   exist yet, `nft -f` fails. Create the accounts first, or use numeric UIDs.
 #
-# * Getting a TLS certificate for turns: needs temporary outbound access. Open it,
-#   run certbot, close it, and note the egress_drop bump in the journal so you do not
-#   later investigate your own maintenance window.
+# * Adding a service that needs the internet? Add its user to the app_egress rule.
+#   Do NOT relax the final drop — that rule is the whole point of the file.
+#
+# * Getting a TLS certificate for turns: needs temporary outbound access for root,
+#   which the app_egress rule already permits. It will show up in app_egress, not in
+#   egress_drop, which is exactly the intent.
 # ---------------------------------------------------------------------------

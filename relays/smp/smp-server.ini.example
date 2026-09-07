@@ -33,6 +33,10 @@ expire_messages_on_send = off
 expire_ntfs_hours = 24
 # Суточная статистика в CSV — это метаданные. Не нужна.
 log_stats = off
+# Prometheus-метрики: сервер сам пишет их в <log_path>/smp-server-metrics.txt
+# каждые N секунд. Забираются textfile-коллектором node_exporter,
+# см. hearthd/deploy/monitoring/README.md
+prometheus_interval = 60
 
 [AUTH]
 # Очереди создавать можно...

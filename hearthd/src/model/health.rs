@@ -131,7 +131,16 @@ pub struct EgressSnapshot {
     pub input_drop_bytes: u64,
     /// Growth of `egress_drop` since hearthd started watching. Expected: 0 (ТЗ §5.4).
     pub egress_drop_delta: u64,
-    /// Relay sockets connected outside the home networks. Expected: empty.
+    /// Counters for egress that is permitted on purpose — call media, and any other
+    /// service on a multi-purpose host. Reported so the operator can see that it is
+    /// *these* growing and not `egress_drop`; never an incident.
+    #[serde(default)]
+    pub informational: std::collections::BTreeMap<String, u64>,
+    /// Whether `ss` could attribute sockets to processes. When false the socket scan
+    /// proves nothing, and saying so beats reporting a clean result.
+    #[serde(default)]
+    pub scanner_ok: bool,
+    /// Relay sockets *initiating* connections outside the home networks. Expected: empty.
     pub foreign_sockets: Vec<ForeignSocket>,
     /// Total incidents ever recorded on this node.
     pub incidents_total: u64,

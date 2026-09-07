@@ -1,0 +1,76 @@
+# Правила алертов для узла hearth.
+#
+# Здесь только про железо и релеи. Всё, что касается мессенджера — очереди,
+# egress, целостность бинарей, бэкапы — уже покрыто hearthd, дублировать не нужно.
+
+groups:
+  - name: hardware
+    rules:
+      - alert: DiskFillingUp
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/"} 
+            / node_filesystem_size_bytes{mountpoint="/"} < 0.15
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "На / осталось меньше 15% места"
+          description: "Проверьте квоту XFTP и спул бэкапов в /var/opt/hearth/backup."
+
+      - alert: DiskAlmostFull
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/"} 
+            / node_filesystem_size_bytes{mountpoint="/"} < 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "На / осталось меньше 5% — релей скоро перестанет писать store log"
+
+      - alert: HighTemperature
+        expr: node_hwmon_temp_celsius > 85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Температура выше 85 °C"
+          description: "Мини-ПК в спортзале: проверьте, не забился ли вентилятор пылью."
+
+      - alert: SmartFailing
+        expr: node_disk_smart_healthy == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SMART сообщает о проблеме с диском"
+          description: "Проверьте, что бэкапы уезжают на hearth-backup — hearthctl backup status."
+
+      - alert: MemoryPressure
+        expr: |
+          node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Свободной памяти меньше 10%"
+
+      - alert: NodeExporterDown
+        expr: up{job="node"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node_exporter не отвечает — мониторинг железа ослеп"
+
+  - name: relays
+    rules:
+      # Метрики релеев приходят из textfile-коллектора. Если файл перестал
+      # обновляться, релей либо стоит, либо потерял prometheus_interval.
+      - alert: RelayMetricsStale
+        expr: time() - node_textfile_mtime_seconds > 600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Метрики релея не обновлялись 10 минут"
+          description: "Проверьте hearthctl health и prometheus_interval в ini."

@@ -37,6 +37,10 @@ control-порт вне loopback (тесты `admin_api_may_not_be_exposed`,
 **Как:** `nft list counters table inet hearth` (или `hearthctl egress`).
 **Ожидание:** `egress_drop` = 0. Не «мало», а ноль.
 
+На многоцелевом узле счётчик означает уже не «машина молчит», а «**релейный стек** не
+пытался выйти в интернет» ([ADR 0008](adr/0008-multi-purpose-host.md)). Разрешённый
+трафик приложений считается отдельно — `app_egress`, `turn_egress`, — и растёт, это норма.
+
 Автоматизирован: `tests/acceptance/a02-egress-zero.sh` (проверяет и то, что счётчики
 вообще читаются — слепой watchdog выглядит как чистый узел).
 

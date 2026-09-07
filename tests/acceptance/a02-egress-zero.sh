@@ -26,6 +26,8 @@ read_counter() {
 EGRESS="$(read_counter egress_drop)"
 INPUT="$(read_counter input_drop)"
 FORWARD="$(read_counter forward_drop)"
+APP="$(read_counter app_egress)"
+TURN="$(read_counter turn_egress)"
 
 if [[ -z "$EGRESS" ]]; then
     echo "!! счётчик egress_drop не найден. Правила используют анонимные счётчики?"
@@ -37,8 +39,14 @@ echo "  egress_drop  = $EGRESS  (ожидание: 0)"
 echo "  input_drop   = ${INPUT:-?}   (на публичном узле растёт постоянно — это сканы интернета, норма)"
 echo "  forward_drop = ${FORWARD:-?}   (ожидание: 0, узел не роутер)"
 
+echo
+echo "  Разрешённый egress (растёт — это норма, ADR 0008):"
+echo "    app_egress   = ${APP:-нет счётчика}   (зал, обновления, ваши сервисы)"
+echo "    turn_egress  = ${TURN:-нет счётчика}   (медиа звонков)"
+echo
+
 if [[ "$EGRESS" -ne 0 ]]; then
-    echo "!! УЗЕЛ ПЫТАЛСЯ ВЫЙТИ НАРУЖУ. Это инцидент (ТЗ §5.4)."
+    echo "!! РЕЛЕЙНЫЙ СТЕК ПЫТАЛСЯ ВЫЙТИ НАРУЖУ. Это инцидент."
     echo "   hearthctl egress --incidents"
     echo "   journalctl -k | grep hearth-egress-drop | tail -20"
     status=1

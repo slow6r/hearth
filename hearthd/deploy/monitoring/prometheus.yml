@@ -1,0 +1,32 @@
+# Prometheus для узла hearth.
+#
+# Скрейпит только localhost. Наружу этот сервис не ходит и не должен быть доступен
+# из интернета — правило фаервола см. в README.md.
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['127.0.0.1:9093']
+
+scrape_configs:
+  # Железо и ОС + метрики релеев через textfile-коллектор.
+  # Метрики smp/xftp попадают сюда симлинками в /var/lib/node_exporter/textfile,
+  # см. README.md — отдельного экспортера для них не нужно.
+  - job_name: node
+    static_configs:
+      - targets: ['127.0.0.1:9100']
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['127.0.0.1:9090']
+
+# hearthd намеренно НЕ скрейпится: его admin API работает по mTLS с клиентскими
+# сертификатами, и выдавать Prometheus такой сертификат — значит дать ему права
+# админа узла. Мессенджер мониторит сам hearthd и шлёт алерты в Gotify.

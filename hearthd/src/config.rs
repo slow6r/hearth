@@ -226,9 +226,18 @@ pub struct Egress {
     pub input_counter: String,
     #[serde(default = "d_journal_prefix")]
     pub journal_prefix: String,
-    /// Process names whose sockets must never leave the home networks.
-    #[serde(default = "d_watch_processes")]
-    pub watch_processes: Vec<String>,
+    /// The relay stack: processes that must never *initiate* a connection outward.
+    ///
+    /// Deliberately excludes `turnserver`, which relays call media to the internet by
+    /// design, and everything else on the host — on a multi-purpose machine a browser
+    /// or a package manager talking to the internet is not a finding.
+    #[serde(default = "d_relay_processes")]
+    pub relay_processes: Vec<String>,
+    /// Counters that are read and reported but never raise an incident: the permitted
+    /// egress of other services. Their growth is expected; it is shown so the operator
+    /// can see it is *them* growing and not `egress_drop`.
+    #[serde(default = "d_informational_counters")]
+    pub informational_counters: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,7 +352,8 @@ impl Default for Egress {
             egress_counter: d_ctr_egress(),
             input_counter: d_ctr_input(),
             journal_prefix: d_journal_prefix(),
-            watch_processes: d_watch_processes(),
+            relay_processes: d_relay_processes(),
+            informational_counters: d_informational_counters(),
         }
     }
 }
@@ -605,12 +615,11 @@ fn d_ctr_input() -> String {
 fn d_journal_prefix() -> String {
     "hearth-egress-drop".into()
 }
-fn d_watch_processes() -> Vec<String> {
-    vec![
-        "smp-server".into(),
-        "xftp-server".into(),
-        "turnserver".into(),
-    ]
+fn d_relay_processes() -> Vec<String> {
+    vec!["smp-server".into(), "xftp-server".into()]
+}
+fn d_informational_counters() -> Vec<String> {
+    vec!["app_egress".into(), "turn_egress".into()]
 }
 fn d_integrity_interval() -> u64 {
     3600

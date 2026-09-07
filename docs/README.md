@@ -13,6 +13,7 @@
 | Файл | Когда открывать |
 |---|---|
 | [runbook-deploy.md](runbook-deploy.md) | Разворачиваем узел: сеть, проброс портов, релеи, звонки |
+| [runbook-install-beelink.md](runbook-install-beelink.md) | Установка на конкретную машину: Debian 13, LUKS, два пользователя, зал |
 | [runbook-migration.md](runbook-migration.md) | Переезд ПК → mini-PC без смены адреса (§10.2) |
 | [runbook-device-add.md](runbook-device-add.md) | Новое устройство в семье (§10.3) |
 | [runbook-device-lost.md](runbook-device-lost.md) | Телефон потерян или украден (§10.4) |
@@ -31,6 +32,7 @@
 | [0005](adr/0005-no-http-client.md) | Свой минимальный HTTP вместо клиентского крейта |
 | [0006](adr/0006-state-dir-in-backup.md) | Четвёртый каталог в бэкапе сверх трёх из §10.1 |
 | [0007](adr/0007-public-relay-no-vpn.md) | **Публичный релей вместо доступа только через WireGuard** |
+| [0008](adr/0008-multi-purpose-host.md) | **Многоцелевой узел: egress по пользователям** |
 
 ## Как читать код
 

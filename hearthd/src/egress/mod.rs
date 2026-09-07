@@ -1,9 +1,13 @@
-//! Egress watchdog (ТЗ §5.4, §7.3) — the module the whole trust model rests on.
+//! Egress watchdog (ТЗ §5.4, §7.3).
 //!
 //! The relays are stock binaries nobody in this project audits line by line. Instead of
-//! trusting them, the node is built so that *any* attempt to talk to the outside world
-//! is dropped by nftables and lands in a counter hearthd reads. Expected value of
-//! `egress_drop` over 24 hours: **0**. Anything else is an incident, recorded forever.
+//! trusting them, the node is built so the relay stack cannot reach the internet, and
+//! any attempt lands in a counter hearthd reads. Expected value of `egress_drop` over
+//! 24 hours: **0**. Anything else is an incident, recorded forever.
+//!
+//! On a multi-purpose host other services DO go out on purpose (ADR 0008). They are
+//! permitted by name in nftables and counted separately, so `egress_drop` keeps meaning
+//! exactly one thing: the relay stack tried to leave.
 //!
 //! Two independent signals:
 //!
@@ -84,7 +88,7 @@ impl EgressWatchdog {
 
     /// Read the nft counters and turn any growth into an incident.
     pub async fn poll_counters(&mut self) {
-        let cfg = &self.state.config.egress;
+        let cfg = self.state.config.egress.clone();
         let counters =
             match nft::list_counters(&self.state.sys, &cfg.nft_family, &cfg.nft_table).await {
                 Ok(counters) => counters,
@@ -131,7 +135,8 @@ impl EgressWatchdog {
                     Alert::critical(
                         "egress",
                         format!(
-                            "{} packets were dropped leaving the home network (expected 0)",
+                            "{} packets from the relay stack were dropped on the way out \
+                             (expected 0)",
                             delta.packets
                         ),
                     )
@@ -156,6 +161,11 @@ impl EgressWatchdog {
         snapshot.input_drop_packets = input.packets;
         snapshot.input_drop_bytes = input.bytes;
         snapshot.egress_drop_delta = snapshot.egress_drop_delta.saturating_add(delta.packets);
+        snapshot.informational = cfg
+            .informational_counters
+            .iter()
+            .filter_map(|name| counters.get(name).map(|c| (name.clone(), c.packets)))
+            .collect();
         snapshot.incidents_total = self.baseline.incidents_total;
         if !incidents.is_empty() {
             snapshot.last_incident = incidents.last().map(|i| i.ts);
@@ -179,7 +189,28 @@ impl EgressWatchdog {
                 return;
             }
         };
-        let foreign = find_foreign(&sockets, &cfg.watch_processes, &self.state.policy);
+        // Ports we publish. A relay socket on one of them is an accepted connection —
+        // a family member connecting in — not a leak.
+        let mut listening_ports: Vec<u16> = Vec::new();
+        for relay in self.state.config.relays() {
+            if relay.enabled {
+                listening_ports.extend(relay.all_ports());
+            }
+        }
+
+        let blind = scanner_is_blind(&sockets);
+        if blind {
+            tracing::warn!(
+                "ss reported no process names; the socket scan cannot attribute sockets \
+                 (hearthd needs privileges to inspect other users' sockets)"
+            );
+        }
+        let foreign = find_foreign(
+            &sockets,
+            &cfg.relay_processes,
+            &listening_ports,
+            &self.state.policy,
+        );
 
         if !foreign.is_empty() {
             let incident = EgressIncident {
@@ -218,6 +249,7 @@ impl EgressWatchdog {
         let mut snapshot = self.state.egress.write().await;
         snapshot.checked = Utc::now();
         snapshot.foreign_sockets = foreign;
+        snapshot.scanner_ok = !blind;
         snapshot.incidents_total = self.baseline.incidents_total;
         snapshot.state = verdict(snapshot.egress_drop_delta, snapshot.foreign_sockets.len());
     }
@@ -270,21 +302,35 @@ impl EgressWatchdog {
     }
 }
 
-/// Sockets owned by a watched process whose peer is outside the home networks.
+/// Relay sockets that represent an **outbound** connection to the internet.
+///
+/// # Why the direction matters now
+///
+/// Before the relays were published, any relay socket with a non-home peer was a
+/// finding. Since [ADR 0007](../../docs/adr/0007-public-relay-no-vpn.md) that is the
+/// normal case: those are family members connecting in from the internet.
+///
+/// The leak is the opposite direction — the relay *initiating* a connection. The two
+/// are told apart by the local port: an accepted connection keeps the listening port
+/// locally, while an outbound one gets an ephemeral port and the service port on the
+/// remote side. So a relay socket whose local port is not one of ours, pointing at a
+/// non-home peer, is the thing worth alerting on.
 fn find_foreign(
     sockets: &[ss::SocketEntry],
-    watch_processes: &[String],
+    relay_processes: &[String],
+    listening_ports: &[u16],
     policy: &crate::net::EgressPolicy,
 ) -> Vec<ForeignSocket> {
     sockets
         .iter()
         .filter(|s| s.is_established())
+        // Only the relay stack. Everything else on a multi-purpose host — a browser,
+        // a package manager, coturn relaying a call — talks to the internet by design.
+        .filter(|s| relay_processes.iter().any(|p| s.owned_by(p)))
         .filter(|s| {
-            watch_processes.is_empty()
-                || watch_processes.iter().any(|p| s.owned_by(p))
-                // A socket with no visible owner still matters: `ss` may not have had
-                // permission to read /proc for it.
-                || s.processes.is_empty()
+            // Inbound: the local side is one of our published ports.
+            let local_port = ss::split_host_port(&s.local).map(|(_, port)| port);
+            !local_port.is_some_and(|port| listening_ports.contains(&port))
         })
         .filter(|s| match s.peer_ip() {
             Some(ip) => !policy.permits_ip(ip),
@@ -297,6 +343,13 @@ fn find_foreign(
             state: s.state.clone(),
         })
         .collect()
+}
+
+/// `ss` only reveals process names for sockets the caller may inspect. If none of the
+/// listed sockets name a process, the scan cannot attribute anything and must say so
+/// rather than report a clean result — a blind scanner looks exactly like a clean host.
+fn scanner_is_blind(sockets: &[ss::SocketEntry]) -> bool {
+    !sockets.is_empty() && sockets.iter().all(|s| s.processes.is_empty())
 }
 
 /// Any drop or any foreign socket is critical; ТЗ §5.4 allows no grey zone.
@@ -329,39 +382,81 @@ mod tests {
     use crate::sys::Sys;
 
     fn policy() -> EgressPolicy {
-        EgressPolicy::new(vec!["10.66.0.0/16".parse().expect("cidr")])
+        EgressPolicy::new(vec!["192.168.1.0/24".parse().expect("cidr")])
     }
 
+    fn relays() -> Vec<String> {
+        vec!["smp-server".to_string(), "xftp-server".to_string()]
+    }
+
+    /// Ports we publish. Sockets whose LOCAL side is one of these are inbound.
+    const PORTS: &[u16] = &[443, 5223, 5443];
+
+    /// A realistic multi-purpose host: family members connected from the internet,
+    /// a browser and a package manager doing their job, coturn relaying a call —
+    /// and one relay socket that should not exist.
     const SS_OUTPUT: &str = "\
-ESTAB 0 0 10.66.10.10:5223 10.66.100.5:44321 users:((\"smp-server\",pid=812,fd=27))
-ESTAB 0 0 10.66.10.10:47120 142.250.185.78:443 users:((\"smp-server\",pid=812,fd=31))
-LISTEN 0 1024 10.66.10.10:5223 0.0.0.0:* users:((\"smp-server\",pid=812,fd=9))
-ESTAB 0 0 10.66.10.10:38000 8.8.8.8:53 users:((\"unrelated\",pid=99,fd=3))
+LISTEN 0 1024 0.0.0.0:5223 0.0.0.0:* users:((\"smp-server\",pid=812,fd=9))
+ESTAB  0 0 203.0.113.10:5223 84.17.52.9:44321 users:((\"smp-server\",pid=812,fd=27))
+ESTAB  0 0 203.0.113.10:443  91.108.4.7:51200 users:((\"smp-server\",pid=812,fd=28))
+ESTAB  0 0 203.0.113.10:5443 84.17.52.9:44980 users:((\"xftp-server\",pid=830,fd=14))
+ESTAB  0 0 192.168.1.10:47120 142.250.185.78:443 users:((\"firefox\",pid=2201,fd=51))
+ESTAB  0 0 192.168.1.10:47250 151.101.0.204:443 users:((\"apt-get\",pid=2299,fd=7))
+ESTAB  0 0 203.0.113.10:49170 88.12.3.4:60000 users:((\"turnserver\",pid=900,fd=33))
+ESTAB  0 0 203.0.113.10:38000 142.250.185.78:443 users:((\"smp-server\",pid=812,fd=31))
 ";
 
     #[test]
-    fn flags_only_foreign_relay_sockets() {
+    fn flags_a_relay_that_dials_out() {
         let sockets = ss::parse(SS_OUTPUT);
-        let watched = vec!["smp-server".to_string()];
-        let foreign = find_foreign(&sockets, &watched, &policy());
-        assert_eq!(foreign.len(), 1);
+        let foreign = find_foreign(&sockets, &relays(), PORTS, &policy());
+        assert_eq!(foreign.len(), 1, "exactly one socket is a real finding");
         assert_eq!(foreign[0].peer, "142.250.185.78:443");
         assert_eq!(foreign[0].process, "smp-server");
+        assert_eq!(
+            foreign[0].local, "203.0.113.10:38000",
+            "an ephemeral local port is what makes it outbound"
+        );
     }
 
     #[test]
-    fn ignores_home_peers_and_listeners() {
+    fn inbound_clients_are_not_findings() {
+        // The whole point of ADR 0007: strangers' addresses connecting to 5223/443/5443
+        // are family members, not leaks.
         let sockets = ss::parse(SS_OUTPUT);
-        let foreign = find_foreign(&sockets, &["smp-server".to_string()], &policy());
-        assert!(foreign.iter().all(|f| f.state == "ESTAB"));
-        assert!(!foreign.iter().any(|f| f.peer.starts_with("10.66.")));
+        let foreign = find_foreign(&sockets, &relays(), PORTS, &policy());
+        assert!(
+            !foreign
+                .iter()
+                .any(|f| f.peer.starts_with("84.17") || f.peer.starts_with("91.108")),
+            "connections accepted on published ports must be ignored"
+        );
     }
 
     #[test]
-    fn empty_watch_list_watches_everything() {
+    fn other_services_are_none_of_our_business() {
         let sockets = ss::parse(SS_OUTPUT);
-        let foreign = find_foreign(&sockets, &[], &policy());
-        assert_eq!(foreign.len(), 2, "both foreign peers are reported");
+        let foreign = find_foreign(&sockets, &relays(), PORTS, &policy());
+        for process in ["firefox", "apt-get", "turnserver"] {
+            assert!(
+                !foreign.iter().any(|f| f.process == process),
+                "{process} talking to the internet is expected on this host"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scan_that_cannot_name_processes_says_so() {
+        let named = ss::parse(SS_OUTPUT);
+        assert!(!scanner_is_blind(&named));
+
+        // `ss` without privileges: sockets listed, owners hidden.
+        let anonymous = ss::parse("ESTAB 0 0 203.0.113.10:38000 1.2.3.4:443\n");
+        assert!(
+            scanner_is_blind(&anonymous),
+            "reporting `clean` here would be a lie"
+        );
+        assert!(!scanner_is_blind(&[]), "no sockets at all is not blindness");
     }
 
     #[test]

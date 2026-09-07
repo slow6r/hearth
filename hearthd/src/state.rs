@@ -118,6 +118,8 @@ fn pending_egress() -> EgressSnapshot {
         input_drop_packets: 0,
         input_drop_bytes: 0,
         egress_drop_delta: 0,
+        informational: Default::default(),
+        scanner_ok: false,
         foreign_sockets: Vec::new(),
         incidents_total: 0,
         last_incident: None,

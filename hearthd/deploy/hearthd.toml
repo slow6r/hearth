@@ -117,9 +117,13 @@ nft_table = "hearth"
 egress_counter = "egress_drop"
 input_counter = "input_drop"
 journal_prefix = "hearth-egress-drop"
-# Relay sockets to the internet are normal now (clients connect in), so the socket
-# scanner only watches processes that should never talk outward at all.
-watch_processes = []
+
+
+# Релейный стек: эти процессы не должны САМИ инициировать соединения наружу.
+# turnserver сюда не входит — он ретранслирует медиа звонков по назначению.
+relay_processes = ["smp-server", "xftp-server"]
+# Счётчики разрешённого egress: показываются, но инцидентом не считаются.
+informational_counters = ["app_egress", "turn_egress"]
 
 [integrity]
 interval_secs = 3600
@@ -162,4 +166,5 @@ command = ["/usr/local/sbin/hearth-beep"]
 min_severity = "critical"
 
 [devices]
-max_devices = 20
+# 20 человек по 2–3 устройства. ТЗ писалось под «≤20 устройств» — это другое.
+max_devices = 50

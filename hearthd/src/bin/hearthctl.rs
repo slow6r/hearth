@@ -597,18 +597,39 @@ fn print_egress(egress: &hearthd::model::health::EgressSnapshot) {
         "  input_drop:  {} packets / {} bytes",
         egress.input_drop_packets, egress.input_drop_bytes
     );
-    println!("  incidents ever: {}", egress.incidents_total);
-    if egress.foreign_sockets.is_empty() {
-        println!("  foreign sockets: none");
-    } else {
-        for socket in &egress.foreign_sockets {
-            println!(
-                "  FOREIGN SOCKET {} {} -> {} ({})",
-                socket.process, socket.local, socket.peer, socket.state
-            );
-        }
+    if !egress.informational.is_empty() {
+        // Permitted egress on a multi-purpose host (ADR 0008). These are expected to
+        // grow; showing them next to egress_drop is what keeps the zero readable.
+        let counters: Vec<String> = egress
+            .informational
+            .iter()
+            .map(|(name, packets)| format!("{name}={packets}"))
+            .collect();
+        println!(
+            "  permitted:   {}   (expected to grow)",
+            counters.join("  ")
+        );
     }
-    println!("\nExpected over 24h (ТЗ §5.4, A2): egress_drop delta = 0, no foreign sockets.");
+    println!("  incidents ever: {}", egress.incidents_total);
+    if !egress.scanner_ok {
+        println!(
+            "  socket scan: DEGRADED — `ss` could not name the owning processes, \
+             so the scan proves nothing"
+        );
+    } else if egress.foreign_sockets.is_empty() {
+        println!("  socket scan: ok, no relay socket dialling out");
+    }
+    for socket in &egress.foreign_sockets {
+        println!(
+            "  RELAY DIALLED OUT {} {} -> {} ({})",
+            socket.process, socket.local, socket.peer, socket.state
+        );
+    }
+    println!(
+        "\nExpected over 24h (A2): egress_drop delta = 0 and no relay socket dialling out.\n\
+         `egress_drop` means the RELAY STACK tried to reach the internet — other services\n\
+         on this host are permitted by name and counted separately (ADR 0008)."
+    );
 }
 
 fn print_status(status: &NodeStatus) {
