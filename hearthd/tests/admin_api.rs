@@ -24,15 +24,13 @@ fn loopback_config(dir: &Path) -> Config {
     let raw = include_str!("../deploy/hearthd.toml");
     let mut config: Config = toml::from_str(raw).expect("reference config parses");
 
-    config.node.address = "127.0.0.1".parse().expect("ip");
-    config.node.home_networks = vec!["127.0.0.0/8".parse().expect("cidr")];
+    // The published host stays a normal public name — that is what goes into client
+    // addresses. Only the admin API is moved onto loopback so the test can bind it.
+    config.node.host = "relay.example.org".into();
+    config.node.lan_networks = vec!["127.0.0.0/8".parse().expect("cidr")];
     config.node.admin_networks = vec!["127.0.0.0/8".parse().expect("cidr")];
     config.api.listen = "127.0.0.1:0".parse().expect("addr");
     config.api.pki_dir = dir.join("pki");
-
-    config.smp.listen = "127.0.0.1:5223".parse().expect("addr");
-    config.xftp.listen = "127.0.0.1:5443".parse().expect("addr");
-    config.turn.listen = "127.0.0.1:3478".parse().expect("addr");
 
     config.paths.state_dir = dir.join("state");
     config.paths.hearth_etc = dir.join("etc-hearth");
@@ -80,7 +78,7 @@ async fn start() -> Harness {
     pki::init_ca(
         &config.api.pki_dir,
         "hearth-test",
-        config.node.address,
+        config.api.listen.ip(),
         false,
     )
     .expect("init ca");
@@ -123,7 +121,7 @@ async fn health_is_served_over_mutual_tls() {
     let harness = start().await;
     let health: HealthSnapshot = harness.client.get_json("/health").await.expect("health");
     assert_eq!(health.node, "hearth-node");
-    assert_eq!(health.address, "127.0.0.1");
+    assert_eq!(health.address, "relay.example.org");
     assert_eq!(health.version, VERSION);
     let _ = harness.shutdown.send(true);
 }
@@ -154,11 +152,11 @@ async fn device_lifecycle_and_bundle_issue() {
         .await
         .expect("bundle");
     bundle
-        .validate("127.0.0.1".parse().expect("ip"))
+        .validate("relay.example.org")
         .expect("bundle is valid");
     assert_eq!(
         bundle.smp,
-        vec!["smp://smpCaFingerprint:smpQueuePassword@127.0.0.1:5223".to_string()]
+        vec!["smp://smpCaFingerprint:smpQueuePassword@relay.example.org:5223".to_string()]
     );
     assert_eq!(bundle.device, "mama-pixel-8");
     assert!(!bundle.net.presets_enabled);

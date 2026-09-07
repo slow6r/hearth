@@ -1,54 +1,74 @@
 # coturn — hearth (ТЗ §6.4).
 #
-# Rendered by hearthd on every `POST /rotate/turn-secret` (monthly, ТЗ §6.4) from
+# Rendered by hearthd on every `hearthctl rotate turn-secret` from
 # /etc/hearth/templates/turnserver.conf.tmpl to /etc/turnserver.conf.
-# Placeholders: {{LISTEN_IP}} {{LISTEN_PORT}} {{REALM}} {{TURN_SECRET}}
+# Placeholders: {{PORT}} {{TLS_PORT_LINE}} {{REALM}} {{TURN_SECRET}} {{MIN_PORT}} {{MAX_PORT}}
 #
 # DO NOT edit /etc/turnserver.conf by hand — the next rotation overwrites it.
+#
+# This server is REACHABLE FROM THE INTERNET, and it has to be: when both callers are
+# behind NAT (two phones on mobile networks), a relay is the only way a media path
+# exists at all. Everything below exists to make a public relay safe.
 
 # --- binding ---------------------------------------------------------------
-# ТЗ §5.1 / A1: never 0.0.0.0. One address, inside the home network.
-listening-ip={{LISTEN_IP}}
-relay-ip={{LISTEN_IP}}
-listening-port={{LISTEN_PORT}}
-# No alternate ports: coturn's RFC 5780 behaviour needs a second address we do not have.
-no-multicast-peers
-
-# --- transport -------------------------------------------------------------
-# ТЗ §6.4: no-tcp. Calls run over UDP inside WireGuard, which already provides
-# transport encryption and authentication; TLS/DTLS here would only add a second,
-# separately-managed certificate for no gain inside the tunnel.
-no-tcp
-no-tls
-no-dtls
+# Listen on every interface: clients arrive from anywhere. If this host has several
+# addresses, pin the right one with `listening-ip` and set `external-ip` when behind
+# NAT (external-ip=<public>/<private>) or ICE will advertise an unreachable candidate.
+listening-port={{PORT}}
+{{TLS_PORT_LINE}}
 fingerprint
 
+# Relay port range. MUST be open in the firewall — signalling succeeds without it and
+# then the call is silent, which is a miserable thing to debug.
+min-port={{MIN_PORT}}
+max-port={{MAX_PORT}}
+
 # --- authentication --------------------------------------------------------
-# Long-term credentials derived from a rotating static secret (TURN REST scheme).
-# hearthd mints per-device credentials into the bundle; no static users exist.
+# Short-lived credentials derived from a rotating static secret (TURN REST scheme).
+# hearthd mints them into each device's bundle; there is no user database to maintain
+# and nothing long-lived to leak.
 use-auth-secret
 static-auth-secret={{TURN_SECRET}}
 realm={{REALM}}
 stale-nonce=600
 
-# --- relay containment -----------------------------------------------------
-# A TURN server is by definition a packet forwarder, i.e. a potential egress path.
-# nftables already drops anything leaving the home networks; this is the second lock:
-# coturn itself will only ever relay to 10.66.0.0/16.
-denied-peer-ip=0.0.0.0-255.255.255.255
-denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
-allowed-peer-ip=10.66.0.0-10.66.255.255
+# --- what this relay may be pointed at -------------------------------------
+# A TURN server forwards packets on behalf of whoever authenticates. On a public
+# server that makes two things possible unless they are shut off explicitly:
+#   1. reaching this machine's own LAN and loopback (an SSRF into the home network);
+#   2. bouncing traffic at third parties.
+# Deny every private, loopback, link-local and reserved range. Public peers stay
+# allowed, which is all a call between two family members needs.
+no-multicast-peers
 no-loopback-peers
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.0.0.0-192.0.0.255
+denied-peer-ip=192.0.2.0-192.0.2.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=198.18.0.0-198.19.255.255
+denied-peer-ip=198.51.100.0-198.51.100.255
+denied-peer-ip=203.0.113.0-203.0.113.255
+denied-peer-ip=224.0.0.0-255.255.255.255
+denied-peer-ip=::1
+denied-peer-ip=64:ff9b::-64:ff9b::ffff:ffff
+denied-peer-ip=::ffff:0.0.0.0-::ffff:255.255.255.255
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 
 # --- limits ----------------------------------------------------------------
-# A family-sized контур: generous per device, bounded in total.
+# A family-sized contour, on a public port. Bound what an authenticated client can do,
+# so a leaked bundle cannot turn this into someone's free relay.
 total-quota=100
 user-quota=6
 max-bps=2000000
 
 # --- privacy / operations --------------------------------------------------
-# ТЗ §3.1: no client metadata beyond what is needed to run. Keep logging minimal and
-# rotate it; coturn logs allocations, which include client addresses.
+# coturn logs allocations, which contain client addresses. Keep it minimal and rotate.
 simple-log
 log-file=/var/log/coturn/turnserver.log
 no-cli

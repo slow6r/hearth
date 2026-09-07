@@ -107,20 +107,29 @@ fn run(cli: Cli) -> Result<()> {
 
     match cli.command.unwrap_or(Command::Run) {
         Command::Check => {
+            println!("config {} is valid", cli.config.display());
+            println!("  node:        {}", config.node.name);
             println!(
-                "config {} is valid: node {} at {}, api {}",
-                cli.config.display(),
-                config.node.name,
-                config.node.address,
-                config.api.listen
+                "  public host: {}  (clients connect here)",
+                config.node.host
             );
+            println!(
+                "  smp:         {:?}  xftp: {:?}",
+                config.smp.all_ports(),
+                config.xftp.all_ports()
+            );
+            println!(
+                "  turn:        {} (relay {}-{})",
+                config.turn.port, config.turn.relay_min_port, config.turn.relay_max_port
+            );
+            println!("  admin api:   {}  (LAN only)", config.api.listen);
             Ok(())
         }
         Command::Ca(CaCommand::Init { force }) => {
             let info = pki::init_ca(
                 &config.api.pki_dir,
                 &config.node.name,
-                config.node.address,
+                config.api.listen.ip(),
                 force,
             )?;
             println!("admin CA created in {}", config.api.pki_dir.display());

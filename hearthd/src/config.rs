@@ -40,17 +40,21 @@ pub struct Config {
     pub devices: Devices,
 }
 
-/// Node identity and the networks it is allowed to exist in.
+/// Node identity: how clients reach it, and which networks hearthd itself may talk to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Node {
     /// Human name for logs and alerts, e.g. `hearth-node`.
     pub name: String,
-    /// The address the relays bind to. Constant across hardware changes (ТЗ §2.5).
-    pub address: IpAddr,
-    /// Home + WireGuard networks. Everything outside is denied (ТЗ §5.1).
-    pub home_networks: Vec<IpNet>,
-    /// Subnet allowed to reach the admin API and ssh (ТЗ §5.3).
+    /// Public hostname or IP that appears in every client address — the constant that
+    /// outlives the hardware (ТЗ §2.5). Clients reach the relays here over the internet.
+    pub host: String,
+    /// Networks **hearthd itself** is allowed to connect to: the LAN holding the backup
+    /// target and the alert channel. The relays serve the internet; the control plane
+    /// still never leaves home (ТЗ §7.4).
+    pub lan_networks: Vec<IpNet>,
+    /// Networks allowed to reach the admin API and ssh. A subset of `lan_networks`:
+    /// the relays are public, administration is not.
     pub admin_networks: Vec<IpNet>,
 }
 
@@ -117,6 +121,10 @@ impl Paths {
 }
 
 /// A stock upstream relay supervised by hearthd. hearthd never touches its data.
+///
+/// Note on binding: upstream's `[TRANSPORT] host` is documented as "only used to print
+/// server address on start" — the server listens on every interface. So hearthd tracks
+/// *ports*, probes them on loopback, and leaves address filtering to nftables.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Relay {
@@ -126,8 +134,12 @@ pub struct Relay {
     pub unit: String,
     /// URI scheme used in client addresses: `smp` or `xftp`.
     pub scheme: String,
-    /// Public listener inside the home network, e.g. `10.66.10.10:5223`.
-    pub listen: SocketAddr,
+    /// Port advertised in client addresses, e.g. 5223.
+    pub port: u16,
+    /// Additional ports the relay also listens on. Upstream defaults to `5223,443`;
+    /// 443 is what gets through restrictive networks (hotel wifi, mobile operators).
+    #[serde(default)]
+    pub extra_ports: Vec<u16>,
     /// Control port, loopback only (ТЗ §6.2).
     #[serde(default)]
     pub control: Option<SocketAddr>,
@@ -142,18 +154,29 @@ pub struct Relay {
 }
 
 /// coturn (ТЗ §6.4).
+///
+/// Unlike the relays, TURN must be publicly reachable for a reason that is not about
+/// convenience: when both callers are behind NAT — two phones on mobile networks, which
+/// is the normal case — a relay is the only way the media path exists at all.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Turn {
     #[serde(default = "d_true")]
     pub enabled: bool,
     pub unit: String,
-    /// STUN/TURN listener, e.g. `10.66.10.10:3478`.
-    pub listen: SocketAddr,
+    /// Plain STUN/TURN port (UDP and TCP), conventionally 3478.
+    pub port: u16,
+    /// TLS port for `turns:`, conventionally 5349 or 443. Set only when a certificate
+    /// is configured; without TLS, calls fail on networks that allow only 443/tcp.
+    #[serde(default)]
+    pub tls_port: Option<u16>,
+    /// Range coturn allocates relay ports from. Must match `min-port`/`max-port` in
+    /// turnserver.conf and be open in the firewall, or media stops after signalling.
+    #[serde(default = "d_turn_min_port")]
+    pub relay_min_port: u16,
+    #[serde(default = "d_turn_max_port")]
+    pub relay_max_port: u16,
     pub realm: String,
-    /// Static part of the REST username: `<expiry-ts>:<username>`.
-    #[serde(default = "d_turn_user")]
-    pub username: String,
     pub secret_file: PathBuf,
     /// Template rendered by hearthd on secret rotation.
     pub config_template: PathBuf,
@@ -344,9 +367,13 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Egress policy derived from `node.home_networks`.
+    /// Egress policy for hearthd's own outbound connections (`node.lan_networks`).
+    ///
+    /// The relays face the internet; the control plane does not. Keeping this in place
+    /// costs nothing and preserves the property that any outbound attempt by the node
+    /// itself is both blocked and observed (ТЗ §5.4).
     pub fn egress_policy(&self) -> EgressPolicy {
-        EgressPolicy::new(self.node.home_networks.clone())
+        EgressPolicy::new(self.node.lan_networks.clone())
     }
 
     /// Relays in a stable order, for iteration.
@@ -354,43 +381,61 @@ impl Config {
         vec![&self.smp, &self.xftp]
     }
 
-    /// Enforce the structural invariants of ТЗ §4–§7.
+    /// Enforce the invariants that can be checked statically.
     pub fn validate(&self) -> Result<()> {
-        if self.node.home_networks.is_empty() {
-            return Err(Error::config("node.home_networks must not be empty"));
+        if self.node.host.trim().is_empty() {
+            return Err(Error::config(
+                "node.host must be the public hostname or IP clients connect to",
+            ));
+        }
+        if self.node.host.contains([':', '/', '@']) {
+            return Err(Error::config(format!(
+                "node.host `{}` must be a bare host, without scheme, port or credentials",
+                self.node.host
+            )));
+        }
+        if self.node.lan_networks.is_empty() {
+            return Err(Error::config("node.lan_networks must not be empty"));
         }
         let policy = self.egress_policy();
 
-        if !policy.permits_ip(self.node.address) {
-            return Err(Error::config(format!(
-                "node.address {} is outside node.home_networks",
-                self.node.address
-            )));
-        }
-
         for net in &self.node.admin_networks {
             let inside =
-                self.node.home_networks.iter().any(|home| {
-                    home.contains(&net.network()) && home.prefix_len() <= net.prefix_len()
+                self.node.lan_networks.iter().any(|lan| {
+                    lan.contains(&net.network()) && lan.prefix_len() <= net.prefix_len()
                 });
             if !inside {
                 return Err(Error::config(format!(
-                    "node.admin_networks entry {net} is not contained in node.home_networks"
+                    "node.admin_networks entry {net} is not contained in node.lan_networks; \
+                     the relays are public but administration must stay on the LAN"
                 )));
             }
         }
 
-        // A1: nothing may listen on a wildcard address.
-        check_listener("api.listen", self.api.listen, self.node.address)?;
+        // The relays bind every interface by design (upstream: `host` is cosmetic), so
+        // there is nothing to check there. The admin API is ours, and it must never be
+        // exposed: no wildcard bind.
+        if is_wildcard(&self.api.listen) {
+            return Err(Error::config(format!(
+                "api.listen binds the wildcard address {}; the admin API must be bound \
+                 to a LAN address, never to the internet",
+                self.api.listen
+            )));
+        }
+        if !policy.permits_ip(self.api.listen.ip()) {
+            return Err(Error::config(format!(
+                "api.listen {} is outside node.lan_networks",
+                self.api.listen
+            )));
+        }
+
         for relay in self.relays() {
             if !relay.enabled {
                 continue;
             }
-            check_listener(
-                &format!("{}.listen", relay.scheme),
-                relay.listen,
-                self.node.address,
-            )?;
+            if relay.port == 0 {
+                return Err(Error::config(format!("{}.port must be set", relay.scheme)));
+            }
             if let Some(control) = relay.control {
                 if !control.ip().is_loopback() {
                     return Err(Error::config(format!(
@@ -406,14 +451,40 @@ impl Config {
                 )));
             }
         }
+        if self.smp.enabled && self.xftp.enabled {
+            let smp_ports = self.smp.all_ports();
+            if let Some(clash) = self.xftp.all_ports().iter().find(|p| smp_ports.contains(p)) {
+                return Err(Error::config(format!("smp and xftp both use port {clash}")));
+            }
+        }
         if self.turn.enabled {
-            check_listener("turn.listen", self.turn.listen, self.node.address)?;
+            if self.turn.relay_min_port >= self.turn.relay_max_port {
+                return Err(Error::config(
+                    "turn.relay_min_port must be below turn.relay_max_port",
+                ));
+            }
+            let relay_range = self.turn.relay_min_port..=self.turn.relay_max_port;
+            for relay in self.relays() {
+                if relay.enabled {
+                    if let Some(clash) = relay
+                        .all_ports()
+                        .into_iter()
+                        .find(|p| relay_range.contains(p))
+                    {
+                        return Err(Error::config(format!(
+                            "{} port {clash} falls inside the TURN relay range \
+                             {}-{}; coturn would fight the relay for it",
+                            relay.scheme, self.turn.relay_min_port, self.turn.relay_max_port
+                        )));
+                    }
+                }
+            }
         }
 
         if let Some(remote) = &self.backup.remote {
             if !policy.permits_ip(remote.host) {
                 return Err(Error::config(format!(
-                    "backup.remote.host {} is outside the home networks",
+                    "backup.remote.host {} is outside node.lan_networks",
                     remote.host
                 )));
             }
@@ -435,7 +506,7 @@ impl Config {
         if let Some(gotify) = &self.alerts.gotify {
             if !policy.permits_ip(gotify.addr.ip()) {
                 return Err(Error::config(format!(
-                    "alerts.gotify.addr {} is outside the home networks \
+                    "alerts.gotify.addr {} is outside node.lan_networks \
                      (external alerting is forbidden by ТЗ §7.3)",
                     gotify.addr
                 )));
@@ -454,28 +525,43 @@ impl Config {
     }
 }
 
-fn check_listener(what: &str, addr: SocketAddr, node: IpAddr) -> Result<()> {
-    if is_wildcard(&addr) {
-        return Err(Error::config(format!(
-            "{what} binds the wildcard address {addr}; ТЗ §5.1 requires an explicit bind to {node}"
-        )));
+impl Relay {
+    /// Every port this relay listens on.
+    pub fn all_ports(&self) -> Vec<u16> {
+        let mut ports = vec![self.port];
+        ports.extend(self.extra_ports.iter().copied());
+        ports.sort_unstable();
+        ports.dedup();
+        ports
     }
-    if addr.ip() != node && !addr.ip().is_loopback() {
-        return Err(Error::config(format!(
-            "{what} binds {addr}, expected node.address {node} or loopback"
-        )));
+
+    /// Health probe target. The relay binds every interface, so loopback is the
+    /// cheapest honest way to ask "is it accepting connections?".
+    pub fn probe_addr(&self) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], self.port))
     }
-    Ok(())
+}
+
+impl Turn {
+    /// Ports coturn listens on for signalling (not the relay range).
+    pub fn all_ports(&self) -> Vec<u16> {
+        let mut ports = vec![self.port];
+        ports.extend(self.tls_port);
+        ports
+    }
 }
 
 fn d_true() -> bool {
     true
 }
+fn d_turn_min_port() -> u16 {
+    49160
+}
+fn d_turn_max_port() -> u16 {
+    49200
+}
 fn d_api_body_limit() -> usize {
     64 * 1024
-}
-fn d_turn_user() -> String {
-    "hearth".into()
 }
 fn d_turn_cred_ttl() -> u64 {
     24 * 3600
@@ -567,31 +653,34 @@ mod tests {
     }
 
     #[test]
-    fn rejects_wildcard_bind() {
+    fn admin_api_may_not_be_exposed() {
+        // The relays are public; the admin API must not be.
         let mut cfg = reference();
-        cfg.smp.listen = "0.0.0.0:5223".parse().expect("addr");
+        cfg.api.listen = "0.0.0.0:7443".parse().expect("addr");
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("wildcard"), "got {err}");
+
+        let mut cfg = reference();
+        cfg.api.listen = "203.0.113.10:7443".parse().expect("addr");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("lan_networks"), "got {err}");
     }
 
     #[test]
     fn rejects_non_loopback_control_port() {
         let mut cfg = reference();
-        cfg.smp.control = Some("10.66.10.10:5224".parse().expect("addr"));
+        cfg.smp.control = Some("192.168.1.10:5224".parse().expect("addr"));
         assert!(cfg.validate().is_err());
     }
 
     #[test]
-    fn rejects_backup_target_outside_home() {
+    fn rejects_backup_target_outside_the_lan() {
         let mut cfg = reference();
         if let Some(remote) = cfg.backup.remote.as_mut() {
             remote.host = "203.0.113.7".parse().expect("ip");
         }
         let err = cfg.validate().unwrap_err();
-        assert!(
-            err.to_string().contains("outside the home networks"),
-            "got {err}"
-        );
+        assert!(err.to_string().contains("lan_networks"), "got {err}");
     }
 
     #[test]
@@ -607,10 +696,42 @@ mod tests {
     }
 
     #[test]
-    fn rejects_admin_network_outside_home() {
+    fn rejects_admin_network_outside_the_lan() {
         let mut cfg = reference();
-        cfg.node.admin_networks = vec!["192.168.1.0/24".parse().expect("cidr")];
-        assert!(cfg.validate().is_err());
+        cfg.node.admin_networks = vec!["10.99.0.0/16".parse().expect("cidr")];
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("admin_networks"), "got {err}");
+    }
+
+    #[test]
+    fn rejects_a_host_that_is_not_a_bare_hostname() {
+        for bad in ["smp://relay.example.org", "relay.example.org:5223", ""] {
+            let mut cfg = reference();
+            cfg.node.host = bad.into();
+            assert!(cfg.validate().is_err(), "`{bad}` should be rejected");
+        }
+    }
+
+    #[test]
+    fn catches_port_collisions_between_services() {
+        let mut cfg = reference();
+        cfg.xftp.port = 443; // already in smp.extra_ports
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("both use port 443"), "got {err}");
+
+        // A relay port inside the TURN relay range would be taken by coturn.
+        let mut cfg = reference();
+        cfg.smp.port = 49170;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("TURN relay range"), "got {err}");
+    }
+
+    #[test]
+    fn relay_ports_include_the_extras() {
+        let cfg = reference();
+        assert_eq!(cfg.smp.all_ports(), vec![443, 5223]);
+        assert_eq!(cfg.smp.probe_addr().port(), 5223);
+        assert!(cfg.smp.probe_addr().ip().is_loopback());
     }
 
     #[test]

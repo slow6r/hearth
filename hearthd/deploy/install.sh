@@ -106,7 +106,7 @@ cat <<'NEXT'
 == remaining steps (each needs a decision, so the script stops here)
 
   1. Relay init (once, ТЗ §6.2/§6.3) — see relays/README.md:
-       smp-server init -y -l --ip 10.66.10.10 --password "$(openssl rand -hex 24)"
+       NODE_HOST=<ваш домен> ./relays/smp/init-smp.sh
        xftp-server init ...
      Then copy the passwords into /etc/hearth/secrets/{smp,xftp}-create-password (0600).
 

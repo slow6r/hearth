@@ -21,8 +21,8 @@
 Старый продолжает работать — иначе семья остаётся без связи на время процедуры.
 
 ```bash
-# на узле, с другим адресом (например 10.66.10.11)
-CONFIG_DIR=/etc/opt/simplex-new NODE_IP=10.66.10.11 ./relays/smp/init-smp.sh
+# на узле, во втором каталоге и на других портах
+CONFIG_DIR=/etc/opt/simplex-new NODE_HOST=relay2.example.org ./relays/smp/init-smp.sh
 ```
 
 Новый init создаёт **новый CA и новый пароль** — то есть новый адрес.

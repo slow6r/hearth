@@ -51,7 +51,7 @@ impl AppState {
             store::read_json(config.paths.migrate_status_file())?.unwrap_or_default();
 
         let node = config.node.name.clone();
-        let address = config.node.address.to_string();
+        let address = config.node.host.clone();
 
         Ok(Arc::new(Self {
             config: Arc::new(config),

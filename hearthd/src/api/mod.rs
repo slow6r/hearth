@@ -171,7 +171,7 @@ mod tests {
     fn state_with_pki(dir: &std::path::Path) -> (Arc<AppState>, pki::IssuedAdmin) {
         let config = crate::state::tests::test_config(dir);
         let pki_dir = config.api.pki_dir.clone();
-        pki::init_ca(&pki_dir, "hearth-node", config.node.address, false).expect("ca");
+        pki::init_ca(&pki_dir, "hearth-node", config.api.listen.ip(), false).expect("ca");
         let issued = pki::issue_admin(&pki_dir, "owner", 30).expect("issue");
         let state = AppState::new(config, Sys::new(true)).expect("state");
         (state, issued)
@@ -181,7 +181,7 @@ mod tests {
     fn authorizes_an_issued_certificate() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (state, issued) = state_with_pki(dir.path());
-        let peer = "10.66.0.5:40000".parse().expect("addr");
+        let peer = "192.168.1.5:40000".parse().expect("addr");
         let admin = authorize(&state, &issued.fingerprint, peer).expect("authorized");
         assert_eq!(admin.name, "owner");
     }
@@ -190,7 +190,7 @@ mod tests {
     fn rejects_an_unknown_certificate() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (state, _issued) = state_with_pki(dir.path());
-        let peer = "10.66.0.5:40000".parse().expect("addr");
+        let peer = "192.168.1.5:40000".parse().expect("addr");
         let err = authorize(&state, &"0".repeat(64), peer).unwrap_err();
         assert!(matches!(err, Error::Unauthorized(_)), "got {err:?}");
     }
@@ -199,7 +199,7 @@ mod tests {
     fn rejects_a_revoked_certificate_immediately() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (state, issued) = state_with_pki(dir.path());
-        let peer = "10.66.0.5:40000".parse().expect("addr");
+        let peer = "192.168.1.5:40000".parse().expect("addr");
         assert!(authorize(&state, &issued.fingerprint, peer).is_ok());
 
         AdminRegistry::load(&state.config.api.pki_dir)
@@ -218,13 +218,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = crate::state::tests::test_config(dir.path());
         let pki_dir = config.api.pki_dir.clone();
-        pki::init_ca(&pki_dir, "hearth-node", config.node.address, false).expect("ca");
+        pki::init_ca(&pki_dir, "hearth-node", config.api.listen.ip(), false).expect("ca");
         let issued = pki::issue_admin(&pki_dir, "owner", 30).expect("issue");
 
         let mut config = config;
         config.api.allowed_admin_fingerprints = vec!["a".repeat(64)];
         let state = AppState::new(config, Sys::new(true)).expect("state");
-        let peer = "10.66.0.5:40000".parse().expect("addr");
+        let peer = "192.168.1.5:40000".parse().expect("addr");
         let err = authorize(&state, &issued.fingerprint, peer).unwrap_err();
         assert!(err.to_string().contains("not pinned"), "got {err}");
     }

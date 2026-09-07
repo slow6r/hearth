@@ -34,7 +34,7 @@ if [[ -z "$EGRESS" ]]; then
 fi
 
 echo "  egress_drop  = $EGRESS  (ожидание: 0)"
-echo "  input_drop   = ${INPUT:-?}   (ненулевой — норма: это сканы и шум сети)"
+echo "  input_drop   = ${INPUT:-?}   (на публичном узле растёт постоянно — это сканы интернета, норма)"
 echo "  forward_drop = ${FORWARD:-?}   (ожидание: 0, узел не роутер)"
 
 if [[ "$EGRESS" -ne 0 ]]; then

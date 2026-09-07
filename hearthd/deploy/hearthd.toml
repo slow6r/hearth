@@ -1,30 +1,36 @@
 # hearthd — reference configuration.
 #
 # Deployed to /etc/hearth/hearthd.toml (root:hearth 0640).
-# Every value here is checked by Config::validate() at start-up; unknown keys are a
-# hard error on purpose (a typo in a security key must not silently default).
+# Every value is checked by Config::validate() at start-up; unknown keys are a hard
+# error on purpose (a typo in a security key must not silently default).
 #
-# ТЗ references are given per section.
+# DEPLOYMENT MODEL: the relays are reachable from the internet, exactly like any other
+# SimpleX server. Message content is end-to-end encrypted and the relay CA fingerprint
+# is pinned inside every client address, so a public relay is upstream's normal mode.
+# What stays private to the LAN: this control plane, its admin API, and ssh.
 
 [node]
 name = "hearth-node"
-# ТЗ §2.5: this address outlives the hardware. It does not change on the ПК → mini-PC move.
-address = "10.66.10.10"
-# ТЗ §5.1 — home + WireGuard space. hearthd refuses to open a socket outside this.
-home_networks = ["10.66.0.0/16"]
-# ТЗ §5.3 — only this subnet may reach the admin API.
-admin_networks = ["10.66.0.0/24"]
+# ==> SET THIS. The public hostname (or IP) clients connect to. It goes into every
+# client address, so it outlives the hardware — changing it means every family member
+# re-adds every contact (docs/runbook-rotate-address.md).
+# A hostname with dynamic DNS is usually right for a home connection; a bare IP works
+# only if your ISP address is static.
+host = "relay.example.org"
+# Networks hearthd ITSELF may connect to (backup target, alert channel). The relays
+# serve the internet; the control plane never leaves the LAN. Adjust to your LAN.
+lan_networks = ["192.168.1.0/24"]
+# Who may reach the admin API and ssh. Must be inside lan_networks.
+admin_networks = ["192.168.1.0/24"]
 
 [api]
-# ТЗ §7.3 — mTLS admin API, reachable from the admin subnet only.
-listen = "10.66.10.10:7443"
+# Admin API: LAN address only, never a wildcard bind. Config::validate refuses both.
+listen = "192.168.1.10:7443"
 pki_dir = "/etc/hearth/pki"
-# Optional extra pinning on top of admins.json. Empty = any non-revoked issued cert.
 allowed_admin_fingerprints = []
 max_body_bytes = 65536
 
 [paths]
-# ТЗ §10.1 — everything the node owns lives in these directories.
 simplex_etc = "/etc/opt/simplex"
 simplex_var = "/var/opt/simplex"
 hearth_etc = "/etc/hearth"
@@ -33,14 +39,21 @@ secrets_dir = "/etc/hearth/secrets"
 manifest = "/etc/hearth/manifest.toml"
 
 # ---------------------------------------------------------------------------
-# Relays — stock upstream binaries. hearthd supervises them and never edits data.
+# Relays — stock upstream binaries. hearthd supervises them, never edits their data.
+#
+# Upstream documents `[TRANSPORT] host` as "only used to print server address on
+# start": the server listens on every interface. So only ports are configured here,
+# and address filtering is the firewall's job.
 # ---------------------------------------------------------------------------
 
 [smp]
 enabled = true
 unit = "smp-server.service"
 scheme = "smp"
-listen = "10.66.10.10:5223"
+port = 5223
+# Upstream's own default is "5223,443". Port 443 is what gets through hotel wifi and
+# restrictive mobile networks — keep it unless something else needs 443 on this host.
+extra_ports = [443]
 control = "127.0.0.1:5224"
 config_file = "/etc/opt/simplex/smp-server.ini"
 fingerprint_file = "/etc/opt/simplex/fingerprint"
@@ -51,7 +64,8 @@ process = "smp-server"
 enabled = true
 unit = "xftp-server.service"
 scheme = "xftp"
-listen = "10.66.10.10:5443"
+port = 5443
+extra_ports = []
 control = "127.0.0.1:5444"
 config_file = "/etc/opt/simplex-xftp/file-server.ini"
 fingerprint_file = "/etc/opt/simplex-xftp/fingerprint"
@@ -59,20 +73,30 @@ password_file = "/etc/hearth/secrets/xftp-create-password"
 process = "xftp-server"
 
 [turn]
-# ТЗ §6.4 — coturn with a rotating static secret; no public STUN/TURN anywhere.
+# Voice and video calls. When both parties are behind NAT — two phones on mobile
+# networks, i.e. the normal case — TURN is the only way a media path exists at all,
+# so this must be reachable from the internet.
 enabled = true
 unit = "coturn.service"
-listen = "10.66.10.10:3478"
+port = 3478
+# Set once you have a certificate (e.g. Let's Encrypt for node.host). Without TLS,
+# calls fail on networks that permit only 443/tcp. 5349 is the conventional port;
+# 443 would collide with smp extra_ports above.
+# tls_port = 5349
+relay_min_port = 49160
+relay_max_port = 49200
 realm = "hearth"
-username = "hearth"
 secret_file = "/etc/hearth/secrets/turn-secret"
 config_template = "/etc/hearth/templates/turnserver.conf.tmpl"
 config_file = "/etc/turnserver.conf"
-credential_ttl_secs = 86400
+# Credential lifetime. Bundles are issued once per device, so a short TTL means calls
+# stop working a day later while messages keep flowing — confusing. Match it to the
+# secret rotation period instead.
+credential_ttl_secs = 2592000
 rotate_days = 30
 
 # ---------------------------------------------------------------------------
-# hearthd modules (ТЗ §7.3)
+# hearthd modules
 # ---------------------------------------------------------------------------
 
 [supervisor]
@@ -84,7 +108,8 @@ restart_window_secs = 600
 restart_enabled = true
 
 [egress]
-# ТЗ §5.4 / §7.3 — the leak detector. Expected value of egress_drop over 24h is 0.
+# The relays accept connections from the internet; this watches the OTHER direction —
+# anything on this host trying to reach out. Expected value over 24h is still 0.
 poll_interval_secs = 30
 socket_scan_interval_secs = 300
 nft_family = "inet"
@@ -92,15 +117,15 @@ nft_table = "hearth"
 egress_counter = "egress_drop"
 input_counter = "input_drop"
 journal_prefix = "hearth-egress-drop"
-watch_processes = ["smp-server", "xftp-server", "turnserver"]
+# Relay sockets to the internet are normal now (clients connect in), so the socket
+# scanner only watches processes that should never talk outward at all.
+watch_processes = []
 
 [integrity]
-# ТЗ §7.3 / A12 — sha256 of every pinned binary against manifest.toml.
 interval_secs = 3600
 stop_relays_on_mismatch = true
 
 [backup]
-# ТЗ §7.3 — daily age-encrypted archive pushed to hearth-backup.
 enabled = true
 hour_utc = 3
 paths = [
@@ -111,24 +136,23 @@ paths = [
     "/var/lib/hearth",
 ]
 spool_dir = "/var/opt/hearth/backup"
-# Public age keys of the owner(s). The PRIVATE key never touches this machine
-# (ТЗ §7.3: YubiKey / offline). Replace with real recipients before deployment.
+# ==> SET THIS. Public age key of the owner. The PRIVATE key never touches this
+# machine (YubiKey / offline copy). See keys/README.md.
 recipients = [
     "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsyfhqz",
 ]
 retention_days = 14
 
 [backup.remote]
-host = "10.66.10.20"
+host = "192.168.1.20"
 port = 22
 user = "hearth-backup"
 path = "/srv/hearth-backup"
 ssh_key = "/etc/hearth/secrets/backup_ed25519"
 
 [alerts]
-# ТЗ §7.3 — journal + WG-only Gotify on the UDM Pro. External channels are forbidden.
 [alerts.gotify]
-addr = "10.66.0.1:8088"
+addr = "192.168.1.1:8088"
 token_file = "/etc/hearth/secrets/gotify-token"
 priority = 8
 min_severity = "warning"
@@ -138,5 +162,4 @@ command = ["/usr/local/sbin/hearth-beep"]
 min_severity = "critical"
 
 [devices]
-# ТЗ §1.1 — a closed circle, at most 20 devices.
 max_devices = 20

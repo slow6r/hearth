@@ -6,19 +6,21 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * The device-side half of the bundle contract (ТЗ Приложение B).
+ * The device-side half of the bundle contract.
  *
- * These run on the JVM without an emulator, and they exist so that an upstream rebase
- * that changes serialization defaults fails here rather than on a family member's phone.
+ * Runs on the JVM without an emulator, so an upstream rebase that changes a default
+ * fails here rather than on a family member's phone.
  */
 class HearthBundleTest {
 
+  private val host = "relay.example.org"
+
   private val valid = """
     {"v":1,
-     "smp":["smp://fp1:pass1@10.66.10.10:5223"],
-     "xftp":["xftp://fp2:pass2@10.66.10.10:5443"],
-     "ice":[{"urls":["stun:10.66.10.10:3478"]},
-            {"urls":["turn:10.66.10.10:3478"],"username":"1757160000:hearth","credential":"aGk="}],
+     "smp":["smp://fp1:pass1@relay.example.org:5223"],
+     "xftp":["xftp://fp2:pass2@relay.example.org:5443"],
+     "ice":["stun:relay.example.org:3478",
+            "turn:1757160000:aGVhcnRoK2NyZWQ=@relay.example.org:3478"],
      "net":{"privateRouting":"always","presetsEnabled":false,"ntfMode":"instant"},
      "issued":"2026-09-06T12:00:00Z",
      "device":"mama-pixel8"}
@@ -29,39 +31,56 @@ class HearthBundleTest {
     val bundle = HearthBundle.parse(valid).getOrThrow()
     assertEquals(1, bundle.v)
     assertEquals("mama-pixel8", bundle.device)
-    assertEquals(listOf("10.66.10.10"), bundle.hosts())
+    assertEquals(host, bundle.host())
     assertEquals(2, bundle.ice.size)
     assertFalse(bundle.net.presetsEnabled)
   }
 
   @Test
   fun rejectsAPublicRelay() {
-    val payload = valid.replace("smp://fp1:pass1@10.66.10.10:5223", "smp://fp1:pass1@smp8.simplex.im:5223")
-    assertTrue(HearthBundle.parse(payload).isFailure, "a public relay must never be accepted")
+    val payload = valid.replace("smp://fp1:pass1@relay.example.org:5223", "smp://fp1:pass1@smp8.simplex.im:5223")
+    assertTrue(HearthBundle.parse(payload).isFailure, "a foreign relay must never be accepted")
   }
 
   @Test
   fun rejectsAPublicStun() {
-    val payload = valid.replace("stun:10.66.10.10:3478", "stun:stun.l.google.com:19302")
-    assertTrue(HearthBundle.parse(payload).isFailure, "a public STUN would leak the address")
+    val payload = valid.replace("stun:relay.example.org:3478", "stun:stun.simplex.im:443")
+    assertTrue(HearthBundle.parse(payload).isFailure, "a public STUN would leak the caller's address")
+  }
+
+  @Test
+  fun rejectsAMixedHostBundle() {
+    val payload = valid.replace("xftp://fp2:pass2@relay.example.org:5443", "xftp://fp2:pass2@other.example.org:5443")
+    assertTrue(HearthBundle.parse(payload).isFailure)
+  }
+
+  @Test
+  fun rejectsTurnWithoutCredentials() {
+    val payload = valid.replace("turn:1757160000:aGVhcnRoK2NyZWQ=@relay.example.org:3478", "turn:relay.example.org:3478")
+    assertTrue(HearthBundle.parse(payload).isFailure)
+  }
+
+  @Test
+  fun rejectsCredentialsTheClientWouldDiscard() {
+    // A '/' in the credential starts a URI path; parseRTCIceServers then returns null
+    // for the whole list and the client silently falls back to public servers.
+    val payload = valid.replace("aGVhcnRoK2NyZWQ=", "aGVhcnRo/2NyZWQ=")
+    assertTrue(HearthBundle.parse(payload).isFailure)
   }
 
   @Test
   fun rejectsEnabledOperatorPresets() {
-    val payload = valid.replace("\"presetsEnabled\":false", "\"presetsEnabled\":true")
-    assertTrue(HearthBundle.parse(payload).isFailure)
+    assertTrue(HearthBundle.parse(valid.replace("\"presetsEnabled\":false", "\"presetsEnabled\":true")).isFailure)
   }
 
   @Test
   fun rejectsNonInstantDelivery() {
-    val payload = valid.replace("\"ntfMode\":\"instant\"", "\"ntfMode\":\"periodic\"")
-    assertTrue(HearthBundle.parse(payload).isFailure)
+    assertTrue(HearthBundle.parse(valid.replace("\"ntfMode\":\"instant\"", "\"ntfMode\":\"periodic\"")).isFailure)
   }
 
   @Test
   fun rejectsARelayAddressWithoutAPassword() {
-    val payload = valid.replace("smp://fp1:pass1@", "smp://fp1@")
-    assertTrue(HearthBundle.parse(payload).isFailure)
+    assertTrue(HearthBundle.parse(valid.replace("smp://fp1:pass1@", "smp://fp1@")).isFailure)
   }
 
   @Test
@@ -76,11 +95,10 @@ class HearthBundleTest {
   }
 
   @Test
-  fun ipLiteralDetection() {
-    assertTrue(isIpLiteral("10.66.10.10"))
-    assertFalse(isIpLiteral("smp8.simplex.im"))
-    assertFalse(isIpLiteral("10.66.10"))
-    assertFalse(isIpLiteral("999.1.1.1"))
+  fun acceptsABareIpHost() {
+    val payload = valid.replace("relay.example.org", "203.0.113.10")
+    val bundle = HearthBundle.parse(payload).getOrThrow()
+    assertEquals("203.0.113.10", bundle.host())
   }
 
   @Test

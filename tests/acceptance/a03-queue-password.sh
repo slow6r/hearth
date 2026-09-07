@@ -53,6 +53,7 @@ check_secret "$SECRETS/smp-create-password" smp
 check_secret "$SECRETS/xftp-create-password" xftp
 
 echo
-echo "  Полная проверка A3 — с устройства: добавить smp://<fp>@10.66.10.10:5223"
+echo "  Полная проверка A3 — с устройства: добавить smp://<fp>@<node.host>:5223"
 echo "  (без пароля) и попытаться создать контакт. Ожидание: отказ."
+echo "  На публичном релее это единственный замок против посторонних."
 exit $status

@@ -1,57 +1,86 @@
-# smp-server.ini — эталон намерений hearth (ТЗ §6.2).
+# smp-server.ini — целевая конфигурация hearth.
 #
-# ЭТО НЕ ГОТОВЫЙ ФАЙЛ. Источник истины — ini, который сгенерировал `smp-server init`
-# вашего пинованного тега. Имена ключей между версиями upstream менялись; сверяйте:
+# Ключи и секции сверены с исходниками simplexmq v7.0.1
+# (src/Simplex/Messaging/Server/Main/Init.hs, функция iniFileContent).
+# Разделитель — ` = `, как у upstream. При переходе на другой тег сверяйте:
 #
 #   ./verify-ini-keys.sh /etc/opt/simplex/smp-server.ini smp/smp-server.ini.example
 #
-# Каждый параметр снабжён комментарием «зачем», чтобы при переходе на новую версию
-# было понятно, что именно нужно сохранить, даже если ключ переименовали.
-
-[STORE_LOG]
-# ТЗ §6.2: store log включён. Без него узел, выключенный на 10 минут, теряет
-# недоставленные сообщения — это ломает acceptance-тест A7.
-enable: on
-# Восстанавливать очереди из лога при старте.
-restore_messages: on
-# Статистика по очередям — это метаданные. Не нужна (ТЗ §3.1).
-log_stats: off
-# ТЗ §6.2: TTL сообщений 21 день. То же окно используется при ротации адреса (§10.5).
-expire_messages_days: 21
-# Уведомлений в контуре нет, но если ключ присутствует — минимальный TTL.
-expire_ntfs_hours: 24
-
-[AUTH]
-# ТЗ §6.2: новые очереди разрешены (иначе новое устройство не заведётся)...
-new_queues: on
-# ...но только с паролем. Это то, что проверяет acceptance-тест A3.
-# Значение подставляет init-smp.sh; копия — в /etc/hearth/secrets/smp-create-password.
-create_password: REPLACE_WITH_GENERATED_PASSWORD
-
-[TRANSPORT]
-# ТЗ §5.1 / A1: только адрес узла. Никаких 0.0.0.0.
-host: 10.66.10.10
-port: 5223
-# ТЗ §6.2: control port только на loopback — его опрашивает hearthd (health-check).
-control_port: 5224
-# WebSockets не нужны: браузерных клиентов в контуре нет, это лишняя поверхность.
-websockets: off
-# В TLS-ошибки попадают адреса клиентов. Не логируем (ТЗ §3.1).
-log_tls_errors: off
-
-[INACTIVE_CLIENTS]
-# Телефон в WG может «молчать» часами при экономии батареи. Не выкидываем его.
-disconnect: off
-
-[PROXY]
-# ТЗ §6.2: private message routing включён (релей >= 5.8). Отправитель не раскрывает
-# свой релей получателю, и наоборот.
-# Имена ключей (own_servers / own_server_domains / sock_proxy) сверить с версией.
-own_servers: smp://10.66.10.10:5223
+# Источник истины — файл, который сгенерировал `smp-server init` вашей версии.
+# Здесь зафиксировано, ЧТО именно должно получиться и почему.
 
 [INFORMATION]
-# ТЗ §6.2: минимальная information page. Ссылка на исходники — требование AGPL.
-source_code: https://github.com/simplex-chat/simplexmq
-# Всё остальное (operator, admin_email, hosting, website, country) — пустое.
-# Никаких реальных имён, адресов и контактов: страница видна каждому, кто дотянулся
-# до порта, а контур семейный.
+# Обязательство AGPL: ссылка на исходники должна быть доступна.
+source_code = https://github.com/simplex-chat/simplexmq
+# Всё остальное (usage_conditions, website, admin_simplex, complaints_simplex,
+# hosting_type, country) оставляем пустым. Сервер публичный по сети, но не публичный
+# по смыслу: он обслуживает одну семью, и незачем печатать на нём чьи-то контакты.
+
+[STORE_LOG]
+# Без этого узел, перезагруженный на 10 минут, теряет недоставленные сообщения.
+enable = on
+# Хранение записей очередей: memory (+ store log) достаточно для семьи.
+# PostgreSQL (`database`) — это лишний демон, лишний бэкап и лишняя поверхность.
+store_queues = memory
+store_messages = memory
+# Восстанавливать недоставленные сообщения при старте.
+restore_messages = on
+# 21 день — это и есть upstream-дефолт (defMsgExpirationDays), совпадает с окном
+# ротации адреса.
+expire_messages_days = 21
+expire_messages_on_start = on
+expire_messages_on_send = off
+expire_ntfs_hours = 24
+# Суточная статистика в CSV — это метаданные. Не нужна.
+log_stats = off
+
+[AUTH]
+# Очереди создавать можно...
+new_queues = on
+# ...но только с паролем. На публично доступном релее это ЕДИНСТВЕННОЕ, что отделяет
+# посторонних от создания очередей: пароль подставляет init-smp.sh, копия лежит
+# в /etc/hearth/secrets/smp-create-password, откуда его читает hearthd для bundle.
+# Требования upstream к символам: печатаемый ASCII без пробелов, '@', ':' и '/'.
+create_password = REPLACE_WITH_GENERATED_PASSWORD
+# Пароли control port. Задать оба: без них control port принимает команды без проверки.
+control_port_admin_password = REPLACE_WITH_GENERATED_PASSWORD
+control_port_user_password = REPLACE_WITH_GENERATED_PASSWORD
+
+[TRANSPORT]
+# ВАЖНО: upstream документирует host как "only used to print server address on start".
+# Этот параметр НЕ биндит — сервер слушает все интерфейсы. Ограничение адресов —
+# задача nftables, а не ini.
+host = relay.example.org
+# Дефолт upstream — "5223,443". 443 нужен, чтобы клиент пробивался из сетей, где
+# открыт только он (отели, часть мобильных операторов). Требует CAP_NET_BIND_SERVICE.
+port = 5223,443
+# Control port только на loopback — его опрашивает hearthd.
+control_port = 5224
+# В TLS-ошибки попадают адреса клиентов.
+log_tls_errors = off
+# Deprecated у upstream, для тестов. Не включать.
+websockets = off
+
+[PROXY]
+# Приватный роутинг (SMP proxy). Клиент включает его сам; здесь — серверная часть.
+# own_server_domains: домены, которые считаются «своими» в статистике прокси.
+own_server_domains = relay.example.org
+# SOCKS-прокси наружу не используем: узлу нечего проксировать в публичную сеть.
+# socks_proxy = localhost:9050
+
+[NAMES]
+# Публичное разрешение имён через внешний REST-резолвер. Для закрытого контура — нет:
+# это исходящие обращения к стороннему сервису.
+enable: off
+
+[INACTIVE_CLIENTS]
+# Телефон в энергосбережении молчит часами. Дефолт upstream — disconnect = on;
+# для семейного релея на 20 устройств экономить сокеты незачем, а переподключения
+# стоят батареи.
+disconnect = off
+
+[WEB]
+# Статическая мини-страница сервера. Оставляем путь пустым и HTTP-сервер не включаем:
+# наружу и так торчат только нужные порты, лишний веб-сервер там не нужен.
+# static_path =
+# http = 8000

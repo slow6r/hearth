@@ -31,7 +31,7 @@ object HearthPresets {
   const val PRIVATE_ROUTING_DEFAULT = "always"
 
   /**
-   * ТЗ §8.2 п.4: delivery is a foreground service holding a connection inside WireGuard.
+   * Delivery is a foreground service holding a persistent connection to our relay.
    * There is no notification server in the contour, so Periodic/Push are not offered.
    */
   const val NOTIFICATION_MODE = "instant"
@@ -47,7 +47,7 @@ object HearthPresets {
    * which is the correct outcome — a call that succeeds via `stun.l.google.com` has
    * already leaked the participant's address (ТЗ §6.4).
    */
-  fun defaultIceServers(applied: HearthBundle?): List<HearthIceServer> =
+  fun defaultIceServers(applied: HearthBundle?): List<String> =
     applied?.ice ?: emptyList()
 
   /**
@@ -67,5 +67,5 @@ object HearthPresets {
 data class HearthServers(
   val smp: List<String>,
   val xftp: List<String>,
-  val ice: List<HearthIceServer>,
+  val ice: List<String>,
 )

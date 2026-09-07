@@ -83,21 +83,22 @@ impl Supervisor {
         let mut watched = Vec::new();
         for relay in config.relays() {
             if relay.enabled {
+                // The relay binds every interface, so loopback is the honest probe.
                 watched.push(Watched::new(
                     &relay.scheme,
                     &relay.unit,
-                    relay.listen,
+                    relay.probe_addr(),
                     relay.control,
                 ));
             }
         }
         if config.turn.enabled {
-            // coturn listens on UDP; there is no TCP probe for it, so the systemd state
-            // is the only signal. `listen` is kept for reporting.
+            // coturn's signalling port is UDP; a TCP probe would always fail, so the
+            // systemd state is the only signal. The address is kept for reporting.
             watched.push(Watched::new(
                 "turn",
                 &config.turn.unit,
-                config.turn.listen,
+                std::net::SocketAddr::from(([127, 0, 0, 1], config.turn.port)),
                 None,
             ));
         }
@@ -143,7 +144,7 @@ impl Supervisor {
 
         let snapshot = HealthSnapshot {
             node: config.node.name.clone(),
-            address: config.node.address.to_string(),
+            address: config.node.host.clone(),
             checked: now,
             state: overall,
             services,

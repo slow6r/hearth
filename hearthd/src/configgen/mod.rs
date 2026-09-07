@@ -35,13 +35,8 @@ pub fn build_bundle(config: &Config, device: &Device) -> Result<Bundle> {
 
     let ice = if config.turn.enabled {
         let secret = store::read_secret(&config.turn.secret_file)?;
-        let cred = turn::credential(
-            &secret,
-            &config.turn.username,
-            config.turn.credential_ttl_secs,
-            Utc::now(),
-        )?;
-        turn::ice_servers(&config.turn, &cred)
+        let cred = turn::credential(&secret, config.turn.credential_ttl_secs, Utc::now())?;
+        turn::ice_servers(&config.turn, &config.node.host, &cred)?
     } else {
         Vec::new()
     };
@@ -55,7 +50,7 @@ pub fn build_bundle(config: &Config, device: &Device) -> Result<Bundle> {
         issued: Utc::now(),
         device: device.id.clone(),
     };
-    bundle.validate(config.node.address)?;
+    bundle.validate(&config.node.host)?;
     Ok(bundle)
 }
 
@@ -80,8 +75,8 @@ fn server_uri(config: &Config, relay: &Relay) -> Result<ServerUri> {
         &relay.scheme,
         &fingerprint,
         Some(&password),
-        config.node.address,
-        relay.listen.port(),
+        &config.node.host,
+        relay.port,
     )
 }
 
@@ -102,57 +97,49 @@ pub fn manual_checklist(device: &Device, bundle: &Bundle) -> String {
     } else {
         bundle.xftp.join("\n     ")
     };
-    let ice = bundle
-        .ice
-        .iter()
-        .flat_map(|s| s.urls.iter())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n     ");
-    let turn_user = bundle
-        .ice
-        .iter()
-        .find_map(|s| s.username.clone())
-        .unwrap_or_else(|| "(нет)".into());
-    let turn_cred = bundle
-        .ice
-        .iter()
-        .find_map(|s| s.credential.clone())
-        .unwrap_or_else(|| "(нет)".into());
+    // ICE entries are already in the exact string form the client parses, so the
+    // checklist can say "paste these lines" instead of describing three fields.
+    let ice = if bundle.ice.is_empty() {
+        "(звонки не настроены — TURN выключен)".to_string()
+    } else {
+        bundle.ice.join("\n     ")
+    };
 
     format!(
         "Ручная настройка устройства: {name} [{id}]\n\
          Платформа: {platform}\n\
          Выпущено: {issued}\n\
          \n\
-         ВНИМАНИЕ: строки ниже содержат пароли релеев. Показывать только внутри WG,\n\
+         ВНИМАНИЕ: строки ниже содержат пароли релеев и TURN-креды. Показывать лично,\n\
          не пересылать через другие мессенджеры, не сохранять в облако.\n\
          \n\
-         1. Подключить устройство к семейному WireGuard/AmneziaWG (профиль на UDM Pro).\n\
-            Проверка: ping 10.66.10.10 отвечает.\n\
+         1. Настройки → Network & servers → Operators: выключить ВСЕХ операторов\n\
+            (SimpleX Chat, Flux и любых других). Пока хоть один включён, часть трафика\n\
+            пойдёт через публичные релеи.\n\
          \n\
-         2. Настройки → Network & servers → Operators: выключить всех операторов\n\
-            (SimpleX Chat, Flux и любых других). Пресеты публичной сети должны быть\n\
-            выключены полностью — иначе клиент уйдёт на чужие релеи.\n\
-         \n\
-         3. SMP servers: удалить все предустановленные, добавить только:\n\
+         2. SMP servers: удалить все предустановленные, добавить только:\n\
             {smp}\n\
             Отметить «Use for new connections».\n\
          \n\
-         4. XFTP servers: удалить все предустановленные, добавить только:\n\
+         3. XFTP servers: удалить все предустановленные, добавить только:\n\
             {xftp}\n\
          \n\
-         5. Settings → Audio & video calls → WebRTC ICE servers: заменить содержимое на\n\
+         4. Settings → Audio & video calls → WebRTC ICE servers: заменить содержимое\n\
+            целиком на эти строки (по одной в строке, как есть):\n\
             {ice}\n\
-            TURN username:   {turn_user}\n\
-            TURN credential: {turn_cred}\n\
-            Публичные STUN (stun.l.google.com и подобные) удалить.\n\
+            Публичные STUN/TURN (stun.simplex.im, stun.l.google.com) удалить.\n\
+            Важно: если хоть одна строка введена с ошибкой, клиент отбросит весь\n\
+            список и молча вернётся на публичные серверы.\n\
          \n\
-         6. Private message routing: Always (и «Show message status» по вкусу).\n\
+         5. Private message routing: Always.\n\
             Notifications: Instant. Push/Periodic не использовать — сервера уведомлений\n\
             в контуре нет.\n\
          \n\
-         Проверка: отправить сообщение члену семьи; в hearthctl health узел ok.\n",
+         6. Отключить облачный бэкап приложения (iCloud / Google Backup) и включить\n\
+            блокировку приложения (Face ID / код).\n\
+         \n\
+         Проверка: отправить сообщение члену семьи и сделать тестовый звонок;\n\
+         на узле — hearthctl health.\n",
         name = device.name,
         id = device.id,
         issued = crate::model::fmt_ts(bundle.issued),
@@ -205,18 +192,25 @@ mod tests {
         let config = config_with(dir.path());
 
         let bundle = build_bundle(&config, &device()).expect("bundle");
+        let host = &config.node.host;
         assert_eq!(bundle.v, 1);
         assert_eq!(
             bundle.smp,
-            vec!["smp://smpFingerPrintAbC:smpPassword123@10.66.10.10:5223".to_string()]
+            vec![format!(
+                "smp://smpFingerPrintAbC:smpPassword123@{host}:5223"
+            )]
         );
         assert_eq!(
             bundle.xftp,
-            vec!["xftp://xftpFingerPrintXyZ:xftpPassword456@10.66.10.10:5443".to_string()]
+            vec![format!(
+                "xftp://xftpFingerPrintXyZ:xftpPassword456@{host}:5443"
+            )]
         );
-        assert_eq!(bundle.ice.len(), 2);
+        assert_eq!(bundle.ice.len(), 2, "stun + turn on the plain port");
+        assert_eq!(bundle.ice[0], format!("stun:{host}:3478"));
+        assert!(bundle.ice[1].starts_with("turn:"));
         assert_eq!(bundle.device, "mama-pixel-8");
-        bundle.validate(config.node.address).expect("valid");
+        bundle.validate(host).expect("valid");
         assert!(bundle.to_json().expect("json").len() <= 1024);
     }
 
@@ -249,12 +243,14 @@ mod tests {
         let bundle = build_bundle(&config, &device).expect("bundle");
 
         let text = manual_checklist(&device, &bundle);
-        assert!(text.contains("WireGuard"));
         assert!(text.contains("Operators"));
         assert!(text.contains("smp://"));
         assert!(text.contains("xftp://"));
-        assert!(text.contains("stun:10.66.10.10:3478"));
+        assert!(text.contains(&format!("stun:{}:3478", config.node.host)));
         assert!(text.contains("Instant"));
+        // The ICE lines must be pasted verbatim; the checklist has to say so, because
+        // one malformed line makes the client fall back to public servers.
+        assert!(text.contains("как есть"));
         // Every numbered step 1..6 is present.
         for step in 1..=6 {
             assert!(text.contains(&format!("{step}. ")), "missing step {step}");
@@ -269,6 +265,6 @@ mod tests {
         config.xftp.enabled = false;
         let bundle = build_bundle(&config, &device()).expect("bundle");
         assert!(bundle.xftp.is_empty());
-        bundle.validate(config.node.address).expect("valid");
+        bundle.validate(&config.node.host).expect("valid");
     }
 }

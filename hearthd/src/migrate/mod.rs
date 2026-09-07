@@ -4,7 +4,7 @@
 //! What actually migrates is the *identity* of the node: the relay CA and its private
 //! key, the queue-creation passwords, the store log, and the hearth state. The address
 //! `smp://<fp>:<pass>@10.66.10.10:5223` is built from exactly those, which is why
-//! moving them (and the DHCP reservation) is enough — ТЗ §2.5.
+//! moving them (and the port forwarding) is enough — ТЗ §2.5.
 //!
 //! Export refuses to leave the relays running: two nodes answering on one CA with one
 //! address would be a split brain that clients cannot detect. The old node stays down
@@ -130,7 +130,7 @@ pub async fn export(state: &Arc<AppState>) -> Result<ExportReport> {
         members: info.members,
         relays_stopped: stopped,
         copied_to,
-        next_steps: next_steps_after_export(&config.node.address.to_string()),
+        next_steps: next_steps_after_export(&config.node.host),
     })
 }
 
@@ -139,8 +139,8 @@ pub async fn export(state: &Arc<AppState>) -> Result<ExportReport> {
 fn next_steps_after_export(address: &str) -> Vec<String> {
     vec![
         format!(
-            "Move the DHCP reservation for {address} to the mini-PC MAC on the UDM Pro \
-             (ТЗ §10.2 п.2)."
+            "Point the router's port forwarding for {address} (5223, 443, 5443, 3478, \
+             49160-49200/udp) at the mini-PC — while the old node is still running."
         ),
         "Copy the archive to the mini-PC (hearth-backup or a USB stick).".into(),
         "On the mini-PC: hearthctl migrate import <archive> --identity <age key>.".into(),
@@ -303,7 +303,7 @@ mod tests {
         assert!(report
             .next_steps
             .iter()
-            .any(|s| s.contains("DHCP reservation")));
+            .any(|s| s.contains("port forwarding")));
         assert!(report.next_steps.iter().any(|s| s.contains("split brain")));
 
         let status = state.migrate.read().await;
@@ -318,7 +318,7 @@ mod tests {
         let (recipient, _key) = keyfile(dir.path());
         config.backup.recipients = vec![recipient];
         config.backup.remote = Some(crate::config::BackupRemote {
-            host: "10.66.10.20".parse().expect("ip"),
+            host: "192.168.1.20".parse().expect("ip"),
             port: 22,
             user: "hearth-backup".into(),
             path: "/srv/hearth-backup".into(),
@@ -331,7 +331,7 @@ mod tests {
 
         assert_eq!(
             report.copied_to.as_deref(),
-            Some("hearth-backup@10.66.10.20:/srv/hearth-backup"),
+            Some("hearth-backup@192.168.1.20:/srv/hearth-backup"),
             "ТЗ §10.2 п.3: the archive must not stay only on the machine being retired"
         );
         assert_eq!(

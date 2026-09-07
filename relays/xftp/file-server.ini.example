@@ -1,33 +1,31 @@
-# file-server.ini — эталон намерений hearth (ТЗ §6.3).
+# file-server.ini — целевая конфигурация hearth (XFTP).
 #
-# Как и для smp: источник истины — то, что сгенерировал `xftp-server init` вашего
-# пинованного тега. Сверка:
+# Ключи сверены с исходниками simplexmq v7.0.1
+# (src/Simplex/FileTransfer/Server/Main.hs). Сверка после обновления:
 #
 #   ./verify-ini-keys.sh /etc/opt/simplex-xftp/file-server.ini xftp/file-server.ini.example
 
 [STORE_LOG]
-enable: on
-log_stats: off
-
-[TRANSPORT]
-# ТЗ §5.1 / A1: только адрес узла.
-host: 10.66.10.10
-port: 5443
-# Control port на loopback — health-check hearthd.
-control_port: 5444
-log_tls_errors: off
+enable = on
+log_stats = off
+# TTL файлов. 7 суток: достаточно, чтобы забрать, и не превращает узел в файлопомойку.
+expire_files_hours = 168
 
 [AUTH]
-# ТЗ §6.3: пароль на загрузку файлов. Значение подставляет init-xftp.sh;
-# копия — в /etc/hearth/secrets/xftp-create-password.
-new_files: on
-create_password: REPLACE_WITH_GENERATED_PASSWORD
+# Загружать файлы можно только с паролем — на публично доступном сервере это
+# единственное, что мешает посторонним использовать его как хранилище.
+new_files = on
+create_password = REPLACE_WITH_GENERATED_PASSWORD
+control_port_admin_password = REPLACE_WITH_GENERATED_PASSWORD
+control_port_user_password = REPLACE_WITH_GENERATED_PASSWORD
 
-[STORAGE]
-# ТЗ §6.3: квота 32 ГБ, TTL 7 дней. Размер одного файла ограничен upstream (1 ГБ)
-# и здесь не настраивается.
-# Имена ключей и единицы измерения обязательно сверить с версией.
-quota: 32gb
-files_path: /var/opt/simplex-xftp/files
-log_path: /var/opt/simplex-xftp/file-server-store.log
-file_expiration_hours: 168
+[TRANSPORT]
+# Как и у smp: host только печатается при старте, не биндит.
+host = relay.example.org
+port = 5443
+control_port = 5444
+log_tls_errors = off
+
+[FILES]
+# Общая квота хранилища. Размер одного файла ограничен upstream и здесь не настраивается.
+storage_quota = 32gb
