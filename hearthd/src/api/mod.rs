@@ -27,6 +27,12 @@ use crate::state::AppState;
 
 pub use routes::Admin;
 
+/// How long a peer may take to complete the TLS handshake.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Upper bound on one admin connection. Long enough for `backup now` on a large
+/// archive, short enough that a wedged connection does not live forever.
+const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Bind `api.listen` and serve until `shutdown` flips.
 pub async fn serve(
     state: Arc<AppState>,
@@ -102,9 +108,13 @@ async fn handle_connection(
     state: Arc<AppState>,
 ) -> Result<()> {
     // Gate 2: mTLS. rustls rejects anything not chaining to the hearth admin CA.
-    let stream = acceptor
-        .accept(tcp)
+    //
+    // Bounded: a peer that opens a socket and then says nothing would otherwise hold
+    // the task forever. The API is LAN-only so this is housekeeping rather than
+    // defence, but an unbounded wait is never the right default.
+    let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp))
         .await
+        .map_err(|_| Error::Tls(format!("handshake with {peer} timed out")))?
         .map_err(|e| Error::Tls(format!("handshake with {peer} failed: {e}")))?;
 
     let fingerprint = {
@@ -121,10 +131,16 @@ async fn handle_connection(
     tracing::info!(%peer, admin = %admin.name, "admin session");
 
     let service = TowerToHyperService::new(app.layer(axum::Extension(admin)));
-    ConnBuilder::new(TokioExecutor::new())
-        .serve_connection(TokioIo::new(stream), service)
-        .await
-        .map_err(|e| Error::Tls(format!("http: {e}")))?;
+    // `backup now` and `migrate export` can legitimately take minutes (a large archive,
+    // then an rsync), so the cap is generous — it exists to reap stuck connections,
+    // not to bound honest work.
+    tokio::time::timeout(
+        CONNECTION_TIMEOUT,
+        ConnBuilder::new(TokioExecutor::new()).serve_connection(TokioIo::new(stream), service),
+    )
+    .await
+    .map_err(|_| Error::Timeout(CONNECTION_TIMEOUT))?
+    .map_err(|e| Error::Tls(format!("http: {e}")))?;
     Ok(())
 }
 

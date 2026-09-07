@@ -36,11 +36,21 @@ say "1. users"
 id -u simplex >/dev/null 2>&1 || run useradd --system --no-create-home --shell /usr/sbin/nologin simplex
 id -u hearth  >/dev/null 2>&1 || run useradd --system --no-create-home --shell /usr/sbin/nologin hearth
 
+# hearthd has to READ relay state that the relays own:
+#   * /etc/opt/simplex/fingerprint       -> goes into every client bundle
+#   * /etc/opt/simplex, /var/opt/simplex -> archived by the nightly backup
+# Without this the bundle endpoint and the backup both fail every single time, with
+# nothing but EACCES to explain it.
+run usermod -aG simplex hearth
+
 say "2. directories (ТЗ §10.1: everything the node owns lives in these)"
+# 0750 with group `simplex`: the relays write, hearthd (in that group) reads.
 run install -d -m 0750 -o simplex -g simplex /etc/opt/simplex /var/opt/simplex
 run install -d -m 0750 -o simplex -g simplex /etc/opt/simplex-xftp /var/opt/simplex-xftp
 run install -d -m 0750 -o root    -g hearth  /etc/hearth /etc/hearth/pki /etc/hearth/templates /etc/hearth/nftables
-run install -d -m 0700 -o root    -g hearth  /etc/hearth/secrets
+# 0750, not 0700: `hearth` must be able to read the relay passwords and the TURN
+# secret to mint bundles and rotate credentials. 0700 locks the group out entirely.
+run install -d -m 0750 -o root    -g hearth  /etc/hearth/secrets
 run install -d -m 0750 -o hearth  -g hearth  /var/lib/hearth /var/opt/hearth /var/opt/hearth/backup
 
 say "3. binaries"
@@ -89,7 +99,15 @@ run install -d -m 0755 /etc/systemd/system/coturn.service.d
 run install -m 0644 "$HERE/systemd/coturn.service.d-hearth.conf" /etc/systemd/system/coturn.service.d/hearth.conf
 run systemctl daemon-reload
 
-say "7. host hardening (ТЗ §5.2, §11)"
+say "7. polkit: let hearthd manage the relay units"
+# hearthd runs unprivileged, and polkit rejects `systemctl restart/stop` of system
+# units from a non-root user by default. Without this rule the supervisor, the TURN
+# rotation, the migration export and the integrity stop all fail silently.
+# The rule lists exactly three units — nothing else, and no enable/disable.
+run install -d -m 0755 /etc/polkit-1/rules.d
+run install -m 0644 "$HERE/polkit/49-hearthd.rules" /etc/polkit-1/rules.d/49-hearthd.rules
+
+say "8. host hardening (ТЗ §5.2, §11)"
 # No resolver: the node resolves nothing, so nothing can be poisoned.
 if systemctl is-enabled systemd-resolved >/dev/null 2>&1; then
     warn "systemd-resolved is enabled — disable it (ТЗ §5.2)"
@@ -107,17 +125,21 @@ cat <<'NEXT'
 
   1. Relay init (once, ТЗ §6.2/§6.3) — see relays/README.md:
        NODE_HOST=<ваш домен> ./relays/smp/init-smp.sh
-       xftp-server init ...
-     Then copy the passwords into /etc/hearth/secrets/{smp,xftp}-create-password (0600).
+       NODE_HOST=<ваш домен> ./relays/xftp/init-xftp.sh
+     The init scripts write the passwords to /etc/hearth/secrets and hand them to the
+     `hearth` group; they also chown the relay directories. Run `fix-permissions.sh`
+     afterwards if you ever init by hand instead.
 
   2. Pin the binaries you verified (ТЗ §6.1):
        hearthctl manifest pin --name smp-server  --version <tag>
        hearthctl manifest pin --name xftp-server --version <tag>
        hearthctl manifest pin --name hearthd     --version 0.1.0
 
-  3. Admin PKI (ТЗ §7.3):
+  3. Admin PKI (ТЗ §7.3), as root:
        hearthd ca init
        hearthd ca issue owner          # move owner.key to the admin workstation
+     Then hand the server key to the daemon (ca init runs as root, hearthd does not):
+       ./deploy/fix-permissions.sh
 
   4. TURN secret:
        hearthctl rotate turn-secret    # renders /etc/turnserver.conf
@@ -128,5 +150,7 @@ cat <<'NEXT'
        hearthctl health
 
   6. Run the acceptance tests: tests/acceptance/run-all.sh
+     They now check ownership, not just file modes — the mismatch that used to break
+     bundles and backups silently.
 
 NEXT

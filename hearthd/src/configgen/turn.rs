@@ -141,9 +141,16 @@ pub fn render_config(template: &str, secret: &str, cfg: &Turn) -> Result<String>
             "turnserver template has no {{TURN_SECRET}} placeholder".into(),
         ));
     }
-    let tls_line = match cfg.tls_port {
-        Some(port) => format!("tls-listening-port={port}"),
-        None => "no-tls\nno-dtls".to_string(),
+    // coturn refuses to open a TLS listener without a certificate, and does so quietly.
+    // Config::validate already rejects a port without cert/key, so by the time we get
+    // here the three either all exist or none do.
+    let tls_line = match (cfg.tls_port, &cfg.tls_cert, &cfg.tls_key) {
+        (Some(port), Some(cert), Some(key)) => format!(
+            "tls-listening-port={port}\ncert={}\npkey={}",
+            cert.display(),
+            key.display()
+        ),
+        _ => "no-tls\nno-dtls".to_string(),
     };
     let rendered = template
         .replace("{{TURN_SECRET}}", secret)
@@ -190,6 +197,8 @@ mod tests {
             unit: "coturn.service".into(),
             port: 3478,
             tls_port: None,
+            tls_cert: None,
+            tls_key: None,
             relay_min_port: 49160,
             relay_max_port: 49200,
             realm: "hearth".into(),
@@ -273,6 +282,8 @@ mod tests {
     fn tls_port_adds_the_turns_entries() {
         let mut cfg = turn_cfg();
         cfg.tls_port = Some(5349);
+        cfg.tls_cert = Some("/etc/ssl/relay.pem".into());
+        cfg.tls_key = Some("/etc/ssl/relay.key".into());
         let cred = credential("secret", 60, at(1_000_000)).expect("cred");
         let servers = ice_servers(&cfg, HOST, &cred).expect("ice");
         assert_eq!(servers.len(), 4);
@@ -295,10 +306,18 @@ mod tests {
         assert!(out.contains("no-tls"));
         assert!(!out.contains("{{"));
 
+        // With a certificate: a real TLS listener, cert and key included. Without them
+        // coturn would start and quietly open no TLS listener at all, which is why
+        // Config::validate refuses that combination in the first place.
         let mut cfg = turn_cfg();
         cfg.tls_port = Some(5349);
+        cfg.tls_cert = Some("/etc/letsencrypt/live/relay/fullchain.pem".into());
+        cfg.tls_key = Some("/etc/letsencrypt/live/relay/privkey.pem".into());
         let out = render_config(template, "deadbeef", &cfg).expect("render");
         assert!(out.contains("tls-listening-port=5349"));
+        assert!(out.contains("cert=/etc/letsencrypt/live/relay/fullchain.pem"));
+        assert!(out.contains("pkey=/etc/letsencrypt/live/relay/privkey.pem"));
+        assert!(!out.contains("no-tls"));
     }
 
     #[test]

@@ -77,13 +77,41 @@ pub fn write_atomic(path: impl AsRef<Path>, body: &[u8], mode: u32) -> Result<()
     }
     let tmp = tmp_path(path);
     {
-        let mut file = std::fs::File::create(&tmp).map_err(|e| Error::io(&tmp, e))?;
+        // The mode is applied at creation, not after writing. Creating with the default
+        // umask and chmod-ing afterwards leaves a window — short, but real — where a
+        // relay password or a private key is world-readable. `create_new` also refuses
+        // to follow an existing file, so a predictable temp name cannot be used to
+        // point the write somewhere else.
+        let mut file = open_tmp(&tmp, mode)?;
         file.write_all(body).map_err(|e| Error::io(&tmp, e))?;
         file.sync_all().map_err(|e| Error::io(&tmp, e))?;
     }
     set_mode(&tmp, mode)?;
     std::fs::rename(&tmp, path).map_err(|e| Error::io(path, e))?;
     Ok(())
+}
+
+/// Create the temp file with its final permissions already in place.
+fn open_tmp(tmp: &Path, mode: u32) -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+
+    match options.open(tmp) {
+        Ok(file) => Ok(file),
+        // A leftover temp file from a killed process must not block writes forever.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(tmp).map_err(|e| Error::io(tmp, e))?;
+            options.open(tmp).map_err(|e| Error::io(tmp, e))
+        }
+        Err(e) => Err(Error::io(tmp, e)),
+    }
 }
 
 fn tmp_path(path: &Path) -> PathBuf {

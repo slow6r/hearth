@@ -49,18 +49,30 @@ pub struct EgressWatchdog {
     baseline: Baseline,
     /// Whether we already alerted that the counters cannot be read.
     blind_alerted: bool,
+    /// Set when the persisted baseline existed but could not be parsed; reported on
+    /// the first poll, once.
+    baseline_lost: Option<String>,
 }
 
 impl EgressWatchdog {
     pub fn new(state: Arc<AppState>) -> Self {
-        let baseline: Baseline = store::read_json(state.config.paths.egress_state_file())
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        // A missing baseline is the normal first start. A baseline that exists but does
+        // not parse is different: starting from zero would re-report every drop already
+        // turned into an incident, so it is worth saying out loud.
+        let path = state.config.paths.egress_state_file();
+        let (baseline, baseline_lost) = match store::read_json::<Baseline>(&path) {
+            Ok(Some(baseline)) => (baseline, None),
+            Ok(None) => (Baseline::default(), None),
+            Err(e) => (
+                Baseline::default(),
+                Some(format!("{}: {e}", path.display())),
+            ),
+        };
         Self {
             state,
             baseline,
             blind_alerted: false,
+            baseline_lost,
         }
     }
 
@@ -99,6 +111,20 @@ impl EgressWatchdog {
             };
         self.blind_alerted = false;
 
+        if let Some(reason) = self.baseline_lost.take() {
+            self.state
+                .alerts
+                .emit(
+                    Alert::warning(
+                        "egress",
+                        "the persisted counter baseline was unreadable and has been reset; \
+                         drops recorded before this restart may be reported again",
+                    )
+                    .with_details(serde_json::json!({ "reason": reason })),
+                )
+                .await;
+        }
+
         let egress = counters
             .get(&cfg.egress_counter)
             .copied()
@@ -132,11 +158,15 @@ impl EgressWatchdog {
             self.state
                 .alerts
                 .emit(
+                    // The counter is not attributed to a process — nftables counts
+                    // whatever fell through every allow rule. Say that, rather than
+                    // naming the relay stack: the journal destinations below are what
+                    // actually identify the source.
                     Alert::critical(
                         "egress",
                         format!(
-                            "{} packets from the relay stack were dropped on the way out \
-                             (expected 0)",
+                            "{} outbound packets were dropped: something not on the \
+                             allow-list tried to leave (expected 0)",
                             delta.packets
                         ),
                     )
@@ -198,11 +228,11 @@ impl EgressWatchdog {
             }
         }
 
-        let blind = scanner_is_blind(&sockets);
-        if blind {
+        let can_see = scanner_can_see_relays(&sockets, &listening_ports);
+        if !can_see {
             tracing::warn!(
-                "ss reported no process names; the socket scan cannot attribute sockets \
-                 (hearthd needs privileges to inspect other users' sockets)"
+                "ss does not reveal the owners of the relay sockets, so the socket scan \
+                 proves nothing; the nft counters remain the primary signal"
             );
         }
         let foreign = find_foreign(
@@ -249,7 +279,7 @@ impl EgressWatchdog {
         let mut snapshot = self.state.egress.write().await;
         snapshot.checked = Utc::now();
         snapshot.foreign_sockets = foreign;
-        snapshot.scanner_ok = !blind;
+        snapshot.scanner_ok = can_see;
         snapshot.incidents_total = self.baseline.incidents_total;
         snapshot.state = verdict(snapshot.egress_drop_delta, snapshot.foreign_sockets.len());
     }
@@ -345,11 +375,34 @@ fn find_foreign(
         .collect()
 }
 
-/// `ss` only reveals process names for sockets the caller may inspect. If none of the
-/// listed sockets name a process, the scan cannot attribute anything and must say so
-/// rather than report a clean result — a blind scanner looks exactly like a clean host.
-fn scanner_is_blind(sockets: &[ss::SocketEntry]) -> bool {
-    !sockets.is_empty() && sockets.iter().all(|s| s.processes.is_empty())
+/// Can the scan actually see the relays?
+///
+/// `ss -p` names the owning process only for sockets the caller is allowed to inspect;
+/// for another user's socket that needs root or `CAP_SYS_PTRACE`. hearthd runs as an
+/// unprivileged user, so in a properly sandboxed deployment it sees its **own** socket
+/// names and not the relays'.
+///
+/// Asking "did any socket name a process?" therefore answers yes on hearthd's own
+/// sockets and reports a clean scan that examined nothing. The honest question is
+/// narrower: on the ports we publish — where the relays' sockets live — is any owner
+/// visible at all?
+///
+/// hearthd deliberately does **not** take `CAP_SYS_PTRACE` to fix this: that capability
+/// would let it read the relay's memory, and the one thing this daemon must never be
+/// able to do is look at message content (ТЗ §7.4). A degraded second signal is the
+/// right trade; the nft counters remain the primary one.
+fn scanner_can_see_relays(sockets: &[ss::SocketEntry], listening_ports: &[u16]) -> bool {
+    let mut relay_sockets = sockets.iter().filter(|s| {
+        ss::split_host_port(&s.local).is_some_and(|(_, port)| listening_ports.contains(&port))
+    });
+    // No sockets on the published ports at all means the relays are down — that is the
+    // supervisor's problem, not evidence that the scan is blind.
+    match relay_sockets.next() {
+        None => true,
+        Some(first) => {
+            !first.processes.is_empty() || relay_sockets.any(|s| !s.processes.is_empty())
+        }
+    }
 }
 
 /// Any drop or any foreign socket is critical; ТЗ §5.4 allows no grey zone.
@@ -446,17 +499,50 @@ ESTAB  0 0 203.0.113.10:38000 142.250.185.78:443 users:((\"smp-server\",pid=812,
     }
 
     #[test]
-    fn a_scan_that_cannot_name_processes_says_so() {
+    fn a_scan_that_cannot_see_the_relays_says_so() {
         let named = ss::parse(SS_OUTPUT);
-        assert!(!scanner_is_blind(&named));
+        assert!(scanner_can_see_relays(&named, PORTS));
 
-        // `ss` without privileges: sockets listed, owners hidden.
-        let anonymous = ss::parse("ESTAB 0 0 203.0.113.10:38000 1.2.3.4:443\n");
-        assert!(
-            scanner_is_blind(&anonymous),
-            "reporting `clean` here would be a lie"
+        // The realistic failure: hearthd runs unprivileged, so `ss` names hearthd's own
+        // socket but not the relays'. Asking "did ANY socket name a process?" would
+        // answer yes here and report a scan that examined nothing.
+        let partial = ss::parse(
+            "ESTAB 0 0 203.0.113.10:5223 84.17.52.9:44321\n\
+             ESTAB 0 0 192.168.1.10:7443 192.168.1.5:51000 users:((\"hearthd\",pid=901,fd=12))\n",
         );
-        assert!(!scanner_is_blind(&[]), "no sockets at all is not blindness");
+        assert!(
+            !scanner_can_see_relays(&partial, PORTS),
+            "hearthd seeing its own socket is not the same as seeing the relays"
+        );
+
+        // Relays stopped: no sockets on the published ports. That is the supervisor's
+        // problem, not evidence that the scan is blind.
+        let no_relays = ss::parse(
+            "ESTAB 0 0 192.168.1.10:7443 192.168.1.5:51000 users:((\"hearthd\",pid=901,fd=12))\n",
+        );
+        assert!(scanner_can_see_relays(&no_relays, PORTS));
+        assert!(scanner_can_see_relays(&[], PORTS));
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_baseline_is_reported_not_silently_reset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = crate::state::tests::test_config(dir.path());
+        std::fs::create_dir_all(&config.paths.state_dir).expect("mkdir");
+        std::fs::write(config.paths.egress_state_file(), b"{ this is not json").expect("write");
+
+        let state = AppState::new(config, Sys::new(true)).expect("state");
+        let watchdog = EgressWatchdog::new(state.clone());
+        assert!(
+            watchdog.baseline_lost.is_some(),
+            "a baseline that exists but does not parse must be noticed"
+        );
+
+        // A missing file, by contrast, is the normal first start.
+        let dir2 = tempfile::tempdir().expect("tempdir");
+        let config2 = crate::state::tests::test_config(dir2.path());
+        let state2 = AppState::new(config2, Sys::new(true)).expect("state");
+        assert!(EgressWatchdog::new(state2).baseline_lost.is_none());
     }
 
     #[test]

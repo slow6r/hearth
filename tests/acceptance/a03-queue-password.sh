@@ -20,7 +20,7 @@ check_ini() {
     if grep -qE '^[[:space:]]*create_password[[:space:]]*[:=][[:space:]]*.+' "$ini"; then
         echo "  ok $name: create_password задан"
     else
-        echo "  !! $name: create_password отсутствует или пуст — очередь создаст кто угодно из WG"
+        echo "  !! $name: create_password отсутствует или пуст — очередь создаст кто угодно из интернета"
         status=1
     fi
 }
@@ -55,5 +55,6 @@ check_secret "$SECRETS/xftp-create-password" xftp
 echo
 echo "  Полная проверка A3 — с устройства: добавить smp://<fp>@<node.host>:5223"
 echo "  (без пароля) и попытаться создать контакт. Ожидание: отказ."
+echo "  На публичном релее это единственный замок против посторонних."
 echo "  На публичном релее это единственный замок против посторонних."
 exit $status

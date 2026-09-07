@@ -23,9 +23,11 @@ command -v nmap >/dev/null || { echo "нет nmap — пропуск"; exit 77; 
 status=0
 
 echo "== Порты, которые ДОЛЖНЫ быть открыты"
-OPEN_TCP="$(nmap -Pn -p 5223,443,5443 --open "$TARGET" 2>/dev/null \
+OPEN_TCP="$(nmap -Pn -p 5223,443,5443,3478 --open "$TARGET" 2>/dev/null \
             | grep -E '^[0-9]+/tcp' | cut -d/ -f1)"
-for port in 5223 443 5443; do
+# 3478/tcp тоже обязателен: TURN слушает и TCP, и через него проходят клиенты
+# из сетей, где UDP зарезан.
+for port in 5223 443 5443 3478; do
     if grep -qw "$port" <<<"$OPEN_TCP"; then
         echo "  ok   $port/tcp открыт"
     else

@@ -35,8 +35,13 @@ xftp-server init -y "${HOST_FLAG[@]}" --quota "$QUOTA" --path "$FILES_DIR" --pas
 
 umask 077
 printf '%s\n' "$PASSWORD" > "$PASSWORD_FILE"
-chmod 0600 "$PASSWORD_FILE"
+# hearthd читает пароль для сборки bundle — см. комментарий в init-smp.sh.
+chown root:hearth "$PASSWORD_FILE" 2>/dev/null || true
+chmod 0640 "$PASSWORD_FILE"
 unset PASSWORD
+
+chown -R simplex:simplex "$CONFIG_DIR" "$FILES_DIR" 2>/dev/null || true
+chmod -R g+rX "$CONFIG_DIR" 2>/dev/null || true
 
 cat <<NEXT
 

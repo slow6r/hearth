@@ -16,7 +16,16 @@ Group=hearth
 # Reads nft counters and journal, controls the relay units.
 AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
-SupplementaryGroups=systemd-journal
+# systemd-journal: read the netfilter LOG entries behind an egress incident.
+# simplex:         read the relay fingerprint for bundles and archive the relay
+#                  directories in the nightly backup.
+SupplementaryGroups=systemd-journal simplex
+
+# Deliberately NOT granted: CAP_SYS_PTRACE. It would let `ss -p` name the relays'
+# sockets (making the socket scan a full second signal instead of a degraded one),
+# but it would also let this daemon read the relay's memory — that is, message
+# content. ТЗ §7.4 says hearthd never sees that, and a degraded scan is the cheaper
+# price. `hearthctl egress` reports the degradation rather than hiding it.
 
 # --- sandbox -----------------------------------------------------------------
 # hearthd is the one piece of code written for this project; it gets the tightest
@@ -46,8 +55,13 @@ SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 # Writable state only where it belongs (ТЗ §10.1).
-ReadWritePaths=/var/lib/hearth /var/opt/hearth /etc/hearth
-ReadOnlyPaths=/etc/opt/simplex /etc/opt/simplex-xftp
+# /etc/turnserver.conf is rewritten from the template on every secret rotation, so
+# it has to be writable — ProtectSystem=strict makes /etc read-only otherwise, and
+# `hearthctl rotate turn-secret` would fail with EROFS.
+ReadWritePaths=/var/lib/hearth /var/opt/hearth /etc/hearth /etc/turnserver.conf
+# The relay state: read for the fingerprint that goes into bundles, and read again by
+# the nightly backup. /var/opt/simplex holds the store log — needed by the backup.
+ReadOnlyPaths=/etc/opt/simplex /etc/opt/simplex-xftp /var/opt/simplex /var/opt/simplex-xftp
 
 # journald is the alert journal of record.
 StandardOutput=journal

@@ -42,8 +42,20 @@ table inet hearth {
         elements = { 192.168.1.0/24 }
     }
 
+    # The IPv6 half of the LAN. If your provider hands out a global prefix, add it —
+    # otherwise a backup target or Gotify reached over IPv6 lands in egress_drop.
+    # If you disabled IPv6 on the host entirely (see the runbook), leave this as is.
+    set lan6_nets {
+        type ipv6_addr
+        flags interval
+        elements = { fd00::/8 }
+    }
+
     # Ports the relays listen on. Keep in step with smp.port/extra_ports and
     # xftp.port in hearthd.toml.
+    #
+    # Enabling turn.tls_port? Add it here too (e.g. 5349) — and see the note about
+    # coturn's outbound TCP at the bottom of this file.
     set relay_ports {
         type inet_service
         flags interval
@@ -122,6 +134,15 @@ table inet hearth {
         ct state established,related accept
         # The LAN: backup target, alert channel, NTP on the router.
         ip daddr @lan_nets accept
+        ip6 daddr @lan6_nets accept
+
+        # --- housekeeping the kernel emits with no socket owner ------------------
+        # NDP, router solicitations, IGMP, mDNS, SSDP, NetBIOS. These have no `skuid`
+        # to match on, cannot leave the LAN anyway, and on a dual-stack host they are
+        # constant. Dropping them here — silently, before the counter — is what keeps
+        # `egress_drop = 0` an honest invariant instead of background noise.
+        ip daddr { 224.0.0.0/4, 255.255.255.255 } drop
+        ip6 daddr { ff00::/8, fe80::/10 } drop
 
         # --- exception 1: TURN media -------------------------------------------
         # A relayed call means coturn sends packets to the *other* participant, who
@@ -144,9 +165,6 @@ table inet hearth {
         meta skuid { "gym", "root" } counter name app_egress accept
 
         # --- everything else, notably `simplex` and `hearth` ---------------------
-        # Noise the OS emits that would otherwise drown the signal.
-        ip daddr { 224.0.0.0/4, 255.255.255.255 } udp dport { 5353, 1900, 137, 138 } drop
-
         counter name egress_drop limit rate 10/second burst 20 packets \
             log prefix "hearth-egress-drop " level warn
         drop
@@ -167,7 +185,17 @@ table inet hearth {
 # * Adding a service that needs the internet? Add its user to the app_egress rule.
 #   Do NOT relax the final drop — that rule is the whole point of the file.
 #
-# * Getting a TLS certificate for turns: needs temporary outbound access for root,
-#   which the app_egress rule already permits. It will show up in app_egress, not in
-#   egress_drop, which is exactly the intent.
+# * Getting a TLS certificate for turns: needs outbound access for root, which the
+#   app_egress rule already permits. It shows up in app_egress, not egress_drop —
+#   exactly the intent.
+#
+# * TURN over TLS needs THREE changes here, not one:
+#     1. add the TLS port (5349) to the relay_ports set above;
+#     2. permit coturn's outbound TCP relay in the output chain — `?transport=tcp`
+#        allocations use TCP and the current rule covers UDP only:
+#          meta skuid "turnserver" tcp sport $TURN_MIN-$TURN_MAX \
+#              counter name turn_egress accept
+#     3. set tls_port + tls_cert + tls_key together in hearthd.toml.
+#   Without step 2 the call negotiates over TLS and then goes silent, which is the
+#   worst failure mode of the three because everything looks like it worked.
 # ---------------------------------------------------------------------------

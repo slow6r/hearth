@@ -377,10 +377,13 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Alerts(args) => {
             let mut path = format!("/alerts?limit={}", args.limit);
             if let Some(severity) = &args.severity {
-                path.push_str(&format!("&severity={severity}"));
+                path.push_str(&format!("&severity={}", percent_encode(severity)));
             }
             if let Some(since) = &args.since {
-                path.push_str(&format!("&since={since}"));
+                // RFC 3339 offsets contain '+', which a query string decodes as a
+                // space — `--since 2026-01-01T00:00:00+03:00` would reach the server
+                // as a timestamp with a space in it and be rejected as unparseable.
+                path.push_str(&format!("&since={}", percent_encode(since)));
             }
             let alerts: Vec<hearthd::model::alert::Alert> = api.get_json(&path).await?;
             if cli.json {
@@ -475,7 +478,8 @@ async fn run(cli: Cli) -> Result<()> {
             println!("revoked `{}`", device.id);
             println!("Remaining steps (ТЗ §10.4):");
             println!("  1. Other family members delete the contact/participant.");
-            println!("  2. Remove the WireGuard peer on the UDM Pro.");
+            println!("  2. Возможности отрезать устройство по сети больше нет: релей публичен.");
+            println!("     Работают только удаление контактов остальными и отзыв выше.");
             println!("  3. If the relay password may have leaked: rotate the address (ТЗ §10.5).");
         }
         Command::Device(DeviceCommand::Bundle {
@@ -493,8 +497,30 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Rotate(RotateCommand::TurnSecret) => {
             let report: serde_json::Value = api.post_json("/rotate/turn-secret", None).await?;
-            print_json(&report)?;
-            println!("Re-issue bundles: existing TURN credentials are now invalid.");
+            if cli.json {
+                print_json(&report)?;
+            } else {
+                println!("TURN static secret rotated.");
+                let stale = report
+                    .get("reissue_bundles_for")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                if stale.is_empty() {
+                    println!("No device has been issued a bundle yet — nothing to re-issue.");
+                } else {
+                    println!(
+                        "\nCredentials from the old secret are dead. Calls will fail for these\n\
+                         devices while messages keep working — an easy symptom to misread.\n\
+                         Re-issue a bundle for each:\n"
+                    );
+                    for device in stale {
+                        if let Some(id) = device.as_str() {
+                            println!("    hearthctl device bundle {id}");
+                        }
+                    }
+                }
+            }
         }
         Command::Backup(BackupCommand::Now) => {
             let info: hearthd::backup::archive::ArchiveInfo =
@@ -543,7 +569,7 @@ async fn show_bundle(
 
     println!("{}", hearthd::qr::terminal(&json)?);
     println!("Scan this from the hearth app: Настройки узла → Сканировать QR.");
-    println!("The QR contains relay passwords — show it on this screen only, inside WG.");
+    println!("The QR carries relay passwords: show it in person, never forward it.");
 
     if show_json {
         println!("\n{}", bundle.to_json_pretty()?);
@@ -668,4 +694,52 @@ fn print_status(status: &NodeStatus) {
 fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+/// Percent-encode a query-string value.
+///
+/// Only unreserved characters (RFC 3986 §2.3) pass through untouched; everything else
+/// is escaped. That matters most for `+` in RFC 3339 offsets, which a query parser
+/// would otherwise decode as a space.
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::percent_encode;
+
+    #[test]
+    fn encodes_rfc3339_offsets() {
+        // The case that actually broke: `+` in a timezone offset.
+        assert_eq!(
+            percent_encode("2026-01-01T00:00:00+03:00"),
+            "2026-01-01T00%3A00%3A00%2B03%3A00"
+        );
+        assert_eq!(
+            percent_encode("2026-01-01T00:00:00Z"),
+            "2026-01-01T00%3A00%3A00Z"
+        );
+    }
+
+    #[test]
+    fn leaves_unreserved_characters_alone() {
+        assert_eq!(percent_encode("critical"), "critical");
+        assert_eq!(percent_encode("a-b_c.d~e"), "a-b_c.d~e");
+    }
+
+    #[test]
+    fn escapes_separators_that_would_change_the_query() {
+        assert_eq!(percent_encode("a&b=c"), "a%26b%3Dc");
+        assert_eq!(percent_encode("a b"), "a%20b");
+    }
 }

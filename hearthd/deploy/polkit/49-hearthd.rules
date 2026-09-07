@@ -1,0 +1,46 @@
+// polkit: разрешить пользователю `hearth` управлять ТОЛЬКО релейными юнитами.
+//
+// Устанавливается в /etc/polkit-1/rules.d/49-hearthd.rules
+//
+// Зачем это нужно: hearthd работает не от root, а мутирующие операции
+// (`systemctl restart/stop`) над system-юнитами polkit по умолчанию отклоняет.
+// Без этого правила молча не работают четыре несущие функции:
+//
+//   * supervisor  — перезапуск упавшего релея;
+//   * configgen   — рестарт coturn после ротации TURN-секрета;
+//   * migrate     — остановка релеев перед экспортом (иначе store log меняется
+//                   во время копирования);
+//   * integrity   — остановка релеев при несовпадении sha256 (fail-closed).
+//
+// Список юнитов закрытый. Даже если hearthd будет скомпрометирован, он не сможет
+// остановить nftables, sshd или сам себя — только те три сервиса, которыми обязан
+// управлять по назначению.
+//
+// Формат — JS-правила polkit (0.106+). Debian 13 использует именно их; старый
+// формат .pkla там больше не поддерживается.
+
+polkit.addRule(function (action, subject) {
+    if (subject.user !== "hearth") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    var allowedUnits = [
+        "smp-server.service",
+        "xftp-server.service",
+        "coturn.service"
+    ];
+    var allowedVerbs = ["start", "stop", "restart", "try-restart", "reload-or-restart"];
+
+    var unit = action.lookup("unit");
+    var verb = action.lookup("verb");
+
+    if (allowedUnits.indexOf(unit) >= 0 && allowedVerbs.indexOf(verb) >= 0) {
+        return polkit.Result.YES;
+    }
+
+    // Всё остальное — включая enable/disable и любые другие юниты — не наше дело.
+    return polkit.Result.NOT_HANDLED;
+});

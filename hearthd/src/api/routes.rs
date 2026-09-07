@@ -292,6 +292,10 @@ struct RotateReport {
     rotated: bool,
     unit: String,
     note: &'static str,
+    /// Devices whose TURN credentials just stopped working. Every active device, in
+    /// practice — the point is to hand the operator the list rather than leave them
+    /// to remember it.
+    reissue_bundles_for: Vec<String>,
 }
 
 async fn rotate_turn_secret(
@@ -303,17 +307,42 @@ async fn rotate_turn_secret(
     }
     configgen::turn::rotate_secret(&state.sys, &state.config.turn).await?;
     tracing::warn!(admin = %admin.name, "turn static secret rotated");
+
+    // Credentials are HMACs of the old secret, so every bundle issued before this
+    // moment is now dead for calls — while messages keep flowing. That asymmetry is
+    // exactly what makes the symptom confusing, so name the devices explicitly.
+    let stale: Vec<String> = state
+        .devices
+        .read()
+        .await
+        .active()
+        .filter(|d| d.last_bundle.is_some())
+        .map(|d| d.id.clone())
+        .collect();
+
     state
         .alerts
-        .emit(crate::model::alert::Alert::info(
-            "api",
-            format!("TURN static secret rotated by {}", admin.name),
-        ))
+        .emit(
+            crate::model::alert::Alert::warning(
+                "api",
+                format!(
+                    "TURN secret rotated by {}; {} device(s) need a new bundle or their \
+                     calls will fail while messages keep working",
+                    admin.name,
+                    stale.len()
+                ),
+            )
+            .with_details(serde_json::json!({ "devices": stale })),
+        )
         .await;
+
     Ok(Json(RotateReport {
         rotated: true,
         unit: state.config.turn.unit.clone(),
-        note: "existing client TURN credentials stop working; re-issue bundles",
+        note: "credentials from the old secret are dead; re-issue bundles for the \
+               devices listed below — calls break, messages do not, so the symptom \
+               is easy to misread",
+        reissue_bundles_for: stale,
     }))
 }
 

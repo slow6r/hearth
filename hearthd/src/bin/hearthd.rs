@@ -212,18 +212,44 @@ fn serve(config: Config, dry_run: bool) -> Result<()> {
 
         let api_state = state.clone();
         let api_shutdown = shutdown_rx.clone();
-        let api = tokio::spawn(async move { api::serve(api_state, api_shutdown).await });
+        let mut api = tokio::spawn(async move { api::serve(api_state, api_shutdown).await });
 
         tracing::info!(%api_listen, "hearthd ready");
-        wait_for_signal().await;
-        tracing::info!("shutdown requested");
+
+        // The admin API is not optional. If it cannot bind, or its TLS material is
+        // unreadable, the node becomes unmanageable — and doing that silently is the
+        // worst outcome: everything looks healthy while nobody can issue a bundle or
+        // see an alert. Whichever finishes first wins, and an API that ends by itself
+        // takes the daemon down with it.
+        let api_failed = tokio::select! {
+            _ = wait_for_signal() => {
+                tracing::info!("shutdown requested");
+                None
+            }
+            result = &mut api => {
+                let reason = match result {
+                    Ok(Ok(())) => "admin api stopped on its own".to_string(),
+                    Ok(Err(e)) => format!("admin api failed: {e}"),
+                    Err(e) => format!("admin api task panicked: {e}"),
+                };
+                tracing::error!("{reason}");
+                Some(reason)
+            }
+        };
+
         let _ = shutdown_tx.send(true);
 
         for task in tasks {
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
         }
         api.abort();
-        Ok(())
+
+        match api_failed {
+            // Exit non-zero so systemd restarts us and the failure is visible in
+            // `systemctl status` instead of being a quietly half-running node.
+            Some(reason) => Err(Error::Config(reason)),
+            None => Ok(()),
+        }
     })
 }
 

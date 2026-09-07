@@ -79,10 +79,20 @@ process = "xftp-server"
 enabled = true
 unit = "coturn.service"
 port = 3478
-# Set once you have a certificate (e.g. Let's Encrypt for node.host). Without TLS,
-# calls fail on networks that permit only 443/tcp. 5349 is the conventional port;
-# 443 would collide with smp extra_ports above.
+# TURN over TLS. Without it, calls fail on networks that permit only 443/tcp.
+#
+# Enabling it is NOT one switch — it takes four coordinated changes, and Config::validate
+# refuses a half-configuration rather than letting coturn start with no TLS listener:
+#   1. tls_port + tls_cert + tls_key here (all three, or none);
+#   2. open the port in deploy/nftables/hearth.nft (relay_ports set);
+#   3. allow coturn's outbound TCP relay there too — `turns:...?transport=tcp`
+#      allocations use TCP, and the current rule permits UDP only;
+#   4. get and renew the certificate for node.host (certbot needs outbound access;
+#      root already has it via app_egress).
+# 5349 is conventional; 443 would collide with smp extra_ports above.
 # tls_port = 5349
+# tls_cert = "/etc/letsencrypt/live/relay.example.org/fullchain.pem"
+# tls_key  = "/etc/letsencrypt/live/relay.example.org/privkey.pem"
 relay_min_port = 49160
 relay_max_port = 49200
 realm = "hearth"
@@ -117,8 +127,6 @@ nft_table = "hearth"
 egress_counter = "egress_drop"
 input_counter = "input_drop"
 journal_prefix = "hearth-egress-drop"
-
-
 # Релейный стек: эти процессы не должны САМИ инициировать соединения наружу.
 # turnserver сюда не входит — он ретранслирует медиа звонков по назначению.
 relay_processes = ["smp-server", "xftp-server"]
@@ -166,5 +174,6 @@ command = ["/usr/local/sbin/hearth-beep"]
 min_severity = "critical"
 
 [devices]
-# 20 человек по 2–3 устройства. ТЗ писалось под «≤20 устройств» — это другое.
+# ТЗ §1.1 говорит «≤ 20 устройств» — это писалось, когда предполагалось одно
+# устройство на человека. 20 человек — это 40–60 устройств.
 max_devices = 50

@@ -37,12 +37,25 @@ else
     HOST_FLAG=(--fqdn "$NODE_HOST")
 fi
 
+# ЗАМЕЧАНИЕ. Пароль передаётся аргументом, то есть на время работы команды виден
+# в /proc/<pid>/cmdline любому пользователю системы. Пинованная версия smp-server
+# не умеет читать его из ENV или stdin (см. Server/Main.hs: только --password).
+# Операция разовая и выполняется до того, как на машине появятся другие пользователи,
+# но риск лучше знать, чем не знать.
 smp-server init -y -l "${HOST_FLAG[@]}" --password "$PASSWORD" --control-port
 
 umask 077
 printf '%s\n' "$PASSWORD" > "$PASSWORD_FILE"
-chmod 0600 "$PASSWORD_FILE"
+# hearthd работает от пользователя hearth и обязан прочитать этот пароль, чтобы
+# собрать адрес релея для bundle. root:root 0600 сломал бы выпуск bundle с EACCES.
+chown root:hearth "$PASSWORD_FILE" 2>/dev/null || true
+chmod 0640 "$PASSWORD_FILE"
 unset PASSWORD
+
+# Каталоги релея создаёт root — отдать их пользователю релея и открыть чтение
+# группе, иначе не заработают ни bundle (нужен fingerprint), ни ночной бэкап.
+chown -R simplex:simplex "$CONFIG_DIR" 2>/dev/null || true
+chmod -R g+rX "$CONFIG_DIR" 2>/dev/null || true
 
 cat <<NEXT
 

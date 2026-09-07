@@ -5,8 +5,8 @@
 //! start-up, not silently fall back to a default.
 //!
 //! [`Config::validate`] encodes the invariants of ТЗ §4–§7 that can be checked
-//! statically: no wildcard binds (A1), admin subnet inside the WG subnet, control
-//! ports on loopback only, backup/alert targets inside the home networks.
+//! statically: the admin API is never exposed, the admin subnet is inside the LAN,
+//! control ports are on loopback, and backup/alert targets stay on the LAN.
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -166,10 +166,21 @@ pub struct Turn {
     pub unit: String,
     /// Plain STUN/TURN port (UDP and TCP), conventionally 3478.
     pub port: u16,
-    /// TLS port for `turns:`, conventionally 5349 or 443. Set only when a certificate
-    /// is configured; without TLS, calls fail on networks that allow only 443/tcp.
+    /// TLS port for `turns:`, conventionally 5349 or 443. Without TLS, calls fail on
+    /// networks that permit only 443/tcp.
+    ///
+    /// Setting this alone is not enough: coturn will not open a TLS listener without a
+    /// certificate, so `tls_cert`/`tls_key` are required alongside it and
+    /// [`Config::validate`] refuses a half-configured TLS setup rather than letting the
+    /// listener silently fail to appear.
     #[serde(default)]
     pub tls_port: Option<u16>,
+    /// Certificate for `turns:` — e.g. a Let's Encrypt fullchain for `node.host`.
+    #[serde(default)]
+    pub tls_cert: Option<PathBuf>,
+    /// Private key matching `tls_cert`. Must be readable by the coturn user.
+    #[serde(default)]
+    pub tls_key: Option<PathBuf>,
     /// Range coturn allocates relay ports from. Must match `min-port`/`max-port` in
     /// turnserver.conf and be open in the firewall, or media stops after signalling.
     #[serde(default = "d_turn_min_port")]
@@ -316,7 +327,12 @@ pub struct Beeper {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Devices {
-    /// ТЗ §1.1: a closed circle of at most 20 devices.
+    /// Size of the closed circle, counted in **devices**, not people.
+    ///
+    /// ТЗ §1.1 says "≤ 20 устройств", written when one device per person was assumed.
+    /// A household of 20 people runs 40–60 devices, so the shipped configuration sets
+    /// this higher; the default here stays at the ТЗ figure so that a config which does
+    /// not mention it keeps the original promise.
     #[serde(default = "d_max_devices")]
     pub max_devices: usize,
 }
@@ -472,6 +488,24 @@ impl Config {
                 return Err(Error::config(
                     "turn.relay_min_port must be below turn.relay_max_port",
                 ));
+            }
+            // A TLS port without a certificate means coturn starts, opens no TLS
+            // listener, and calls from TLS-only networks fail with nothing in the log
+            // pointing at the cause. Refuse the half-configuration instead.
+            match (self.turn.tls_port, &self.turn.tls_cert, &self.turn.tls_key) {
+                (None, None, None) => {}
+                (Some(_), Some(_), Some(_)) => {}
+                (Some(port), _, _) => {
+                    return Err(Error::config(format!(
+                        "turn.tls_port {port} is set but turn.tls_cert/turn.tls_key are \
+                         not; coturn would open no TLS listener at all"
+                    )))
+                }
+                _ => {
+                    return Err(Error::config(
+                        "turn.tls_cert/turn.tls_key are set without turn.tls_port",
+                    ))
+                }
             }
             let relay_range = self.turn.relay_min_port..=self.turn.relay_max_port;
             for relay in self.relays() {
@@ -733,6 +767,29 @@ mod tests {
         cfg.smp.port = 49170;
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("TURN relay range"), "got {err}");
+    }
+
+    #[test]
+    fn refuses_half_configured_turn_tls() {
+        // coturn without a certificate starts fine and opens no TLS listener. Calls
+        // from TLS-only networks then fail with nothing in the log explaining why —
+        // so the configuration is refused instead.
+        let mut cfg = reference();
+        cfg.turn.tls_port = Some(5349);
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("tls_cert"), "got {err}");
+
+        let mut cfg = reference();
+        cfg.turn.tls_cert = Some("/etc/ssl/relay.pem".into());
+        cfg.turn.tls_key = Some("/etc/ssl/relay.key".into());
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("tls_port"), "got {err}");
+
+        let mut cfg = reference();
+        cfg.turn.tls_port = Some(5349);
+        cfg.turn.tls_cert = Some("/etc/ssl/relay.pem".into());
+        cfg.turn.tls_key = Some("/etc/ssl/relay.key".into());
+        cfg.validate().expect("all three together are valid");
     }
 
     #[test]
