@@ -15,6 +15,16 @@
 # addresses, pin the right one with `listening-ip` and set `external-ip` when behind
 # NAT (external-ip=<public>/<private>) or ICE will advertise an unreachable candidate.
 listening-port={{PORT}}
+# --- this node (fels, 192.168.1.72) ----------------------------------------
+# The host has five addresses (LAN, ZeroTier, two Docker bridges, loopback). Pin the
+# LAN one: that is where the router forwards 3478 and the relay range to.
+listening-ip=192.168.1.72
+relay-ip=192.168.1.72
+# The node is behind the provider NAT. Without this coturn advertises 192.168.1.72 as
+# an ICE candidate, signalling succeeds and the call is then silent.
+# <public>/<private>. If the ISP address changes, THIS LINE MUST CHANGE TOO.
+external-ip=185.145.126.254/192.168.1.72
+
 {{TLS_PORT_LINE}}
 fingerprint
 

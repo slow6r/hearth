@@ -1,0 +1,21 @@
+[Unit]
+Description=hearth alert sink (Alertmanager webhook -> journal + hearth-beep)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/hearth-alert-sink
+Restart=on-failure
+RestartSec=5s
+# Runs as root only because hearth-beep writes to wall and /var/log. It binds
+# loopback and parses JSON from a service on the same host.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/log
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+SyslogIdentifier=hearth-alert-sink
+
+[Install]
+WantedBy=multi-user.target

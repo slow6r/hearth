@@ -1,0 +1,40 @@
+#!/usr/bin/python3
+"""Alertmanager webhook -> journal + /var/log/hearth-alerts.log + hearth-beep.
+
+Loopback only. Exists because there is no Gotify on this LAN yet and an alert
+channel that drops alerts on the floor is worse than no alerting at all.
+"""
+import http.server, json, subprocess, sys
+
+BEEP = "/usr/local/sbin/hearth-beep"
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(n) if n else b"{}"
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            return
+        for a in payload.get("alerts", []):
+            labels = a.get("labels", {})
+            ann = a.get("annotations", {})
+            line = "[%s] %s: %s" % (
+                a.get("status", "?"),
+                labels.get("alertname", "?"),
+                ann.get("summary", ""),
+            )
+            print(line, flush=True)
+            if labels.get("severity") == "critical" and a.get("status") == "firing":
+                subprocess.run([BEEP, line], check=False)
+
+    def log_message(self, *args):
+        pass
+
+
+if __name__ == "__main__":
+    http.server.HTTPServer(("127.0.0.1", 9099), Handler).serve_forever()

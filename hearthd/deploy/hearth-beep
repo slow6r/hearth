@@ -1,0 +1,17 @@
+#!/bin/sh
+# hearth — local critical-alert channel (hearthd -> alerts.beeper).
+#
+# There is no Gotify on this LAN yet, so a critical alert has to be visible on the
+# machine itself. Three ways at once, because each one fails differently:
+#   * the journal, which is the record of what happened and when;
+#   * `wall`, so anyone logged in over ssh or on the console sees it now;
+#   * a file the desktop session can watch.
+#
+# Called as: hearth-beep <severity> <message...>   (argv is whatever hearthd passes)
+set -u
+MSG="$*"
+[ -n "$MSG" ] || MSG="(no message)"
+logger -t hearth-beep -p daemon.crit -- "$MSG"
+printf '%s hearth CRITICAL: %s\n' "$(date -Is)" "$MSG" >> /var/log/hearth-alerts.log 2>/dev/null || true
+echo "hearth CRITICAL: $MSG" | wall 2>/dev/null || true
+exit 0

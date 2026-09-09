@@ -10,6 +10,11 @@
 #   2. outbound: keep the node from initiating connections it has no business making,
 #      and make any attempt *visible* in a counter hearthd reads (expected value: 0).
 #
+# THIS NODE IS NOT A DEDICATED APPLIANCE (ADR 0008). `fels` also serves the you-can-do.ru
+# game stack behind a Cloudflare tunnel, streams the desktop over Sunshine, and sits on a
+# ZeroTier network. Every rule that exists only for that stack is marked `host stack`.
+# Removing one of those breaks something that was working before hearth arrived.
+#
 # Install:
 #   install -m 0644 hearth.nft /etc/hearth/nftables/hearth.nft
 #   nft -c -f /etc/hearth/nftables/hearth.nft     # syntax check first
@@ -31,20 +36,34 @@ table inet hearth {
     counter turn_media { }
     counter admin_in { }
     counter ssh_in { }
+    # Referenced by the output chain. nft resolves `counter name X` against a declared
+    # counter object — without these two declarations the whole file fails to load.
+    counter app_egress { }
+    counter turn_egress { }
+    # host stack: inbound traffic that has nothing to do with the messenger.
+    counter app_in { }
+    # Link-scoped chatter this host must answer: NDP and mDNS. Counted rather than
+    # accepted silently, so it is visible without polluting app_egress.
+    counter link_local { }
 
     # ------------------------------------------------------------------- sets
     # The LAN. Administration lives here; the messenger does not.
-    # ==> ADJUST to your network, and keep it in step with node.lan_networks
-    #     in /etc/hearth/hearthd.toml.
     set lan_nets {
         type ipv4_addr
         flags interval
         elements = { 192.168.1.0/24 }
     }
 
-    # The IPv6 half of the LAN. If your provider hands out a global prefix, add it —
-    # otherwise a backup target or Gotify reached over IPv6 lands in egress_drop.
-    # If you disabled IPv6 on the host entirely (see the runbook), leave this as is.
+    # host stack: ZeroTier overlay. ssh and Sunshine stay reachable over it when the
+    # owner is away — this is the second management path if the LAN one is lost.
+    set zt_nets {
+        type ipv4_addr
+        flags interval
+        elements = { 10.250.46.0/24 }
+    }
+
+    # The IPv6 half of the LAN. This host has no global IPv6 prefix; link-local and
+    # ULA only, so this stays at the default.
     set lan6_nets {
         type ipv6_addr
         flags interval
@@ -55,19 +74,25 @@ table inet hearth {
     # xftp.port in hearthd.toml.
     #
     # Enabling turn.tls_port? Add it here too (e.g. 5349) — and see the note about
-    # coturn's outbound TCP at the bottom of this file.
+    # coturn outbound TCP at the bottom of this file.
     set relay_ports {
         type inet_service
         flags interval
         elements = { 443, 5223, 5443 }
     }
 
-    # coturn's relay allocation range: keep in step with min-port/max-port in
+    # coturn relay allocation range: keep in step with min-port/max-port in
     # turnserver.conf and turn.relay_min_port/max_port in hearthd.toml.
     # Without this open, a call connects and then stays silent — a miserable bug
     # to chase, because signalling looks perfectly healthy.
-    define TURN_MIN = 49160
-    define TURN_MAX = 49200
+    #
+    # Written as one `define` rather than `$TURN_MIN-$TURN_MAX`: nft parses
+    # `$TURN_MIN-` as an identifier in its own right and the file does not load.
+    define TURN_RANGE = 49160-49200
+
+    # host stack: Sunshine (desktop streaming to Moonlight). LAN and ZeroTier only —
+    # these ports are remote desktop access and must never be forwarded from the WAN.
+    define SUNSHINE_RANGE = 47984-48010
 
     # ------------------------------------------------------------------ input
     chain input {
@@ -84,11 +109,38 @@ table inet hearth {
         tcp dport 3478 counter name turn_in accept
         # TURN media relay. This is what actually carries a call between two phones
         # that are both behind NAT.
-        udp dport $TURN_MIN-$TURN_MAX counter name turn_media accept
+        udp dport $TURN_RANGE counter name turn_media accept
 
         # --- LAN only: administration ----------------------------------------
         ip saddr @lan_nets tcp dport 7443 counter name admin_in accept
+        # Prometheus (9090), Alertmanager (9093), node_exporter (9100).
+        ip saddr @lan_nets tcp dport { 9090, 9093, 9100 } counter name admin_in accept
         ip saddr @lan_nets tcp dport 22 counter name ssh_in accept
+        ip saddr @zt_nets tcp dport 22 counter name ssh_in accept
+        # The LAN over IPv6 link-local. `ssh fels` resolves through mDNS to a fe80::
+        # address, so without this every hostname-based ssh from the LAN times out
+        # while `ssh 192.168.1.72` works — a failure that looks like the host is down.
+        # fe80::/10 is link-scoped by definition and cannot be routed in from the
+        # internet, so this is the same trust boundary as @lan_nets.
+        ip6 saddr fe80::/10 tcp dport 22 counter name ssh_in accept
+
+        # --- host stack -------------------------------------------------------
+        # Sunshine: LAN and ZeroTier, never the internet.
+        ip saddr @lan_nets tcp dport $SUNSHINE_RANGE counter name app_in accept
+        ip saddr @lan_nets udp dport $SUNSHINE_RANGE counter name app_in accept
+        ip saddr @zt_nets tcp dport $SUNSHINE_RANGE counter name app_in accept
+        ip saddr @zt_nets udp dport $SUNSHINE_RANGE counter name app_in accept
+        # ZeroTier itself: peers punch in from arbitrary internet addresses. Without
+        # this the overlay silently degrades to relayed mode.
+        udp dport 9993 counter name app_in accept
+        tcp dport 9993 counter name app_in accept
+        # mDNS (avahi), LAN only.
+        ip saddr @lan_nets udp dport 5353 counter name app_in accept
+        ip6 saddr fe80::/10 udp dport 5353 counter name app_in accept
+        # Docker bridges: containers reaching host-side services. Docker keeps its own
+        # `ip filter` table; this table must not be the thing that breaks them.
+        iifname "docker0" counter name app_in accept
+        iifname "br-*" counter name app_in accept
 
         # --- diagnostics -------------------------------------------------------
         # Rate-limited so the node cannot be used as an ICMP amplifier.
@@ -107,9 +159,20 @@ table inet hearth {
     }
 
     # ---------------------------------------------------------------- forward
-    # The node is not a router.
+    # The node is not a router — except for Docker, which is.
     chain forward {
         type filter hook forward priority filter; policy drop;
+
+        # host stack: mongo and redis for the game live on a Docker bridge, and with
+        # br_netfilter loaded their frames traverse this hook too. Docker keeps its own
+        # table (`ip filter`, FORWARD policy DROP + DOCKER-USER) and stays the authority
+        # on what containers may do; a bare `policy drop` here would override it and cut
+        # the containers off the network with nothing in any log to explain it.
+        iifname "docker0" accept
+        oifname "docker0" accept
+        iifname "br-*" accept
+        oifname "br-*" accept
+
         counter name forward_drop limit rate 5/second burst 10 packets \
             log prefix "hearth-fwd-drop " level warn
         drop
@@ -135,34 +198,69 @@ table inet hearth {
         # The LAN: backup target, alert channel, NTP on the router.
         ip daddr @lan_nets accept
         ip6 daddr @lan6_nets accept
+        # host stack: the ZeroTier overlay and the Docker bridges are local fabric, not
+        # the internet. Kept out of app_egress so that counter stays readable.
+        ip daddr @zt_nets accept
+        oifname "ztdhglif5n" accept
+        oifname "docker0" accept
+        oifname "br-*" accept
 
-        # --- housekeeping the kernel emits with no socket owner ------------------
-        # NDP, router solicitations, IGMP, mDNS, SSDP, NetBIOS. These have no `skuid`
-        # to match on, cannot leave the LAN anyway, and on a dual-stack host they are
-        # constant. Dropping them here — silently, before the counter — is what keeps
-        # `egress_drop = 0` an honest invariant instead of background noise.
+        # --- link-scoped housekeeping --------------------------------------------
+        # NDP, mDNS, IGMP, SSDP, NetBIOS. Most of it has no `skuid` to match on and
+        # none of it can leave the LAN, so it must not reach egress_drop — it would
+        # turn an invariant into background noise.
+        #
+        # But it must not be dropped blindly either. Two of these are load-bearing:
+        #
+        #   * NEIGHBOUR ADVERTISEMENTS. Drop them and IPv6 stops working on this link
+        #     entirely: the peer never learns our MAC, so every fe80:: connection
+        #     times out with nothing in any log.
+        #   * mDNS ANSWERS. Drop them and the hostname `fels` stops resolving for the
+        #     whole household — ssh and Moonlight both reach this box by name. avahi
+        #     answers to 224.0.0.251 / ff02::fb, neither of which is in @lan_nets.
+        #
+        # So: answer both, counted separately, and drop the rest silently.
+        ip6 nexthdr icmpv6 icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, \
+            nd-router-solicit } counter name link_local accept
+        ip daddr 224.0.0.251 udp dport 5353 counter name link_local accept
+        ip6 daddr ff02::fb udp dport 5353 counter name link_local accept
+        ip6 daddr fe80::/10 counter name link_local accept
         ip daddr { 224.0.0.0/4, 255.255.255.255 } drop
-        ip6 daddr { ff00::/8, fe80::/10 } drop
+        ip6 daddr ff00::/8 drop
 
         # --- exception 1: TURN media -------------------------------------------
         # A relayed call means coturn sends packets to the *other* participant, who
         # is somewhere on the internet. Genuinely new outbound traffic, not a reply.
         # Scoped as tightly as the mechanism allows: one user, UDP only, only from
         # the allocation range.
-        meta skuid "turnserver" udp sport $TURN_MIN-$TURN_MAX \
+        meta skuid "turnserver" udp sport $TURN_RANGE \
             counter name turn_egress accept
 
         # --- exception 2: everything else the owner runs on purpose --------------
-        # ==> ADJUST. Add the users your own services run as. Keep this list short
-        #     and explicit: every name here is a hole you opened knowingly.
+        # Every name here is a hole opened knowingly. `gym` from ADR 0008 does not
+        # exist on this host — the desktop session, Sunshine and the browser all run
+        # as `fels` (uid 1000). nft resolves these names at load time, so a name that
+        # does not exist makes the whole file fail to load.
         #
-        #   gym        the desktop session driving the TV (browser, Zoom, VK)
-        #   root       apt / system updates
-        #   prometheus monitoring, if you scrape anything outside the LAN
+        #   root              cloudflared (the game tunnel), docker, apt, certbot
+        #   _apt              apt drops privileges to this user to fetch packages
+        #   fels              the desktop session driving the TV: browser, Zoom, VK
+        #   youcando          Next.js site + licence server -> Yandex ID, Google,
+        #                     YuKassa. WITHOUT THIS NAME login and payment on
+        #                     you-can-do.ru stop working while the site keeps serving
+        #                     200 — hours to debug.
+        #   zerotier-one      the overlay control plane; the second way in
+        #   systemd-timesync  the router does not serve NTP (checked on this LAN).
+        #                     TURN REST credentials and the admin API certificates are
+        #                     both time-dependent, so the clock is not optional.
+        #
+        # Deliberately absent: www-data (nginx proxies only to localhost upstreams),
+        # `simplex` and `hearth` (the relay stack — the whole point of this chain).
         #
         # Counted separately so `egress_drop` stays readable. If you ever wonder
         # "is that number growing?", it should be THIS one, never egress_drop.
-        meta skuid { "gym", "root" } counter name app_egress accept
+        meta skuid { "root", "_apt", "fels", "youcando", "zerotier-one", \
+                     "systemd-timesync" } counter name app_egress accept
 
         # --- everything else, notably `simplex` and `hearth` ---------------------
         counter name egress_drop limit rate 10/second burst 20 packets \
@@ -176,11 +274,14 @@ table inet hearth {
 #
 # * Port 443 needs CAP_NET_BIND_SERVICE on smp-server (the shipped unit has it).
 #
-# * If this host is behind NAT, coturn needs `external-ip=<public>/<private>` or it
+# * This host IS behind NAT, so coturn needs `external-ip=<public>/192.168.1.72` or it
 #   will advertise an unreachable candidate and calls will fail after signalling.
+#   It is set in /etc/hearth/templates/turnserver.conf.tmpl.
 #
 # * `meta skuid` resolves user NAMES when the ruleset is loaded. If a user does not
-#   exist yet, `nft -f` fails. Create the accounts first, or use numeric UIDs.
+#   exist yet, `nft -f` fails. Create the accounts first, or use numeric UIDs. This
+#   is why coturn is installed before the firewall is loaded: no `turnserver` user,
+#   no ruleset.
 #
 # * Adding a service that needs the internet? Add its user to the app_egress rule.
 #   Do NOT relax the final drop — that rule is the whole point of the file.
@@ -191,9 +292,9 @@ table inet hearth {
 #
 # * TURN over TLS needs THREE changes here, not one:
 #     1. add the TLS port (5349) to the relay_ports set above;
-#     2. permit coturn's outbound TCP relay in the output chain — `?transport=tcp`
+#     2. permit the coturn outbound TCP relay in the output chain — `?transport=tcp`
 #        allocations use TCP and the current rule covers UDP only:
-#          meta skuid "turnserver" tcp sport $TURN_MIN-$TURN_MAX \
+#          meta skuid "turnserver" tcp sport $TURN_RANGE \
 #              counter name turn_egress accept
 #     3. set tls_port + tls_cert + tls_key together in hearthd.toml.
 #   Without step 2 the call negotiates over TLS and then goes silent, which is the

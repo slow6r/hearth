@@ -7,6 +7,7 @@
 | [acceptance-tests.md](acceptance-tests.md) | A1–A13 с конкретными командами |
 | [ios-checklist.md](ios-checklist.md) | Ручная настройка стокового клиента |
 | [open-questions.md](open-questions.md) | Что осталось решить |
+| [deploy-fels-2026-09-09.md](deploy-fels-2026-09-09.md) | Журнал развёртывания на `fels`: что сделано, что найдено по дороге, что осталось |
 
 ## Runbook'и
 
@@ -14,6 +15,7 @@
 |---|---|
 | [runbook-deploy.md](runbook-deploy.md) | Разворачиваем узел: сеть, проброс портов, релеи, звонки |
 | [runbook-install-beelink.md](runbook-install-beelink.md) | Установка на конкретную машину: Debian 13, LUKS, два пользователя, зал |
+| [runbook-router-udm.md](runbook-router-udm.md) | Всё, что делается на роутере: проверка статики адреса, DNS-запись, проброс портов |
 | [runbook-migration.md](runbook-migration.md) | Переезд ПК → mini-PC без смены адреса (§10.2) |
 | [runbook-device-add.md](runbook-device-add.md) | Новое устройство в семье (§10.3) |
 | [runbook-device-lost.md](runbook-device-lost.md) | Телефон потерян или украден (§10.4) |
@@ -33,6 +35,7 @@
 | [0006](adr/0006-state-dir-in-backup.md) | Четвёртый каталог в бэкапе сверх трёх из §10.1 |
 | [0007](adr/0007-public-relay-no-vpn.md) | **Публичный релей вместо доступа только через WireGuard** |
 | [0008](adr/0008-multi-purpose-host.md) | **Многоцелевой узел: egress по пользователям** |
+| [0009](adr/0009-no-full-disk-encryption.md) | Узел без LUKS: принятое отступление |
 
 ## Как читать код
 

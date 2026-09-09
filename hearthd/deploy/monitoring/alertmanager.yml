@@ -1,0 +1,25 @@
+# Alertmanager for the hearth node.
+#
+# The reference config points at Gotify on the router. Nothing serves 8088 there
+# (checked), and an alert channel that silently discards alerts is worse than none.
+# Until a Gotify instance exists OFF this machine, alerts go to a local receiver that
+# writes them to the journal and to /var/log/hearth-alerts.log — the same place
+# hearthd's own critical alerts land, so there is one place to look.
+#
+# Gotify remains the right answer: a notification that this server died must not live
+# on the server that died.
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: local
+  group_by: ['alertname']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+
+receivers:
+  - name: local
+    webhook_configs:
+      - url: 'http://127.0.0.1:9099/alert'
+        send_resolved: true

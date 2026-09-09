@@ -1,0 +1,16 @@
+[Unit]
+Description=hearth data bind mount: /var/opt/hearth
+Documentation=file:///srv/hearth/src/docs/runbook-deploy.md
+# /var — 12 GiB раздел; store log релея и файлы XFTP растут непрерывно.
+# Данные лежат на /srv (432 GiB), пути остаются теми, что ждёт hearthd.toml.
+After=srv.mount
+Requires=srv.mount
+
+[Mount]
+What=/srv/hearth/data/hearth
+Where=/var/opt/hearth
+Type=none
+Options=bind
+
+[Install]
+WantedBy=multi-user.target

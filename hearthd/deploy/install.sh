@@ -66,6 +66,9 @@ done
 for binary in smp-server xftp-server; do
     [[ -x "/usr/local/bin/$binary" ]] || warn "/usr/local/bin/$binary is missing (copy the verified upstream release, ТЗ §6.1)"
 done
+# The local alert channel referenced by alerts.beeper in hearthd.toml. Without it a
+# critical alert has nowhere to go on a node that has no Gotify yet.
+run install -m 0755 "$HERE/hearth-beep" /usr/local/sbin/hearth-beep
 
 say "4. configuration"
 if [[ -f /etc/hearth/hearthd.toml ]]; then
@@ -152,5 +155,16 @@ cat <<'NEXT'
   6. Run the acceptance tests: tests/acceptance/run-all.sh
      They now check ownership, not just file modes — the mismatch that used to break
      bundles and backups silently.
+
+== not installed by this script (host-specific, decide per node)
+
+  * deploy/systemd/var-opt-*.mount — put the relay data on a roomy partition. On a
+    host where /var is small this is not optional: the store log grows without bound.
+    NB the xftp unit deploys under its systemd-escaped name, see the file header.
+  * /etc/nftables.conf — deploy/nftables/nftables.conf. The Debian default starts with
+    `flush ruleset`, which deletes Docker's tables too; on a host that runs containers
+    that costs them the network on every boot, with nothing in any log.
+  * deploy/monitoring/ — Prometheus, node_exporter, Alertmanager and the local alert
+    sink. See deploy/monitoring/README.md.
 
 NEXT

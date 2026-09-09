@@ -1,0 +1,23 @@
+# ВНИМАНИЕ: разворачивается под ЭКРАНИРОВАННЫМ именем
+#   /etc/systemd/system/var-opt-simplex-xftp.mount
+# systemd выводит имя mount-юнита из точки монтирования, и дефис в
+# `simplex-xftp` обязан быть записан как -. Под именем без экранирования
+# юнит просто не будет найден. Здесь он лежит с дефисом только потому, что
+# обратный слэш в имени файла не переживает checkout на Windows.
+#   systemd-escape -p --suffix=mount /var/opt/simplex-xftp
+[Unit]
+Description=hearth data bind mount: /var/opt/simplex-xftp
+Documentation=file:///srv/hearth/src/docs/runbook-deploy.md
+# /var — 12 GiB раздел; store log релея и файлы XFTP растут непрерывно.
+# Данные лежат на /srv (432 GiB), пути остаются теми, что ждёт hearthd.toml.
+After=srv.mount
+Requires=srv.mount
+
+[Mount]
+What=/srv/hearth/data/simplex-xftp
+Where=/var/opt/simplex-xftp
+Type=none
+Options=bind
+
+[Install]
+WantedBy=multi-user.target

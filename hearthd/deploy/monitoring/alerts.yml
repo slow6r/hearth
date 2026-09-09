@@ -74,3 +74,42 @@ groups:
         annotations:
           summary: "Метрики релея не обновлялись 10 минут"
           description: "Проверьте hearthctl health и prometheus_interval в ini."
+
+  # --- hearth-data-partitions -------------------------------------------------
+  # On `fels` the messenger's data does NOT live on `/`. /var/opt/simplex,
+  # /var/opt/simplex-xftp and /var/opt/hearth are bind mounts onto /srv (sda5), and
+  # /var is its own 12 GiB partition. A store log filling /srv leaves `/` untouched,
+  # so the rules above would never fire.
+  - name: hearth-data-partitions
+    rules:
+      - alert: SrvFillingUp
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/srv"}
+            / node_filesystem_size_bytes{mountpoint="/srv"} < 0.15
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "На /srv осталось меньше 15% — там store log, файлы XFTP и бэкапы"
+          description: "hearthctl backup status; квота XFTP в file-server.ini."
+
+      - alert: SrvAlmostFull
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/srv"}
+            / node_filesystem_size_bytes{mountpoint="/srv"} < 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "На /srv меньше 5% — релей вот-вот перестанет писать store log"
+
+      - alert: VarFillingUp
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/var"}
+            / node_filesystem_size_bytes{mountpoint="/var"} < 0.15
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "На /var осталось меньше 15%"
+          description: "12 GiB раздел: журналы, docker overlay2, кэш apt."
