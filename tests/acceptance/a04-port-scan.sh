@@ -11,13 +11,17 @@
 #   закрыты   7443 (admin API), 22 (ssh) — они только для LAN
 set -uo pipefail
 
-TARGET="${TARGET:?укажите TARGET=<node.host>}"
-
+# Порядок важен: «я на узле» проверяется ДО требования TARGET. Иначе `run-all.sh` на
+# самом узле падает на отсутствующей переменной и рисует FAIL там, где по смыслу SKIP —
+# а красный тест, который «всегда красный и это нормально», перестают читать.
 if [[ -e /etc/hearth/hearthd.toml && "${FORCE:-0}" != "1" ]]; then
     echo "Это сам узел. Тест надо запускать снаружи — иначе он ничего не докажет."
-    echo "FORCE=1 чтобы всё равно выполнить."
+    echo "  TARGET=<node.host> ./a04-port-scan.sh      # с VPS или телефона по мобильной сети"
+    echo "FORCE=1 чтобы всё равно выполнить здесь."
     exit 77
 fi
+
+TARGET="${TARGET:?укажите TARGET=<node.host>}"
 command -v nmap >/dev/null || { echo "нет nmap — пропуск"; exit 77; }
 
 status=0

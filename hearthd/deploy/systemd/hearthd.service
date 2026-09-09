@@ -55,10 +55,13 @@ SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 # Writable state only where it belongs (ТЗ §10.1).
-# /etc/turnserver.conf is rewritten from the template on every secret rotation, so
-# it has to be writable — ProtectSystem=strict makes /etc read-only otherwise, and
-# `hearthctl rotate turn-secret` would fail with EROFS.
-ReadWritePaths=/var/lib/hearth /var/opt/hearth /etc/hearth /etc/turnserver.conf
+#
+# The coturn config is rewritten from the template on every secret rotation. Listing
+# `/etc/turnserver.conf` here was not enough: the write is atomic, so it creates
+# `/etc/turnserver.conf.tmp.<pid>` first, and ProtectSystem=strict keeps /etc itself
+# read-only — the rotation failed with EROFS. The rendered config lives in
+# /etc/hearth/turn/ instead, inside a directory this daemon already owns.
+ReadWritePaths=/var/lib/hearth /var/opt/hearth /etc/hearth
 # The relay state: read for the fingerprint that goes into bundles, and read again by
 # the nightly backup. /var/opt/simplex holds the store log — needed by the backup.
 ReadOnlyPaths=/etc/opt/simplex /etc/opt/simplex-xftp /var/opt/simplex /var/opt/simplex-xftp

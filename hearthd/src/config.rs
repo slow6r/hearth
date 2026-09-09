@@ -92,9 +92,21 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// Device registry. Lives in `/etc/hearth` so it survives the ПК → mini-PC move.
+    /// Device registry.
+    ///
+    /// In `state_dir`, not `/etc/hearth`. The daemon writes this file, and every write
+    /// here is atomic (temp file + rename), which needs write permission on the
+    /// *directory* — not just on the file. Keeping it in `/etc/hearth` therefore meant
+    /// giving the `hearth` user write access to the directory that also holds
+    /// `hearthd.toml` and `manifest.toml`: a compromised daemon could then repoint
+    /// `backup.recipients` at someone else's age key, or rewrite the very manifest its
+    /// own integrity check reads.
+    ///
+    /// The migration property is unaffected: `state_dir` is one of `backup.paths`
+    /// ([ADR 0006](../../docs/adr/0006-state-dir-in-backup.md)), and `migrate::export`
+    /// archives exactly those, so the registry still travels with the node.
     pub fn devices_file(&self) -> PathBuf {
-        self.hearth_etc.join("devices.json")
+        self.state_dir.join("devices.json")
     }
     /// Append-only alert journal.
     pub fn alerts_file(&self) -> PathBuf {

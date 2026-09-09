@@ -43,6 +43,29 @@ ln -sf /var/opt/simplex-xftp/xftp-server-metrics.txt \
 либо ослабьте права на сами файлы метрик (в них нет ничего чувствительного: счётчики,
 без адресов клиентов).
 
+> **Симлинки не работают.** Проверено на simplexmq v7.0.1 + node_exporter 1.9.0.
+> Релей пишет каждую строку с меткой времени на стороне клиента
+> (`simplex_smp_queues_created 0 1788966315406`), а textfile-коллектор такие файлы
+> отвергает **целиком**:
+> `contains unsupported client-side timestamps, skipping entire file`.
+> Итог — `node_textfile_scrape_error 1`, ноль метрик релея и зелёный на вид мониторинг:
+> правило `RelayMetricsStale` тоже молчит, потому что опирается на
+> `node_textfile_mtime_seconds`, которого нет.
+>
+> Вместо симлинков — `hearth-relay-metrics` + таймер на минуту (файлы здесь же):
+> метка времени отбрасывается, запись атомарная. Значение от этого не теряется —
+> релей всё равно перезаписывает исходный файл раз в `prometheus_interval`, а время
+> сбора у Prometheus это время скрейпа.
+>
+> ```bash
+> install -m 0755 hearth-relay-metrics /usr/local/sbin/
+> install -m 0644 hearth-relay-metrics.service hearth-relay-metrics.timer /etc/systemd/system/
+> systemctl enable --now hearth-relay-metrics.timer
+> ```
+>
+> Проверка: `curl -s localhost:9100/metrics | grep -c '^simplex_'` — должно быть
+> заметно больше нуля, а `node_textfile_scrape_error` — ноль.
+
 ## Установка
 
 ```bash

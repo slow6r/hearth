@@ -2,7 +2,15 @@
 #
 # Rendered by hearthd on every `hearthctl rotate turn-secret` from
 # /etc/hearth/templates/turnserver.conf.tmpl to /etc/turnserver.conf.
-# Placeholders: {{PORT}} {{TLS_PORT_LINE}} {{REALM}} {{TURN_SECRET}} {{MIN_PORT}} {{MAX_PORT}}
+# Плейсхолдеры (каждый — имя в двойных фигурных скобках):
+#   PORT, TLS_PORT_LINE, REALM, TURN_SECRET, MIN_PORT, MAX_PORT
+#
+# ЗДЕСЬ ОНИ НАПИСАНЫ БЕЗ СКОБОК НАМЕРЕННО. render_config подставляет значения по всему
+# файлу, комментарии не исключение. TLS_PORT_LINE разворачивается в ДВЕ строки
+# (`no-tls` + `no-dtls`), поэтому строка-комментарий со списком плейсхолдеров рвалась
+# пополам, и её вторая половина становилась настоящей строкой конфига:
+#   no-dtls hearth <секрет> 49160 49200
+# coturn отвечал «ERROR: Unknown boolean value» и не стартовал.
 #
 # DO NOT edit /etc/turnserver.conf by hand — the next rotation overwrites it.
 #
@@ -50,7 +58,11 @@ stale-nonce=600
 # Deny every private, loopback, link-local and reserved range. Public peers stay
 # allowed, which is all a call between two family members needs.
 no-multicast-peers
-no-loopback-peers
+# `no-loopback-peers` был здесь и ломал старт: coturn 4.6.1 такого ключа не знает
+# («Bad configuration format»), и сервер не поднимается вообще. Ключ убрали в 4.6.0 —
+# теперь loopback запрещён ПО УМОЛЧАНИЮ, а разрешает его обратный `allow-loopback-peers`.
+# Так что нужное поведение получается само; диапазон 127.0.0.0/8 ниже оставлен явно,
+# чтобы правило было видно в файле, а не только в дефолтах чужой версии.
 denied-peer-ip=0.0.0.0-0.255.255.255
 denied-peer-ip=10.0.0.0-10.255.255.255
 denied-peer-ip=100.64.0.0-100.127.255.255

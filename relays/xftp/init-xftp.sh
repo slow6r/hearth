@@ -99,8 +99,8 @@ PY
 umask 077
 printf '%s\n' "$PASSWORD" > "$PASSWORD_FILE"
 # hearthd читает пароль для сборки bundle — см. комментарий в init-smp.sh.
-chown root:hearth "$PASSWORD_FILE" 2>/dev/null || true
-chmod 0640 "$PASSWORD_FILE"
+chown hearth:hearth "$PASSWORD_FILE" 2>/dev/null || true
+chmod 0600 "$PASSWORD_FILE"
 unset PASSWORD
 
 chown -R simplex:simplex "$CONFIG_DIR" "$FILES_DIR" 2>/dev/null || true
@@ -114,7 +114,7 @@ cat <<NEXT
 OK. Дальше:
   1. ./verify-ini-keys.sh $INI xftp/file-server.ini.example
      Особое внимание: port = $PORT (НЕ 443 — там smp) и control_port = $CONTROL_PORT.
-  2. Пароль на загрузку — в $PASSWORD_FILE (0640 root:hearth). На публичном сервере
+  2. Пароль на загрузку — в $PASSWORD_FILE (0600 hearth:hearth). На публичном сервере
      это единственное, что мешает посторонним использовать его как хранилище.
   3. systemctl enable --now xftp-server && hearthctl health
 NEXT

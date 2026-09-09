@@ -178,7 +178,13 @@ pub async fn rotate_secret(sys: &Sys, cfg: &Turn) -> Result<()> {
     let rendered = render_config(&template, &secret, cfg)?;
 
     store::write_secret(&cfg.secret_file, &secret)?;
-    store::write_atomic(&cfg.config_file, rendered.as_bytes(), store::MODE_SECRET)?;
+    // MODE_SHARED_SECRET, not MODE_SECRET: coturn reads this file as `turnserver`, and
+    // 0600 owned by `hearth` locks out the one process that needs it. See the constant.
+    store::write_atomic(
+        &cfg.config_file,
+        rendered.as_bytes(),
+        store::MODE_SHARED_SECRET,
+    )?;
     systemd::restart(sys, &cfg.unit).await?;
     tracing::info!(unit = %cfg.unit, "turn static secret rotated");
     Ok(())

@@ -47,11 +47,26 @@ say "2. directories (ТЗ §10.1: everything the node owns lives in these)"
 # 0750 with group `simplex`: the relays write, hearthd (in that group) reads.
 run install -d -m 0750 -o simplex -g simplex /etc/opt/simplex /var/opt/simplex
 run install -d -m 0750 -o simplex -g simplex /etc/opt/simplex-xftp /var/opt/simplex-xftp
-run install -d -m 0750 -o root    -g hearth  /etc/hearth /etc/hearth/pki /etc/hearth/templates /etc/hearth/nftables
-# 0750, not 0700: `hearth` must be able to read the relay passwords and the TURN
-# secret to mint bundles and rotate credentials. 0700 locks the group out entirely.
-run install -d -m 0750 -o root    -g hearth  /etc/hearth/secrets
+# 0751 on /etc/hearth, not 0750: `turnserver` has to traverse it to reach its config in
+# /etc/hearth/turn. `x` without `r` permits exactly that — walking a known path — and
+# still hides the listing; every file inside keeps its own mode.
+run install -d -m 0751 -o root    -g hearth  /etc/hearth
+run install -d -m 0750 -o root    -g hearth  /etc/hearth/pki /etc/hearth/templates /etc/hearth/nftables
+# Owned by `hearth`, not root: the daemon reads the relay passwords here to mint
+# bundles, and WRITES turn-secret here on every rotation. That write is atomic
+# (temp file + rename), so it needs permission on the directory itself — root:hearth
+# 0750 fails with EACCES on `turn-secret.tmp.<pid>`, once every rotate_days.
+# 0750 still shuts out everyone but root and the daemon.
+run install -d -m 0750 -o hearth  -g hearth  /etc/hearth/secrets
 run install -d -m 0750 -o hearth  -g hearth  /var/lib/hearth /var/opt/hearth /var/opt/hearth/backup
+# The rendered coturn config lives here. Owner `hearth` renders it; group `turnserver`
+# reads it; the setgid bit is what makes the rendered file land in that group instead
+# of `hearth`. Both halves are required — see MODE_SHARED_SECRET in src/store.rs.
+if id -u turnserver >/dev/null 2>&1; then
+    run install -d -m 2750 -o hearth -g turnserver /etc/hearth/turn
+else
+    warn "no `turnserver` user yet — install coturn, then re-run this script (or fix-permissions.sh)"
+fi
 
 say "3. binaries"
 for binary in hearthd hearthctl; do
@@ -100,6 +115,12 @@ run install -m 0644 "$HERE/systemd/smp-server.service" /etc/systemd/system/smp-s
 run install -m 0644 "$HERE/systemd/xftp-server.service" /etc/systemd/system/xftp-server.service
 run install -d -m 0755 /etc/systemd/system/coturn.service.d
 run install -m 0644 "$HERE/systemd/coturn.service.d-hearth.conf" /etc/systemd/system/coturn.service.d/hearth.conf
+# /run is tmpfs and the Debian package creates neither directory. Without them systemd
+# fails the unit at step NAMESPACE (status=226) before turnserver even runs, because
+# ReadWritePaths cannot bind a path that does not exist.
+run install -d -m 0755 /etc/tmpfiles.d
+run install -m 0644 "$HERE/tmpfiles/hearth-coturn.conf" /etc/tmpfiles.d/hearth-coturn.conf
+run systemd-tmpfiles --create /etc/tmpfiles.d/hearth-coturn.conf
 run systemctl daemon-reload
 
 say "7. polkit: let hearthd manage the relay units"

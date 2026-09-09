@@ -1,0 +1,12 @@
+[Unit]
+Description=hearth: refresh relay metrics for node_exporter
+
+[Timer]
+# В такт prometheus_interval = 60 в ini обоих релеев. Чаще смысла нет: сам релей
+# перезаписывает исходный файл раз в минуту.
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

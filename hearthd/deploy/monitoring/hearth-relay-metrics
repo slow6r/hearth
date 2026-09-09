@@ -1,0 +1,92 @@
+#!/usr/bin/python3
+"""Отдать метрики релеев node_exporter'у через textfile-коллектор.
+
+ЗАЧЕМ ЭТО ВООБЩЕ НУЖНО. deploy/monitoring/README.md предлагал симлинки:
+
+    ln -sf /var/opt/simplex/smp-server-metrics.txt \\
+           /var/lib/node_exporter/textfile/smp-server.prom
+
+Так не работает. simplexmq v7.0.1 пишет каждую строку С МЕТКОЙ ВРЕМЕНИ:
+
+    simplex_smp_queues_created 0 1788966315406
+
+а textfile-коллектор node_exporter такие файлы отвергает — целиком, а не построчно:
+
+    err="textfile ... contains unsupported client-side timestamps, skipping entire file"
+
+Итог был бы худшим из возможных: `node_textfile_scrape_error 1`, ноль метрик релея и
+при этом зелёный на вид мониторинг. Правило RelayMetricsStale из alerts.yml тоже
+молчало бы — ему неоткуда взять `node_textfile_mtime_seconds`.
+
+Здесь метка времени отбрасывается. Значение от этого не страдает: релей всё равно
+перезаписывает файл целиком каждые prometheus_interval секунд, и время сбора у
+Prometheus — это время скрейпа.
+
+Запись атомарная (временный файл + rename): node_exporter читает каталог в любой
+момент и не должен поймать файл на середине записи.
+"""
+import os
+import sys
+import tempfile
+
+# источник -> имя файла в каталоге textfile-коллектора
+SOURCES = {
+    "/var/opt/simplex/smp-server-metrics.txt": "smp-server.prom",
+    "/var/opt/simplex-xftp/xftp-server-metrics.txt": "xftp-server.prom",
+}
+OUT_DIR = "/var/lib/node_exporter/textfile"
+
+
+def is_number(token):
+    try:
+        float(token)
+    except ValueError:
+        return False
+    return True
+
+
+def strip_timestamp(line):
+    """`metric{l="v"} 12 1788966315406` -> `metric{l="v"} 12`."""
+    if not line or line.startswith("#"):
+        return line
+    parts = line.rsplit(None, 2)
+    if len(parts) == 3 and parts[2].isdigit() and is_number(parts[1]):
+        return parts[0] + " " + parts[1]
+    return line
+
+
+def convert(src, dst):
+    with open(src, encoding="utf-8", errors="replace") as fh:
+        body = "".join(strip_timestamp(l.rstrip("\n")) + "\n" for l in fh)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dst), prefix=".hearth-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, dst)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def main():
+    rc = 0
+    for src, name in SOURCES.items():
+        dst = os.path.join(OUT_DIR, name)
+        if not os.path.exists(src):
+            # Релей может быть остановлен намеренно. Молча оставляем прошлый файл:
+            # его mtime перестанет расти, и RelayMetricsStale сработает — как и задумано.
+            continue
+        try:
+            convert(src, dst)
+        except OSError as e:
+            print("hearth-relay-metrics: %s: %s" % (src, e), file=sys.stderr)
+            rc = 1
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

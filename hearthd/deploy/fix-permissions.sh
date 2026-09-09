@@ -63,15 +63,24 @@ for dir in /etc/opt/simplex /var/opt/simplex /etc/opt/simplex-xftp /var/opt/simp
 done
 
 echo
-echo "== секреты: root:hearth 0640, каталог 0750"
+echo "== секреты: каталог и файлы hearth:hearth, каталог 0750, файлы 0600"
+# Каталог принадлежит демону, а не root. `hearthctl rotate turn-secret` пишет
+# turn-secret атомарно (временный файл + rename), а для этого нужна запись в САМ
+# КАТАЛОГ, не в файл. С root:hearth 0750 ротация падала с EACCES на
+# `.../turn-secret.tmp.<pid>` — и падала бы каждые 30 дней.
+#
+# Права на чтение при этом не расширяются: 0750 закрывает каталог для всех, кроме
+# root и hearth. Пароли релеев сюда по-прежнему пишет root (init-скрипты), и то,
+# что демон теперь может их перезаписать, ничего не добавляет — он их и так читает,
+# иначе не собрал бы bundle.
 if [[ -d /etc/hearth/secrets ]]; then
-    run chown root:hearth /etc/hearth/secrets
+    run chown hearth:hearth /etc/hearth/secrets
     run chmod 0750 /etc/hearth/secrets
     shopt -s nullglob
     for f in /etc/hearth/secrets/*; do
         [[ -f "$f" ]] || continue
-        run chown root:hearth "$f"
-        run chmod 0640 "$f"
+        run chown hearth:hearth "$f"
+        run chmod 0600 "$f"
         note "$(basename "$f")"
     done
     shopt -u nullglob
@@ -125,20 +134,46 @@ for dir in /var/lib/hearth /var/opt/hearth; do
         skip "$dir отсутствует"
     fi
 done
+# devices.json переехал в state_dir: демон пишет его атомарно, а это требует записи
+# в каталог. В /etc/hearth это означало бы право переписать hearthd.toml и
+# manifest.toml — см. комментарий у Paths::devices_file.
 if [[ -f /etc/hearth/devices.json ]]; then
-    run chown root:hearth /etc/hearth/devices.json
-    run chmod 0660 /etc/hearth/devices.json
+    printf '  !! /etc/hearth/devices.json — старое расположение.\n'
+    printf '     Перенесите: mv /etc/hearth/devices.json /var/lib/hearth/devices.json\n'
+    printf '     и повторите этот скрипт.\n'
+fi
+if [[ -f /var/lib/hearth/devices.json ]]; then
+    run chown hearth:hearth /var/lib/hearth/devices.json
+    run chmod 0640 /var/lib/hearth/devices.json
     note "devices.json (демон его пишет при выпуске bundle)"
 fi
 
 echo
-echo "== turnserver.conf: hearthd перезаписывает его при ротации секрета"
-if [[ -f /etc/turnserver.conf ]]; then
-    run chown root:hearth /etc/turnserver.conf
-    run chmod 0640 /etc/turnserver.conf
-    note "/etc/turnserver.conf"
+echo "== конфиг coturn: пишет hearthd, читает turnserver"
+# Две стороны одной задачи, и обе обязательны:
+#   * каталог должен принадлежать hearth — запись атомарная, ей нужен каталог, а не файл;
+#   * каталог должен быть setgid turnserver — иначе отрендеренный файл получит группу
+#     hearth, и coturn (User=turnserver в юните Debian) его не прочитает.
+# Права 0640 на сам файл ставит hearthd (store::MODE_SHARED_SECRET).
+if id -u turnserver >/dev/null 2>&1; then
+    run install -d -m 2750 -o hearth -g turnserver /etc/hearth/turn
+    note "/etc/hearth/turn (2750 hearth:turnserver)"
+    if [[ -f /etc/hearth/turn/turnserver.conf ]]; then
+        run chown hearth:turnserver /etc/hearth/turn/turnserver.conf
+        run chmod 0640 /etc/hearth/turn/turnserver.conf
+        note "turnserver.conf"
+    else
+        skip "конфиг ещё не отрендерен — hearthctl rotate turn-secret"
+    fi
+    # turnserver обязан пройти сквозь /etc/hearth, чтобы дойти до своего каталога.
+    run chmod 0751 /etc/hearth
+    note "/etc/hearth 0751 (x без r: проход есть, листинга нет)"
 else
-    skip "/etc/turnserver.conf отсутствует — создастся при hearthctl rotate turn-secret"
+    skip "нет пользователя turnserver — сначала apt install coturn"
+fi
+if [[ -f /etc/turnserver.conf ]]; then
+    printf '  -- /etc/turnserver.conf: конфиг дистрибутива, hearth его не использует.\n'
+    printf '     Юнит переведён на /etc/hearth/turn/turnserver.conf (см. drop-in).\n'
 fi
 
 cat <<'DONE'

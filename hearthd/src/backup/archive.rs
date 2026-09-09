@@ -26,6 +26,18 @@ pub struct ArchiveInfo {
     pub sha256: String,
     /// Directories included, as stored inside the tar.
     pub members: Vec<String>,
+    /// Paths the daemon was not allowed to read, and therefore did NOT archive.
+    ///
+    /// This is not a warning to be scrolled past. `/etc/hearth/pki/ca.key` is 0600
+    /// root:root on purpose — a compromised daemon must not be able to issue itself an
+    /// admin certificate — and the backup runs as `hearth`. So the admin CA is
+    /// legitimately absent from every nightly archive, and the operator has to keep it
+    /// with the age key instead of assuming the backup covers it.
+    ///
+    /// Failing the whole run instead would be worse: a backup that errors out every
+    /// night is a backup nobody has.
+    #[serde(default)]
+    pub unreadable: Vec<String>,
 }
 
 /// Build `tar.gz.age` from a list of directories.
@@ -61,6 +73,7 @@ pub fn create_encrypted(
     let gz = flate2::write::GzEncoder::new(age_writer, flate2::Compression::default());
 
     let mut members = Vec::new();
+    let mut unreadable = Vec::new();
     let mut builder = tar::Builder::new(gz);
     builder.follow_symlinks(false);
     for source in sources {
@@ -69,9 +82,7 @@ pub fn create_encrypted(
             continue;
         }
         let name = archive_name(source);
-        builder
-            .append_dir_all(&name, source)
-            .map_err(|e| Error::io(source, e))?;
+        append_tree(&mut builder, &name, source, &mut unreadable)?;
         members.push(name);
     }
     if members.is_empty() {
@@ -92,12 +103,85 @@ pub fn create_encrypted(
     let size_bytes = std::fs::metadata(output)
         .map_err(|e| Error::io(output, e))?
         .len();
+    if !unreadable.is_empty() {
+        tracing::warn!(
+            count = unreadable.len(),
+            paths = %unreadable.join(", "),
+            "backup could not read these paths and left them out of the archive"
+        );
+    }
     Ok(ArchiveInfo {
         path: output.to_path_buf(),
         size_bytes,
         sha256: sha256_file(output)?,
         members,
+        unreadable,
     })
+}
+
+/// Walk one source directory into the tar, skipping what the daemon may not read.
+///
+/// `tar::Builder::append_dir_all` was used here and aborted the whole run on the first
+/// EACCES. On this node that is guaranteed to happen: `backup.paths` contains
+/// `/etc/hearth`, and `/etc/hearth/pki/ca.key` is deliberately 0600 root:root while the
+/// backup runs as `hearth` (deploy/fix-permissions.sh explains why). The result was a
+/// nightly backup that failed every night and a truncated archive left behind.
+///
+/// Only `PermissionDenied` is tolerated, and every occurrence is reported. Any other
+/// error still fails the run — a disk error must not be quietly turned into a gap.
+fn append_tree<W: std::io::Write>(
+    builder: &mut tar::Builder<W>,
+    name: &str,
+    root: &Path,
+    unreadable: &mut Vec<String>,
+) -> Result<()> {
+    let mut stack = vec![(PathBuf::from(name), root.to_path_buf())];
+    while let Some((rel, abs)) = stack.pop() {
+        let meta = match std::fs::symlink_metadata(&abs) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                unreadable.push(abs.display().to_string());
+                continue;
+            }
+            Err(e) => return Err(Error::io(&abs, e)),
+        };
+
+        if meta.is_dir() {
+            builder
+                .append_dir(&rel, &abs)
+                .map_err(|e| Error::io(&abs, e))?;
+            let entries = match std::fs::read_dir(&abs) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    unreadable.push(abs.display().to_string());
+                    continue;
+                }
+                Err(e) => return Err(Error::io(&abs, e)),
+            };
+            // Sorted so that two runs over unchanged inputs produce the same tar
+            // ordering; `read_dir` gives whatever the filesystem feels like.
+            let mut children = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(|e| Error::io(&abs, e))?;
+                children.push(entry.file_name());
+            }
+            children.sort();
+            for child in children.into_iter().rev() {
+                stack.push((rel.join(&child), abs.join(&child)));
+            }
+        } else {
+            // Covers regular files and symlinks; `follow_symlinks(false)` on the
+            // builder means a symlink is stored as a link, not as its target.
+            match builder.append_path_with_name(&abs, &rel) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    unreadable.push(abs.display().to_string());
+                }
+                Err(e) => return Err(Error::io(&abs, e)),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Decrypt and extract an archive into `dest` (`/` on a real restore).

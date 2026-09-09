@@ -528,6 +528,21 @@ async fn run(cli: Cli) -> Result<()> {
             println!("archive:  {}", info.path.display());
             println!("size:     {} bytes", info.size_bytes);
             println!("sha256:   {}", info.sha256);
+            if !info.unreadable.is_empty() {
+                // Не предупреждение «на всякий случай»: это список того, чего в архиве
+                // НЕТ. Восстановление из него эти файлы не вернёт.
+                println!(
+                    "\nНЕ ПОПАЛО В АРХИВ — демону не разрешено это читать ({}):",
+                    info.unreadable.len()
+                );
+                for path in &info.unreadable {
+                    println!("  {path}");
+                }
+                println!(
+                    "Храните их отдельно, вместе с приватным age-ключом. Ключ admin CA\n\
+                     закрыт от демона намеренно (deploy/fix-permissions.sh)."
+                );
+            }
         }
         Command::Backup(BackupCommand::Status) => {
             let status: hearthd::model::health::BackupStatus =

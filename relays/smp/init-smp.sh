@@ -108,9 +108,13 @@ PY
 umask 077
 printf '%s\n' "$PASSWORD" > "$PASSWORD_FILE"
 # hearthd работает от пользователя hearth и обязан прочитать этот пароль, чтобы
-# собрать адрес релея для bundle. root:root 0600 сломал бы выпуск bundle с EACCES.
-chown root:hearth "$PASSWORD_FILE" 2>/dev/null || true
-chmod 0640 "$PASSWORD_FILE"
+# собрать адрес релея для bundle. root:root сломал бы выпуск bundle с EACCES.
+#
+# Владелец — hearth, режим 0600: демон читает как ВЛАДЕЛЕЦ, группе доступ не нужен
+# вовсе. Прежние root:hearth 0640 давали то же самое, но шире, и не проходили
+# acceptance-тест A3, который требует ровно 0600.
+chown hearth:hearth "$PASSWORD_FILE" 2>/dev/null || true
+chmod 0600 "$PASSWORD_FILE"
 unset PASSWORD
 
 # Каталоги релея создаёт root — отдать их пользователю релея и открыть чтение
@@ -127,7 +131,7 @@ OK. Дальше:
   1. Привести $INI к целевой конфигурации:
      ./verify-ini-keys.sh $INI smp/smp-server.ini.example
      Особое внимание: port = 5223,443 и пароли control port.
-  2. Пароль на создание очередей — в $PASSWORD_FILE (0640 root:hearth). Оттуда его
+  2. Пароль на создание очередей — в $PASSWORD_FILE (0600 hearth:hearth). Оттуда его
      читает hearthd. На публично доступном релее это единственное, что отделяет
      посторонних от создания очередей — не потеряйте и не публикуйте.
   3. Отпечаток CA: $CONFIG_DIR/fingerprint — это часть адреса релея.

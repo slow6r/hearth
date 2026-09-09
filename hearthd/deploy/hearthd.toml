@@ -1,4 +1,10 @@
-# hearthd — node configuration for `fels` (192.168.1.72).
+# hearthd — reference configuration.
+#
+# ЭТО ЭТАЛОН, А НЕ КОНФИГ УЗЛА. Файл используется как фикстура в тестах
+# (config::tests::reference), поэтому боевые значения сюда попадать не должны:
+# реальный отпечаток админа в allowed_admin_fingerprints ломает тесты авторизации,
+# а удалённая секция [backup.remote] — тест валидации адреса бэкапа.
+# Значения развёрнутого узла fels перечислены в docs/deploy-fels-2026-09-09.md.
 #
 # Deployed to /etc/hearth/hearthd.toml (root:hearth 0640).
 # Every value is checked by Config::validate() at start-up; unknown keys are a hard
@@ -8,38 +14,26 @@
 # SimpleX server. Message content is end-to-end encrypted and the relay CA fingerprint
 # is pinned inside every client address, so a public relay is upstream's normal mode.
 # What stays private to the LAN: this control plane, its admin API, and ssh.
-#
-# THIS IS NOT A DEDICATED APPLIANCE (ADR 0008). The same host serves you-can-do.ru
-# behind a Cloudflare tunnel, streams the desktop over Sunshine and sits on a ZeroTier
-# network. See /etc/hearth/nftables/hearth.nft for what that costs.
 
 [node]
-name = "hearth-fels"
-# The public hostname (or IP) clients connect to. It goes into every client address,
-# so it outlives the hardware — changing it means every family member re-adds every
-# contact (docs/runbook-rotate-address.md).
-#
-# Развёртывание 2026-09-09: голый публичный адрес. Провайдер называет услугу
-# статической, письменного подтверждения нет — если адрес всё-таки сменится, это
-# означает ручную перенастройку всех контактов у всех (runbook-rotate-address.md).
-# Домен вместо адреса убирает этот риск ценой одной DNS-записи.
-host = "185.145.126.254"
+name = "hearth-node"
+# ==> SET THIS. The public hostname (or IP) clients connect to. It goes into every
+# client address, so it outlives the hardware — changing it means every family member
+# re-adds every contact (docs/runbook-rotate-address.md).
+# A hostname with dynamic DNS is usually right for a home connection; a bare IP works
+# only if your ISP address is static.
+host = "relay.example.org"
 # Networks hearthd ITSELF may connect to (backup target, alert channel). The relays
-# serve the internet; the control plane never leaves the LAN.
+# serve the internet; the control plane never leaves the LAN. Adjust to your LAN.
 lan_networks = ["192.168.1.0/24"]
 # Who may reach the admin API and ssh. Must be inside lan_networks.
 admin_networks = ["192.168.1.0/24"]
 
 [api]
 # Admin API: LAN address only, never a wildcard bind. Config::validate refuses both.
-listen = "192.168.1.72:7443"
+listen = "192.168.1.10:7443"
 pki_dir = "/etc/hearth/pki"
-# An allow-list on top of the CA registry: even a certificate this CA issued is refused
-# unless its fingerprint is named here. Empty would mean "anything in admins.json".
-allowed_admin_fingerprints = [
-    # owner — private key lives on the admin workstation, not here.
-    "e0a23f90b48b1c6264a312bdb9456e1922435437e9ece1aa0e5d72677e71e0cd",
-]
+allowed_admin_fingerprints = []
 max_body_bytes = 65536
 
 [paths]
@@ -51,13 +45,11 @@ secrets_dir = "/etc/hearth/secrets"
 manifest = "/etc/hearth/manifest.toml"
 
 # ---------------------------------------------------------------------------
-# Relays — stock upstream binaries (simplexmq v7.0.1). hearthd supervises them,
-# never edits their data.
+# Relays — stock upstream binaries. hearthd supervises them, never edits their data.
 #
-# NOTE ON DISK. /var is a 12 GiB partition with 9.3 GiB free, and the store log grows
-# without bound. /var/opt/simplex, /var/opt/simplex-xftp and /var/opt/hearth are bind
-# mounts onto /srv (425 GiB) — see the var-opt-*.mount units. The paths below are the
-# mount points, so nothing here changes if that ever moves again.
+# Upstream documents `[TRANSPORT] host` as "only used to print server address on
+# start": the server listens on every interface. So only ports are configured here,
+# and address filtering is the firewall's job.
 # ---------------------------------------------------------------------------
 
 [smp]
@@ -66,8 +58,7 @@ unit = "smp-server.service"
 scheme = "smp"
 port = 5223
 # Upstream's own default is "5223,443". Port 443 is what gets through hotel wifi and
-# restrictive mobile networks. Nothing else on this host wants 443: the game site is
-# served through the Cloudflare tunnel, which is outbound-only.
+# restrictive mobile networks — keep it unless something else needs 443 on this host.
 extra_ports = [443]
 control = "127.0.0.1:5224"
 config_file = "/etc/opt/simplex/smp-server.ini"
@@ -94,23 +85,29 @@ process = "xftp-server"
 enabled = true
 unit = "coturn.service"
 port = 3478
-# TURN over TLS is deliberately OFF. Enabling it is four coordinated changes, not one,
-# and Config::validate refuses a half-configuration:
+# TURN over TLS. Without it, calls fail on networks that permit only 443/tcp.
+#
+# Enabling it is NOT one switch — it takes four coordinated changes, and Config::validate
+# refuses a half-configuration rather than letting coturn start with no TLS listener:
 #   1. tls_port + tls_cert + tls_key here (all three, or none);
-#   2. add 5349 to the relay_ports set in deploy/nftables/hearth.nft;
-#   3. permit coturn's outbound TCP relay there too — `turns:...?transport=tcp`
-#      allocations use TCP and the current rule permits UDP only;
-#   4. a certificate for node.host, renewed (certbot; root already has egress).
-# Without it, calls fail only on networks that permit 443/tcp and nothing else.
+#   2. open the port in deploy/nftables/hearth.nft (relay_ports set);
+#   3. allow coturn's outbound TCP relay there too — `turns:...?transport=tcp`
+#      allocations use TCP, and the current rule permits UDP only;
+#   4. get and renew the certificate for node.host (certbot needs outbound access;
+#      root already has it via app_egress).
+# 5349 is conventional; 443 would collide with smp extra_ports above.
 # tls_port = 5349
-# tls_cert = "/etc/letsencrypt/live/<node.host>/fullchain.pem"
-# tls_key  = "/etc/letsencrypt/live/<node.host>/privkey.pem"
+# tls_cert = "/etc/letsencrypt/live/relay.example.org/fullchain.pem"
+# tls_key  = "/etc/letsencrypt/live/relay.example.org/privkey.pem"
 relay_min_port = 49160
 relay_max_port = 49200
 realm = "hearth"
 secret_file = "/etc/hearth/secrets/turn-secret"
 config_template = "/etc/hearth/templates/turnserver.conf.tmpl"
-config_file = "/etc/turnserver.conf"
+# Не /etc/turnserver.conf: запись атомарная (временный файл + rename), а под
+# ProtectSystem=strict каталог /etc read-only — ротация падала с EROFS. Каталог
+# setgid turnserver, чтобы coturn (User=turnserver) смог прочитать отрендеренное.
+config_file = "/etc/hearth/turn/turnserver.conf"
 # Credential lifetime. Bundles are issued once per device, so a short TTL means calls
 # stop working a day later while messages keep flowing — confusing. Match it to the
 # secret rotation period instead.
@@ -131,9 +128,7 @@ restart_enabled = true
 
 [egress]
 # The relays accept connections from the internet; this watches the OTHER direction —
-# anything on this host trying to reach out. On a multi-purpose host the claim is
-# narrower than it used to be (ADR 0008): egress_drop means THE RELAY STACK tried to
-# reach the internet. Expected value over 24h is still 0.
+# anything on this host trying to reach out. Expected value over 24h is still 0.
 poll_interval_secs = 30
 socket_scan_interval_secs = 300
 nft_family = "inet"
@@ -162,26 +157,27 @@ paths = [
     "/var/lib/hearth",
 ]
 spool_dir = "/var/opt/hearth/backup"
-# Public age key of the owner. The PRIVATE key is NOT on this machine: it was generated
-# on the admin workstation (keys/README.md) and belongs on an offline medium, with a
-# second copy held by another adult (ТЗ §14).
-#
-# The asymmetry is the point: hearthd can CREATE an archive and cannot READ one.
+# ==> SET THIS. Public age key of the owner. The PRIVATE key never touches this
+# machine (YubiKey / offline copy). See keys/README.md.
 recipients = [
-    "age1famvl64wz24u3exvqmgz3prhrezjrmruwtzz6t7gh5avqc87vcdqg894mf",
+    "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsyfhqz",
 ]
 retention_days = 14
 
-# [backup.remote] is deliberately absent. The reference config pushed to
-# 192.168.1.20 (`hearth-backup`); no such host exists on this LAN — a configured but
-# unreachable target means a failed-backup alert every single night, which trains the
-# owner to ignore backup alerts. Archives stay in spool_dir, which is a bind mount onto
-# /srv (425 GiB free). Off-host copies are a manual step until there is a real target.
+[backup.remote]
+host = "192.168.1.20"
+port = 22
+user = "hearth-backup"
+path = "/srv/hearth-backup"
+ssh_key = "/etc/hearth/secrets/backup_ed25519"
 
 [alerts]
-# [alerts.gotify] is deliberately absent: nothing serves 8088 on the router (checked),
-# and pointing hearthd at a dead endpoint produces a delivery failure per alert.
-# The journal (`journalctl -u hearthd`) and `hearthctl alerts` are the record.
+[alerts.gotify]
+addr = "192.168.1.1:8088"
+token_file = "/etc/hearth/secrets/gotify-token"
+priority = 8
+min_severity = "warning"
+
 [alerts.beeper]
 command = ["/usr/local/sbin/hearth-beep"]
 min_severity = "critical"

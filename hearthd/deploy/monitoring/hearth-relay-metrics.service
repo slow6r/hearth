@@ -1,0 +1,19 @@
+[Unit]
+Description=hearth: relay metrics -> node_exporter textfile collector
+Documentation=file:///srv/hearth/src/hearthd/deploy/monitoring/README.md
+After=smp-server.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hearth-relay-metrics
+# Читает файлы, которые пишет simplex, кладёт результат в каталог node_exporter.
+User=prometheus
+Group=prometheus
+SupplementaryGroups=simplex
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/node_exporter/textfile
+ReadOnlyPaths=/var/opt/simplex /var/opt/simplex-xftp
+SyslogIdentifier=hearth-relay-metrics

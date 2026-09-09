@@ -16,6 +16,17 @@ use crate::error::{Error, Result};
 pub const MODE_SECRET: u32 = 0o600;
 /// `0640` — owner write, group read. Used for state the admin group may inspect.
 pub const MODE_STATE: u32 = 0o640;
+/// `0640` — a secret that a DIFFERENT service has to read.
+///
+/// The rendered coturn config holds `static-auth-secret`, and on Debian coturn runs as
+/// `User=turnserver` — not as `hearth`, and not as root. Written `0600` by `hearth`, the
+/// file is unreadable by the only process that needs it, and coturn fails to start with
+/// nothing but a permissions error to go on.
+///
+/// The mode alone would expose the secret to whatever group the file lands in, so it is
+/// only half the mechanism: the containing directory is setgid `turnserver`, which is
+/// what narrows "group" to exactly the service that must read it.
+pub const MODE_SHARED_SECRET: u32 = 0o640;
 /// `0750` — directories.
 pub const MODE_DIR: u32 = 0o750;
 
