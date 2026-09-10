@@ -48,3 +48,10 @@ Thumbs.db
 # отпечатка ключа в keys/apksigner-fingerprints.txt.
 /android/*.apk
 /android/*.apk.idsig
+
+# Готовые сборки клиентов. В git не кладём: APK и MSI весят сотни мегабайт, а
+# собираются из исходников одной командой. Раздаются через узел и вручную.
+/android/*.apk
+/android/*.apk.idsig
+/desktop/*.msi
+/desktop/*.exe
