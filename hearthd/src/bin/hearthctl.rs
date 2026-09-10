@@ -133,11 +133,11 @@ enum DeviceCommand {
 enum InviteCommand {
     /// Выписать приглашение и напечатать токен для вшивания в сборку.
     Create {
-        /// Сколько устройств можно завести по нему.
-        #[arg(long, default_value_t = 1)]
+        /// Сколько устройств можно завести. 0 — без ограничения (по умолчанию).
+        #[arg(long, default_value_t = 0)]
         uses: u32,
-        /// Сколько дней оно живо.
-        #[arg(long, default_value_t = 7)]
+        /// Сколько дней оно живо. 0 — бессрочно (по умолчанию).
+        #[arg(long, default_value_t = 0)]
         days: i64,
         #[arg(long)]
         note: Option<String>,
@@ -518,10 +518,17 @@ async fn run(cli: Cli) -> Result<()> {
                 )
                 .await?;
             println!(
-                "выписано `{}`: {} устройств(а), до {}",
+                "выписано `{}`: {}, {}",
                 invite.id,
-                invite.max_uses,
-                invite.expires.format("%Y-%m-%d %H:%M UTC")
+                if invite.max_uses == 0 {
+                    "без ограничения по числу устройств".to_string()
+                } else {
+                    format!("до {} устройств", invite.max_uses)
+                },
+                match invite.expires {
+                    Some(expires) => format!("до {}", expires.format("%Y-%m-%d %H:%M UTC")),
+                    None => "бессрочно".to_string(),
+                }
             );
             match write_token {
                 Some(path) => {
@@ -535,8 +542,14 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
             println!();
-            println!("Пока приглашение живо, файл APK с ним впускает в контур.");
-            println!("Когда раздали — `hearthctl invite revoke {}`.", invite.id);
+            println!("Кто получит этот APK, сможет создавать очереди на релее — то есть");
+            println!("тратить ваш трафик и диск. Переписки это не открывает: она");
+            println!("зашифрована от устройства до устройства.");
+            println!(
+                "Если раздали не туда — `hearthctl invite revoke {}`.",
+                invite.id
+            );
+            println!("Уже заведённые устройства отзыв приглашения не трогает.");
         }
         Command::Invite(InviteCommand::List) => {
             let invites: Vec<Invite> = api.get_json("/invites").await?;
@@ -546,12 +559,18 @@ async fn run(cli: Cli) -> Result<()> {
             let now = Utc::now();
             for invite in invites {
                 println!(
-                    "{:<18} {:<10} {}/{} использований  до {}  {}",
+                    "{:<18} {:<10} {:<22} {:<12} {}",
                     invite.id,
                     invite.state_at(now),
-                    invite.uses,
-                    invite.max_uses,
-                    invite.expires.format("%Y-%m-%d"),
+                    if invite.max_uses == 0 {
+                        format!("{} заведено", invite.uses)
+                    } else {
+                        format!("{}/{} использований", invite.uses, invite.max_uses)
+                    },
+                    match invite.expires {
+                        Some(expires) => expires.format("до %Y-%m-%d").to_string(),
+                        None => "бессрочно".to_string(),
+                    },
                     invite.note.as_deref().unwrap_or("")
                 );
                 if !invite.claimed.is_empty() {

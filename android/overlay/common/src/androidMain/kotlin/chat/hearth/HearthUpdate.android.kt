@@ -133,6 +133,26 @@ class HearthAndroidUpdateTransport(
     }
   }
 
+  /**
+   * Свежие креды TURN.
+   *
+   * Не часть [HearthUpdateTransport]: обновлениям это не нужно, а звонкам нужно на
+   * каждом запуске. Живёт здесь только потому, что адрес узла и токен уже настроены.
+   */
+  suspend fun turnCredentials(): Result<String> = withContext(Dispatchers.IO) {
+    runCatching {
+      val conn = open("/turn-credentials")
+      try {
+        val code = conn.responseCode
+        if (code == 404) throw IllegalStateException("на узле выключен TURN")
+        if (code != 200) throw IllegalStateException("узел ответил $code")
+        conn.inputStream.use { it.readBoundedText(MANIFEST_LIMIT_BYTES) }
+      } finally {
+        conn.disconnect()
+      }
+    }
+  }
+
   private fun open(path: String): HttpURLConnection =
     (URL("https://$nodeHost:$port$path").openConnection() as HttpURLConnection).apply {
       // Токен заголовком, а не в URL: URL оседает в логах прокси и в истории.

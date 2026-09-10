@@ -59,7 +59,21 @@ rg -n "hearthDeviceId|val hearth" apps/multiplatform/common/src/commonMain/kotli
 `hearthDeviceId`, `hearthEnrolledAt`, `hearthUpdateHost`, `hearthUpdatePort`,
 `hearthUpdateToken` — их заполняет импорт bundle, из них собирается транспорт.
 
-### 4. `gradle.properties` — своя нумерация (~4 строки)
+### 4. Обновление ICE при запуске (~5 строк)
+```bash
+rg -n "androidChatInitializedAndStarted" apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
+```
+Сразу после старта чата — `chat.hearth.hearthRefreshIceServers()`.
+
+Это не украшение. Креды TURN — подпись с датой, они протухают по календарю
+(`turn.credential_ttl_secs`). Без обновления через месяц звонки перестают проходить
+**там, где нужен ретранслятор**, а сообщения продолжают ходить: отказ выглядит как
+«иногда работает», и причину ищут где угодно, кроме даты.
+
+Вызов идёт из точки старта, а не из экрана настроек: тот экран человек может не
+открыть ни разу за год.
+
+### 5. `gradle.properties` — своя нумерация (~4 строки)
 `android.version_name=<тег>-hN`, `android.version_code` строго растёт: именно по коду
 приложение решает, новее ли сборка на узле, и Android запрещает откат кода назад.
 

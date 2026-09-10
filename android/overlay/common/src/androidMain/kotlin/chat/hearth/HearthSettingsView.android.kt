@@ -39,7 +39,7 @@ actual fun HearthNodeSettingsView() {
   val deviceId = ChatController.appPrefs.hearthDeviceId.get()
 
   ColumnWithScrollBar {
-    AppBarTitle("Домашний узел")
+    AppBarTitle("Узел")
 
     SectionView("ЭТО УСТРОЙСТВО") {
       SectionTextFooter(

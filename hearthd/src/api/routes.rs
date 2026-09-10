@@ -214,10 +214,17 @@ async fn create_invite(
         .emit(crate::model::alert::Alert::warning(
             "api",
             format!(
-                "выписано приглашение `{}` на {} устройств до {}",
+                "выписано приглашение `{}`: {}, {}",
                 invite.id,
-                invite.max_uses,
-                invite.expires.format("%Y-%m-%d")
+                if invite.max_uses == 0 {
+                    "без ограничения по числу устройств".to_string()
+                } else {
+                    format!("до {} устройств", invite.max_uses)
+                },
+                match invite.expires {
+                    Some(expires) => format!("действует до {}", expires.format("%Y-%m-%d")),
+                    None => "бессрочно".to_string(),
+                }
             ),
         ))
         .await;

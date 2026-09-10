@@ -94,6 +94,7 @@ Haskell-ядро (`.so`) в v1 **не собираем**: берём релиз�
 | `overlay/android/.../raw/hearth_ca.pem` | CA узла для пиннинга в network security config |
 | `overlay/common/.../HearthInvite.kt` | Вшитое приглашение: разбор, валидация, первый запуск (ADR 0011) |
 | `overlay/common/.../HearthInvite.android.kt` | Чтение ресурса приглашения и `POST /claim` |
+| `overlay/common/.../HearthTurn.kt` + `*.android.kt` | Автообновление ICE при запуске — иначе звонки умирают по календарю |
 
 Перед сборкой overlay раскладывается по форку скриптом `scripts/sync-overlay.sh`;
 `build-release.sh` вызывает его сам. Собрать форк, не разложив overlay, — значит

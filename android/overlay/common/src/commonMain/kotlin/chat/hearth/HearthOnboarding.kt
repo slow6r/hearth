@@ -77,13 +77,13 @@ class HearthOnboardingImporter(private val applier: HearthBundleApplier) {
  * whole of the fork's user-facing text in one file.
  */
 object HearthOnboardingText {
-  const val TITLE = "Настройка домашнего узла"
+  const val TITLE = "Настройка узла"
   const val BODY =
     "Отсканируйте QR-код, который показал администратор узла.\n\n" +
       "Код содержит пароли релеев — показывайте его лично, " +
       "не пересылайте и не сохраняйте в галерею."
   const val AUTO_BODY =
-    "Подключаемся к домашнему узлу. Это занимает несколько секунд " +
+    "Подключаемся к узлу. Это занимает несколько секунд " +
       "и делается один раз."
   const val SCAN_BUTTON = "Сканировать QR"
   const val NETWORK_HINT =

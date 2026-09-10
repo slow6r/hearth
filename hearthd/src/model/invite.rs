@@ -13,13 +13,20 @@
 //! # Почему не вшить сразу bundle
 //!
 //! Потому что bundle — это пароли релеев, и вшитый он не отзывается: чтобы закрыть
-//! доступ утёкшей сборке, пришлось бы менять пароль всей семье. Приглашение —
-//! отдельный секрет с тремя ограничителями: срок, число использований и отзыв. Когда
-//! оно кончилось, APK превращается в обычный файл, из которого ничего не достать.
+//! доступ утёкшей сборке, пришлось бы менять пароль всем сразу. Приглашение гасится
+//! одной командой, и заведённые по нему устройства при этом продолжают работать.
 //!
-//! Разменивать всё равно приходится: пока приглашение живо, файл сборки ценен, и
-//! получивший его войдёт в контур. Поэтому срок по умолчанию короткий, а каждое
-//! использование поднимает alert — заведение устройства должно быть заметным.
+//! # Чего это НЕ защищает
+//!
+//! Стоит назвать прямо, чтобы ограничители не выглядели строже, чем они есть.
+//! Человек с чужим APK получает возможность создавать очереди на релее — то есть
+//! тратить чужой трафик и диск. Он НЕ получает ничьей переписки (она зашифрована
+//! от устройства до устройства, сервер её не читает), ни списка людей, ни
+//! возможности кому-то написать без ссылки-приглашения от самого человека.
+//!
+//! Поэтому по умолчанию приглашение бессрочное и без счётчика: так это и работает в
+//! SimpleX, где серверы вообще публичные. Ограничители остаются доступными, но это
+//! инструмент на случай «раздали не туда», а не политика.
 
 use std::path::{Path, PathBuf};
 
@@ -29,10 +36,13 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::store;
 
-/// Сколько живёт приглашение, если срок не задан явно.
-pub const DEFAULT_TTL_DAYS: i64 = 7;
-/// Сколько устройств заводится по одному приглашению, если не задано явно.
-pub const DEFAULT_MAX_USES: u32 = 1;
+/// Срок по умолчанию: 0 — бессрочно.
+pub const DEFAULT_TTL_DAYS: i64 = 0;
+/// Число устройств по умолчанию: 0 — без счётчика.
+pub const DEFAULT_MAX_USES: u32 = 0;
+/// Верхняя граница срока, когда он всё-таки задан. Десять лет — это «пусть будет
+/// число», а не политика: бессрочное приглашение задаётся нулём, а не 3650 днями.
+const MAX_TTL_DAYS: i64 = 3650;
 
 /// Одно приглашение.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,8 +53,10 @@ pub struct Invite {
     pub token: String,
     #[serde(with = "crate::model::rfc3339")]
     pub created: DateTime<Utc>,
-    #[serde(with = "crate::model::rfc3339")]
-    pub expires: DateTime<Utc>,
+    /// `None` — бессрочно.
+    #[serde(default, with = "crate::model::rfc3339::option")]
+    pub expires: Option<DateTime<Utc>>,
+    /// `0` — без ограничения по числу устройств.
     pub max_uses: u32,
     #[serde(default)]
     pub uses: u32,
@@ -61,16 +73,18 @@ pub struct Invite {
 impl Invite {
     /// Можно ли им ещё воспользоваться.
     pub fn is_usable_at(&self, now: DateTime<Utc>) -> bool {
-        self.revoked.is_none() && now < self.expires && self.uses < self.max_uses
+        self.revoked.is_none()
+            && self.expires.is_none_or(|expires| now < expires)
+            && (self.max_uses == 0 || self.uses < self.max_uses)
     }
 
     /// Человекочитаемая причина отказа — для `invite list`, не для ответа клиенту.
     pub fn state_at(&self, now: DateTime<Utc>) -> &'static str {
         if self.revoked.is_some() {
             "отозвано"
-        } else if now >= self.expires {
+        } else if self.expires.is_some_and(|expires| now >= expires) {
             "просрочено"
-        } else if self.uses >= self.max_uses {
+        } else if self.max_uses != 0 && self.uses >= self.max_uses {
             "исчерпано"
         } else {
             "активно"
@@ -109,18 +123,13 @@ impl InviteRegistry {
 
     /// Выписать приглашение.
     pub fn create(&mut self, max_uses: u32, ttl_days: i64, note: Option<String>) -> Result<Invite> {
-        if max_uses == 0 {
-            return Err(Error::invalid("max_uses must be at least 1"));
-        }
-        // Верхние границы намеренно жёсткие: приглашение на сто устройств и на год —
-        // это уже не приглашение, а второй пароль от узла, который никто не отзовёт.
-        if max_uses > 50 {
+        // Ноль означает «без ограничения» и для срока, и для счётчика — это обычный
+        // случай раздачи. Верхняя граница есть только у заданного срока, и она
+        // существует ради одного: поймать `--days 100000`, то есть опечатку.
+        if !(0..=MAX_TTL_DAYS).contains(&ttl_days) {
             return Err(Error::invalid(
-                "max_uses above 50 makes the APK a shared key",
+                "ttl must be 0 (no expiry) or between 1 and 3650 days",
             ));
-        }
-        if !(1..=90).contains(&ttl_days) {
-            return Err(Error::invalid("ttl must be between 1 and 90 days"));
         }
         let now = Utc::now();
         let invite = Invite {
@@ -129,7 +138,7 @@ impl InviteRegistry {
             // 32 байта — столько же, сколько у токена устройства.
             token: store::random_hex(32),
             created: now,
-            expires: now + Duration::days(ttl_days),
+            expires: (ttl_days > 0).then(|| now + Duration::days(ttl_days)),
             max_uses,
             uses: 0,
             revoked: None,
@@ -229,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn expiry_closes_the_invite() {
+    fn expiry_closes_the_invite_when_a_term_was_asked_for() {
         let dir = tempfile::tempdir().unwrap();
         let mut reg = registry(&dir);
         let invite = reg.create(5, 1, None).unwrap();
@@ -240,10 +249,31 @@ mod tests {
     }
 
     #[test]
+    fn the_default_invite_never_expires_and_has_no_counter() {
+        // Обычный случай раздачи: сборку ставят когда захотят, в том числе через год.
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = registry(&dir);
+        let invite = reg
+            .create(DEFAULT_MAX_USES, DEFAULT_TTL_DAYS, None)
+            .unwrap();
+        assert!(invite.expires.is_none());
+
+        let much_later = Utc::now() + Duration::days(3650);
+        assert!(invite.is_usable_at(much_later));
+        for i in 0..200 {
+            reg.note_claim(&invite.id, &format!("device-{i}")).unwrap();
+        }
+        let after = reg.get(&invite.id).unwrap();
+        assert_eq!(after.uses, 200);
+        assert!(after.is_usable_at(much_later));
+        assert_eq!(after.state_at(much_later), "активно");
+    }
+
+    #[test]
     fn revoke_closes_the_invite_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let mut reg = registry(&dir);
-        let invite = reg.create(5, 7, None).unwrap();
+        let invite = reg.create(0, 0, None).unwrap();
         let revoked = reg.revoke(&invite.id).unwrap();
         let first = revoked.revoked.unwrap();
         assert!(reg.find_usable(&invite.token, Utc::now()).is_none());
@@ -252,12 +282,24 @@ mod tests {
     }
 
     #[test]
-    fn absurd_limits_are_refused() {
+    fn revoking_does_not_touch_devices_already_enrolled() {
+        // Гасим кран, а не выгоняем людей: у заведённых устройств свои токены, и
+        // отзыв приглашения на них не действует — это отдельная команда.
         let dir = tempfile::tempdir().unwrap();
         let mut reg = registry(&dir);
-        assert!(reg.create(0, 7, None).is_err());
-        assert!(reg.create(51, 7, None).is_err());
-        assert!(reg.create(1, 0, None).is_err());
-        assert!(reg.create(1, 91, None).is_err());
+        let invite = reg.create(0, 0, None).unwrap();
+        reg.note_claim(&invite.id, "mama-pixel").unwrap();
+        let revoked = reg.revoke(&invite.id).unwrap();
+        assert_eq!(revoked.claimed, vec!["mama-pixel"]);
+    }
+
+    #[test]
+    fn an_absurd_term_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = registry(&dir);
+        assert!(reg.create(0, -1, None).is_err());
+        assert!(reg.create(0, 100_000, None).is_err());
+        // А вот это законно: и без счётчика, и без срока.
+        assert!(reg.create(0, 0, None).is_ok());
     }
 }
