@@ -55,3 +55,6 @@ Thumbs.db
 /android/*.apk.idsig
 /desktop/*.msi
 /desktop/*.exe
+# Нативные библиотеки Windows из релиза upstream: 258 МБ, восстанавливаются
+# по инструкции в android/README.md с проверкой хеша.
+/android/desktop-runtime/
