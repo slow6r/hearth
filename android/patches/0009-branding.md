@@ -15,7 +15,32 @@ SimpleX и не конфликтовал с ним при обновлениях
 ## Точка интеграции
 - `apps/multiplatform/android/build.gradle.kts` → `applicationId`, `versionName`.
 - `res/mipmap-*` → иконка; `res/values*/strings.xml` → `app_name`.
-- Тема — **отдельным модулем**, не размазывая по upstream-файлам (ТЗ §8.5).
+
+### Что пришлось трогать сверх этого
+
+Замысел «тема отдельным модулем, не размазывая по чужим файлам» не выдержал
+столкновения с реальностью: бренд у upstream размазан сам. Перечисляю всё, иначе при
+ребейзе половина вернётся синей и с чужим именем.
+
+| Где | Что |
+|---|---|
+| `MR/*/strings.xml` (38 локалей) | SimpleX → Hearth в **значениях**; имена ресурсов и комментарии не трогать — по ним ищут |
+| `MR/images/logo@4x`, `logo_light@4x` | надпись: костёр + «Hearth» |
+| `MR/images/ic_simplex_*`, `ic_simplex*.svg` | квадратная иконка и иконки трея |
+| `MR/images/icon_foreground_common@4x` | **логотип в центре QR** (десктоп) |
+| `platform/Images.android.kt` | логотип в центре QR (Android) — по имени ресурса, наша drawable в другом модуле |
+| `ui/theme/Color.kt`, `Theme.kt` | `SimplexBlue` → огонь; четыре палитры, включая пузыри сообщений |
+| `MR/*/strings.xml` | `#0088ff` → `#d9480f` в ссылках внутри текстов |
+| `newchat/OnboardingCards.kt` | градиент карточек приглашений — OKLCH прямо в коде, тона в огонь |
+| `DesktopApp.kt`, `NtfManager.desktop.kt` | заголовок окна и подпись в трее — жёстко зашитые `"SimpleX"` |
+| `usersettings/Appearance.android.kt` | секция выбора иконки: второй вариант — синяя иконка SimpleX |
+| `model/SimpleXAPI.kt` → `simplexChatLink` | показ ссылки как `https://simplex.chat/...` — домен убран |
+| `SettingsView.kt`, `ChatHelpView.kt` | «Что нового», «написать письмо», «звезда», «оценить», «внести вклад», ссылка на команду |
+| `desktop/build.gradle.kts` | `packageName`, иконки, `upgradeUuid`, `bundleID`, копирайт |
+
+Схема `simplex:` в ссылках-приглашениях **остаётся**: её разбирает ядро на принимающей
+стороне, и переписать её — значит сломать соединение (ТЗ §8.3 запрещает трогать
+форматы адресов). Убран только домен показа.
 
 ## Проверка
 - Ручная: приложение ставится рядом со стоковым SimpleX.
