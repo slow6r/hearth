@@ -20,8 +20,9 @@
 | 0009 | [Брендинг и applicationId](0009-branding.md) | `build.gradle.kts`, ресурсы | ~50 |
 | 0010 | [Отключить in-app обновления](0010-no-updates.md) | экран «О программе» | ~20 |
 | 0011 | [Обновление с домашнего узла и самозаведение устройств](0011-self-update.md) | `AndroidManifest.xml`, экран настроек, префы, `gradle.properties` | ~45 |
+| 0012 | [Только arm64-v8a, и почему не флагом](0012-abi-arm64-only.md) | `android/build.gradle.kts` | ~15 |
 
-Итого ~375 строк + overlay-файлы (`android/overlay/`), которые в чужих файлах не живут
+Итого ~390 строк + overlay-файлы (`android/overlay/`), которые в чужих файлах не живут
 и при ребейзе не конфликтуют.
 
 ---

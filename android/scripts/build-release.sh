@@ -32,11 +32,17 @@ echo "== Сборка release (только arm64-v8a)"
 # assembleFossRelease, а НЕ assembleRelease: upstream делает агрегирующие задачи
 # (build, assemble, assembleRelease, bundle) падающими намеренно — они собрали бы
 # релиз с Play Billing либо app bundle без него. Флейвор foss — это F-Droid и GitHub.
-./gradlew clean :android:assembleFossRelease \
-    -Pandroid.injected.build.abi=arm64-v8a \
-    --no-daemon
+# Без -Pandroid.injected.build.abi: этот флаг означает «деплой из IDE на подключённое
+# устройство», и AGP помечает такой APK как testOnly — Android отказывается ставить
+# его обычным способом («приложение предназначено только для тестирования»).
+# Ограничение ABI задано в android/build.gradle.kts, см. patches/0012.
+./gradlew clean :android:assembleFossRelease --no-daemon
 
-APK="$(find android/build/outputs/apk/fossRelease -name '*.apk' | head -1)"
+# Путь зависит от того, включены ли abi-splits: без них APK лежит в apk/fossRelease,
+# со splits — в apk/foss/release. Ищем по всему дереву, чтобы скрипт не разъезжался
+# с конфигурацией сборки.
+APK="$(find android/build/outputs/apk -name '*-release*.apk' | head -1)"
+[ -n "$APK" ] || { echo "APK не найден в android/build/outputs/apk" >&2; exit 1; }
 echo "== Собрано: $APK"
 sha256sum "$APK"
 
