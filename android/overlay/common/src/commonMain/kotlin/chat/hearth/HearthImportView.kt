@@ -36,7 +36,6 @@ import chat.simplex.common.views.onboarding.OnboardingStage
  */
 @Composable
 fun HearthImportView() {
-  val importer = remember { HearthOnboardingImporter(HearthCoreApplier()) }
   val error = remember { mutableStateOf<String?>(null) }
   val busy = remember { mutableStateOf(false) }
   val showScanner = remember { mutableStateOf(true) }
@@ -102,7 +101,7 @@ fun HearthImportView() {
       busy.value = true
       error.value = null
 
-      when (val result = importer.import(payload)) {
+      when (val result = hearthAcceptBundle(payload)) {
         is HearthImportResult.Applied -> {
           showScanner.value = false
           // Дальше — обычный онбординг upstream, без единой правки.

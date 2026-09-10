@@ -1,5 +1,7 @@
 package chat.hearth
 
+import chat.simplex.common.model.ChatController
+
 /**
  * Onboarding step 0 — "Отсканируй QR настройки узла" (ТЗ §8.2 п.7).
  *
@@ -90,4 +92,51 @@ object HearthOnboardingText {
     "Дополнительной настройки сети не нужно: узел доступен из интернета. " +
       "Если сообщения не идут — проверьте, что узел включён."
   const val APPLIED = "Узел настроен. Дальше — обычная настройка профиля."
+}
+
+/**
+ * Принять bundle: проверить и отложить до появления профиля.
+ *
+ * # Почему не применить сразу
+ *
+ * Экран узла идёт ПЕРВЫМ, раньше стокового онбординга — так и задумано: телефон должен
+ * знать свой узел до того, как что-либо создаст. Но записать серверы в ядро в этот
+ * момент нельзя: `apiSetUserServers` требует `userId`, а пользователя ещё нет —
+ * `currentUserId()` бросает «no current user». То есть применение неизбежно позже
+ * приёма.
+ *
+ * Так что здесь bundle проверяется (подменённый или протухший QR должен быть отвергнут
+ * на месте, пока человек стоит перед кодом) и откладывается. Применяет его
+ * [hearthApplyPendingBundle] в первый момент, когда профиль появился.
+ */
+suspend fun hearthAcceptBundle(payload: String): HearthImportResult {
+  val bundle = HearthBundle.parse(payload).getOrElse { error ->
+    return HearthImportResult.Rejected(error.message ?: "bundle is not valid")
+  }
+  return runCatching {
+    ChatController.appPrefs.hearthPendingBundle.set(payload)
+    HearthImportResult.Applied(HearthPresets.serversFrom(bundle), bundle.device) as HearthImportResult
+  }.getOrElse { error ->
+    HearthImportResult.Rejected(error.message ?: "не удалось сохранить настройки узла")
+  }
+}
+
+/**
+ * Применить отложенный bundle. Вызывается сразу после того, как профиль создан и ядро
+ * запущено, — и ещё раз при каждом старте, если применить не удалось.
+ *
+ * `true`, если применять было нечего или применилось. `false` — bundle есть, но лёг
+ * неудачно: тогда человека возвращают на экран узла, а значение остаётся ждать.
+ */
+suspend fun hearthApplyPendingBundle(): Boolean {
+  val payload = ChatController.appPrefs.hearthPendingBundle.get()?.ifBlank { null } ?: return true
+  return when (HearthOnboardingImporter(HearthCoreApplier()).import(payload)) {
+    is HearthImportResult.Applied -> {
+      // Стираем сразу: в bundle пароли релеев, и держать его в настройках дольше
+      // необходимого незачем — адреса уже записаны в серверы ядра.
+      ChatController.appPrefs.hearthPendingBundle.set(null)
+      true
+    }
+    is HearthImportResult.Rejected -> false
+  }
 }

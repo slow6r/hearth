@@ -117,9 +117,6 @@ class HearthAndroidClaimTransport : HearthClaimTransport {
 actual suspend fun hearthAutoSetUp(): HearthClaimResult {
   val context = chat.simplex.common.platform.androidAppContext
   val invite = HearthInviteSource.baked(context)
-  val enroller = HearthSelfEnroller(
-    HearthAndroidClaimTransport(),
-    HearthOnboardingImporter(HearthCoreApplier()),
-  )
+  val enroller = HearthSelfEnroller(HearthAndroidClaimTransport())
   return enroller.setUp(invite, HearthInviteSource.deviceName())
 }

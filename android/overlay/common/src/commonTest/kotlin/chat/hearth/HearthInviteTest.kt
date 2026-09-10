@@ -70,35 +70,41 @@ class HearthInviteTest {
 
   @Test
   fun withoutAnInviteItIsAnOrdinaryQrBuild() = runBlocking {
-    val enroller = HearthSelfEnroller(
+    val enroller = enroller(
       transport = { _, _ -> error("транспорт не должен вызываться") },
-      importer = HearthOnboardingImporter(RecordingApplier()),
+      accept = { error("принимать нечего") },
     )
     assertEquals(HearthClaimResult.NoInvite, enroller.setUp(null, "Pixel"))
   }
 
   @Test
-  fun aClaimedBundleIsApplied() = runBlocking {
-    val applier = RecordingApplier()
-    val enroller = HearthSelfEnroller(
+  fun aClaimedBundleIsAccepted() = runBlocking {
+    // Применение отложено до появления профиля: на этом экране пользователя ещё нет,
+    // и apiSetUserServers отказал бы. Здесь проверяется, что bundle принят и передан
+    // дальше целиком.
+    val accepted = mutableListOf<String>()
+    val enroller = enroller(
       transport = { _, name ->
         assertEquals("Xiaomi 22101316G", name)
         Result.success(bundle)
       },
-      importer = HearthOnboardingImporter(applier),
+      accept = { payload ->
+        accepted += payload
+        val parsed = HearthBundle.parse(payload).getOrThrow()
+        HearthImportResult.Applied(HearthPresets.serversFrom(parsed), parsed.device)
+      },
     )
     val invite = HearthBakedInvite.parse(valid).getOrThrow()
     val result = enroller.setUp(invite, "Xiaomi 22101316G")
     assertEquals(HearthClaimResult.Applied("xiaomi-22101316g"), result)
-    assertEquals(1, applier.servers)
-    assertEquals("xiaomi-22101316g", applier.device)
+    assertEquals(listOf(bundle), accepted)
   }
 
   @Test
   fun aDeadInviteFallsBackToTheScannerWithAReason() = runBlocking {
-    val enroller = HearthSelfEnroller(
+    val enroller = enroller(
       transport = { _, _ -> Result.failure(IllegalStateException("приглашение больше не действует")) },
-      importer = HearthOnboardingImporter(RecordingApplier()),
+      accept = { error("принимать нечего") },
     )
     val invite = HearthBakedInvite.parse(valid).getOrThrow()
     val result = enroller.setUp(invite, "Pixel")
@@ -107,45 +113,36 @@ class HearthInviteTest {
   }
 
   @Test
-  fun aBundleThatFailsValidationDoesNotConfigureAnything() = runBlocking {
-    val applier = RecordingApplier()
-    val enroller = HearthSelfEnroller(
+  fun aBundleThatFailsValidationIsNotStashed() = runBlocking {
+    var stashed = 0
+    val enroller = enroller(
       // Узел доверенный, но ответ всё равно проверяется: подменённый или разъехавшийся
       // по версии формата документ не должен молча настроить телефон.
       transport = { _, _ -> Result.success("""{"v":99}""") },
-      importer = HearthOnboardingImporter(applier),
+      accept = { payload ->
+        HearthBundle.parse(payload).fold(
+          onSuccess = {
+            stashed++
+            HearthImportResult.Applied(HearthPresets.serversFrom(it), it.device)
+          },
+          onFailure = { HearthImportResult.Rejected(it.message ?: "плохой bundle") },
+        )
+      },
     )
     val invite = HearthBakedInvite.parse(valid).getOrThrow()
     assertTrue(enroller.setUp(invite, "Pixel") is HearthClaimResult.Failed)
-    assertEquals(0, applier.servers)
+    assertEquals(0, stashed)
   }
 }
 
 /** Транспорт из лямбды — чтобы каждый тест не заводил свой класс. */
-private fun HearthSelfEnroller(
+private fun enroller(
   transport: suspend (HearthBakedInvite, String) -> Result<String>,
-  importer: HearthOnboardingImporter,
+  accept: suspend (String) -> HearthImportResult,
 ) = HearthSelfEnroller(
   object : HearthClaimTransport {
     override suspend fun claim(invite: HearthBakedInvite, deviceName: String) =
       transport(invite, deviceName)
   },
-  importer,
+  accept,
 )
-
-private class RecordingApplier : HearthBundleApplier {
-  var servers = 0
-  var device: String? = null
-
-  override suspend fun setServers(servers: HearthServers) {
-    this.servers++
-  }
-
-  override suspend fun applyNetworkDefaults(prefs: HearthNetPrefs) = Unit
-
-  override suspend fun rememberDevice(deviceId: String, issued: String) {
-    device = deviceId
-  }
-
-  override suspend fun rememberNode(node: HearthNodeApi?) = Unit
-}

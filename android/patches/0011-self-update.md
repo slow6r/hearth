@@ -73,7 +73,19 @@ rg -n "androidChatInitializedAndStarted" apps/multiplatform/common/src/commonMai
 Вызов идёт из точки старта, а не из экрана настроек: тот экран человек может не
 открыть ни разу за год.
 
-### 5. `gradle.properties` — своя нумерация (~4 строки)
+### 5. Применение bundle после создания профиля (~18 строк)
+```bash
+rg -n "createProfileInNoProfileSetup" apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/WelcomeView.kt
+```
+Порядок обязателен: `startChat(user)` → `hearthApplyPendingBundle()` → выбор стадии.
+Раньше стадия ставилась до `startChat`, а bundle применялся ещё раньше — на экране
+узла, где пользователя нет и `apiSetUserServers` отказывает.
+
+Успех ведёт на `Step4_NetworkCommitments`, **минуя `Step3_ChooseServerOperators`**:
+операторов у нас нет, серверы уже записаны, а на том экране можно включить только
+публичную сеть SimpleX. Неудача возвращает на `Step0_HearthImport`.
+
+### 6. `gradle.properties` — своя нумерация (~4 строки)
 `android.version_name=<тег>-hN`, `android.version_code` строго растёт: именно по коду
 приложение решает, новее ли сборка на узле, и Android запрещает откат кода назад.
 

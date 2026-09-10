@@ -87,7 +87,12 @@ interface HearthClaimTransport {
  */
 class HearthSelfEnroller(
   private val transport: HearthClaimTransport,
-  private val importer: HearthOnboardingImporter,
+  /**
+   * Что делать с полученным bundle. По умолчанию — проверить и отложить до появления
+   * профиля ([hearthAcceptBundle]): применить его прямо здесь нельзя, ядру нужен
+   * пользователь, а его на этом экране ещё нет.
+   */
+  private val accept: suspend (String) -> HearthImportResult = ::hearthAcceptBundle,
 ) {
   suspend fun setUp(invite: HearthBakedInvite?, deviceName: String): HearthClaimResult {
     if (invite == null) return HearthClaimResult.NoInvite
@@ -95,10 +100,10 @@ class HearthSelfEnroller(
     val payload = transport.claim(invite, deviceName).getOrElse { e ->
       return HearthClaimResult.Failed(e.message ?: "узел недоступен")
     }
-    // Bundle с узла проходит ровно ту же валидацию, что и отсканированный. Источник
+    // Bundle с узла проходит ровно ту же проверку, что и отсканированный. Источник
     // доверенный, но проверка стоит один вызов, а ловит подменённый ответ и
     // рассинхрон версий формата.
-    return when (val result = importer.import(payload)) {
+    return when (val result = accept(payload)) {
       is HearthImportResult.Applied -> HearthClaimResult.Applied(result.device)
       is HearthImportResult.Rejected -> HearthClaimResult.Failed(result.reason)
     }
