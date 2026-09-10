@@ -20,7 +20,7 @@ git switch -c hearth/<upstream-tag> <upstream-tag>
 android/
 ├── overlay/      файлы, которые форк ДОБАВЛЯЕТ (в чужих файлах не живут → не конфликтуют)
 ├── patches/      описания изменений в файлах upstream + порядок коммитов
-├── scripts/      rebase-upstream.sh, build-release.sh, verify-apk.sh
+├── scripts/      sync-overlay.sh, rebase-upstream.sh, build-release.sh, verify-apk.sh
 └── UPSTREAM      пинованный тег
 ```
 
@@ -85,6 +85,17 @@ Haskell-ядро (`.so`) в v1 **не собираем**: берём релиз�
 | `overlay/android/.../AndroidManifest-hearth.xml` | `allowBackup=false`, удаление лишних разрешений |
 | `overlay/android/.../hearth_data_extraction_rules.xml` | Исключение из облачных бэкапов (A9) |
 | `overlay/android/.../hearth_network_security_config.xml` | Нет cleartext, нет user CA |
+| `overlay/common/.../HearthUpdate.kt` | Манифест обновления и его валидация, оркестрация проверки |
+| `overlay/common/.../HearthUpdate.android.kt` | Транспорт до узла: манифест, докачка по `Range`, sha256, enroll |
+| `overlay/common/.../HearthUpdateService.android.kt` | Загрузка в foreground-сервисе + намерение установки |
+| `overlay/common/.../HearthSettings.kt` + `*.android.kt` | Экран «Домашний узел»: обновление и приглашение устройства |
+| `overlay/android/.../hearth_icon_foreground.xml`, `hearth_icon.xml` | Иконка-костёр (adaptive) |
+| `overlay/android/.../mipmap-anydpi-v26-icon.xml` | Раскладывается в `icon.xml` и `icon_round.xml` |
+| `overlay/android/.../raw/hearth_ca.pem` | CA узла для пиннинга в network security config |
+
+Перед сборкой overlay раскладывается по форку скриптом `scripts/sync-overlay.sh`;
+`build-release.sh` вызывает его сам. Собрать форк, не разложив overlay, — значит
+получить сборку без части правок и не заметить этого.
 
 Валидация bundle на устройстве дублирует валидацию в `hearthd`. Это не паранойя, а
 дешёвая страховка: подменённый или протухший QR не должен молча увести телефон на чужой

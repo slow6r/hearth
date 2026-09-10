@@ -29,6 +29,13 @@ data class HearthBundle(
   val net: HearthNetPrefs,
   val issued: String,
   val device: String,
+  /**
+   * Device API узла: откуда брать обновления и свежие TURN-креды.
+   *
+   * `null` — узел без device API. Такое устройство живёт как раньше, но его звонки
+   * сломаются при следующей ротации TURN-секрета, и bundle придётся выдать заново.
+   */
+  val node: HearthNodeApi? = null,
 ) {
   companion object {
     const val SUPPORTED_VERSION = 1
@@ -74,6 +81,21 @@ data class HearthBundle(
   /** The host every address in this bundle points at. */
   fun host(): String? = smp.firstOrNull()?.let { hostOf(it) }
 }
+
+/**
+ * Адрес device API и токен ЭТОГО устройства.
+ *
+ * Хост берётся отсюда — из bundle, который человек отсканировал лично, — и больше
+ * ниоткуда. В частности, не из документов, которые сам этот API потом отдаёт:
+ * подменённый манифест обновления иначе увёл бы загрузку на чужой сервер.
+ */
+@Serializable
+data class HearthNodeApi(
+  val host: String,
+  val port: Int,
+  /** Секрет устройства. Уходит заголовком, не в URL: URL оседает в логах. */
+  val token: String,
+)
 
 @Serializable
 data class HearthNetPrefs(

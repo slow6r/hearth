@@ -26,12 +26,16 @@ class HearthAndroidUpdateTransport(
 
   override suspend fun fetchManifest(): Result<String> = withContext(Dispatchers.IO) {
     runCatching {
-      open("$BASE/manifest.json").use { conn ->
+      // `use` здесь не годится: HttpURLConnection не Closeable, у него disconnect().
+      val conn = open("$BASE/manifest.json")
+      try {
         val code = conn.responseCode
         if (code != 200) throw IllegalStateException("узел ответил $code")
         // Манифест — маленький документ. Ограничение стоит, чтобы подменённый или
         // сломанный эндпоинт не заставил телефон читать поток без конца.
-        conn.inputStream.readBoundedText(MANIFEST_LIMIT_BYTES)
+        conn.inputStream.use { it.readBoundedText(MANIFEST_LIMIT_BYTES) }
+      } finally {
+        conn.disconnect()
       }
     }
   }
@@ -41,19 +45,33 @@ class HearthAndroidUpdateTransport(
     expectedSha256: String,
     onProgress: (Long, Long) -> Unit,
   ): HearthDownloadResult = withContext(Dispatchers.IO) {
-    val target = File(context.cacheDir, "hearth-update.apk")
+    // filesDir, а не cacheDir: систему никто не просил чистить кэш посреди загрузки
+    // 248-мегабайтного файла, но она вправе. Плюс FileProvider уже покрывает filesDir
+    // (`file_paths.xml`, `my_files`), значит намерение установки заработает без правок.
+    val dir = File(context.filesDir, "hearth-update").apply { mkdirs() }
+    val target = File(dir, "hearth-update.apk")
     runCatching {
       // Докачка: если файл уже частично лежит, просим остаток через Range. Обновление
       // весит сотни мегабайт, а телефон в дороге теряет сеть постоянно.
       val already = if (target.exists()) target.length() else 0L
-      open("$BASE/$file").use { conn ->
+      val conn = open("$BASE/$file")
+      try {
         if (already > 0) conn.setRequestProperty("Range", "bytes=$already-")
         val code = conn.responseCode
         val resuming = code == 206
+        // 416 означает «этот кусок уже за концом файла» — почти всегда потому, что
+        // недокачанный остаток от ПРЕДЫДУЩЕЙ, более старой версии длиннее новой.
+        // Начинаем с нуля, а не сдаёмся.
+        if (code == 416) {
+          target.delete()
+          throw IllegalStateException("остаток от прошлой версии не подошёл, начните заново")
+        }
         if (code != 200 && code != 206) throw IllegalStateException("узел ответил $code")
         if (already > 0 && !resuming) target.delete()
 
-        val total = conn.contentLengthLong.let { if (it > 0) it + (if (resuming) already else 0) else -1L }
+        val total = conn.contentLengthLong.let {
+          if (it > 0) it + (if (resuming) already else 0) else -1L
+        }
         var done = if (resuming) already else 0L
 
         conn.inputStream.use { input ->
@@ -66,9 +84,13 @@ class HearthAndroidUpdateTransport(
               done += n
               onProgress(done, total)
             }
+            // Принудительный сброс на диск: иначе внезапная перезагрузка телефона
+            // оставит файл, который выглядит целым, а хеш не сойдётся.
             out.fd.sync()
           }
         }
+      } finally {
+        conn.disconnect()
       }
 
       // Проверка целостности. Подмену APK по дороге поймал бы и сам Android при
@@ -85,6 +107,32 @@ class HearthAndroidUpdateTransport(
     }
   }
 
+  override suspend fun enroll(name: String): Result<String> = withContext(Dispatchers.IO) {
+    runCatching {
+      val conn = open("/enroll")
+      try {
+        conn.requestMethod = "POST"
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json")
+        // Имя экранируем через сериализатор, а не склейкой строк: имя вводит человек,
+        // и кавычка в нём не должна ломать документ.
+        val body = kotlinx.serialization.json.Json.encodeToString(
+          kotlinx.serialization.json.JsonObject.serializer(),
+          kotlinx.serialization.json.JsonObject(
+            mapOf("name" to kotlinx.serialization.json.JsonPrimitive(name))
+          ),
+        )
+        conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+        val code = conn.responseCode
+        if (code == 409) throw IllegalStateException("узел отказал: лимит устройств или такое имя уже есть")
+        if (code != 200) throw IllegalStateException("узел ответил $code")
+        conn.inputStream.use { it.readBoundedText(BUNDLE_LIMIT_BYTES) }
+      } finally {
+        conn.disconnect()
+      }
+    }
+  }
+
   private fun open(path: String): HttpURLConnection =
     (URL("https://$nodeHost:$port$path").openConnection() as HttpURLConnection).apply {
       // Токен заголовком, а не в URL: URL оседает в логах прокси и в истории.
@@ -98,12 +146,15 @@ class HearthAndroidUpdateTransport(
     const val DEFAULT_PORT = 7444
     private const val BASE = "/updates"
     private const val MANIFEST_LIMIT_BYTES = 64 * 1024
+    private const val BUNDLE_LIMIT_BYTES = 64 * 1024
 
     /** Транспорт, настроенный по тому, что записал импорт bundle. */
     fun fromPrefs(context: Context): HearthAndroidUpdateTransport? {
-      val host = ChatController.appPrefs.hearthUpdateHost.get() ?: return null
-      val token = ChatController.appPrefs.hearthUpdateToken.get() ?: return null
-      return HearthAndroidUpdateTransport(context, host, DEFAULT_PORT, token)
+      val host = ChatController.appPrefs.hearthUpdateHost.get()?.ifBlank { null } ?: return null
+      val token = ChatController.appPrefs.hearthUpdateToken.get()?.ifBlank { null } ?: return null
+      // Порт тоже из bundle: узел может быть проброшен снаружи не на 7444.
+      val port = ChatController.appPrefs.hearthUpdatePort.get()?.toIntOrNull() ?: DEFAULT_PORT
+      return HearthAndroidUpdateTransport(context, host, port, token)
     }
   }
 }

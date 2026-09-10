@@ -6,6 +6,11 @@
 set -euo pipefail
 
 FORK_DIR="${FORK_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../simplex-chat" && pwd)}"
+
+# Overlay раскладываем сами: файлы форка лежат в этом репозитории, и собирать до
+# синхронизации — значит собрать сборку без части правок и не заметить этого.
+bash "$(dirname "${BASH_SOURCE[0]}")/sync-overlay.sh"
+
 cd "$FORK_DIR/apps/multiplatform"
 
 # Нативное ядро на Haskell мы не собираем (android/README.md, раздел «Стратегия»):
@@ -38,17 +43,28 @@ sha256sum "$APK"
 cat <<'NEXT'
 
 == Подпись (ручной шаг на доверенной машине, ТЗ §8.4)
-   apksigner sign \
-     --ks-provider-class sun.security.pkcs11.SunPKCS11 \
-     --ks-provider-arg /etc/hearth/pkcs11.cfg \
-     --ks NONE --ks-type PKCS11 \
-     --out hearth-release-signed.apk <apk>
+   Ключ офлайновый и в CI его нет. Сейчас это JKS на рабочей машине:
 
-   apksigner verify --print-certs hearth-release-signed.apk
-   # отпечаток обязан совпасть с тем, что стоит на устройствах семьи
+   apksigner sign --ks keys/admin/hearth-release.jks --ks-key-alias hearth \
+     --ks-pass file:keys/admin/hearth-release.pass \
+     --key-pass file:keys/admin/hearth-release.pass \
+     --out hearth-<версия>-arm64-v8a.apk <apk>
 
-== Раскатка
-   1. Положить APK в собственный F-Droid-репозиторий на hearth-node (из домашней сети).
-   2. ./verify-apk.sh hearth-release-signed.apk
-   3. Тестовое устройство — сутки (ТЗ §10.6 п.3).
+   apksigner verify --print-certs hearth-<версия>-arm64-v8a.apk
+   # отпечаток обязан совпасть с тем, что уже стоит на устройствах семьи:
+   # подпись другим ключом Android отвергнет как «приложение не установлено»
+
+   Целевое состояние — hardware-backed ключ (YubiKey/pkcs11), тогда --ks NONE
+   --ks-type PKCS11 с провайдером SunPKCS11.
+
+== Раскатка (обновление по воздуху, patches/0011)
+   1. ./verify-apk.sh hearth-<версия>-arm64-v8a.apk
+   2. Положить APK на узел в updates_dir (по умолчанию /srv/hearth/updates),
+      владелец hearth:hearth, права 0640.
+   3. Переписать рядом manifest.json: versionName, versionCode, sha256, file.
+      Писать через временный файл и mv — клиент не должен прочитать половину.
+   4. Убрать предыдущий APK: манифест указывает ровно на один файл.
+   5. Тестовое устройство — сутки (ТЗ §10.6 п.3), только потом остальным.
+
+   versionCode обязан строго расти: по нему клиент решает, новее ли сборка.
 NEXT

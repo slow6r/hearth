@@ -1,11 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Network security config for the hearth fork.
+  Network security config для форка hearth.
 
-  The SimpleX core does its own TLS with the relay CA pinned inside the smp:// address,
-  so this file is not what protects the messenger traffic. It is here to make the
-  *absence* of anything else explicit: no cleartext anywhere, and no trust in
-  user-installed CAs, so a corporate/MDM root cannot be used to inspect the app.
+  Трафик мессенджера защищает не этот файл: ядро SimpleX делает свой TLS с отпечатком
+  CA релея, зашитым в адрес `smp://`. Здесь описано всё остальное.
+
+  base-config фиксирует ОТСУТСТВИЕ лишнего: никакого открытого текста и никакого
+  доверия к CA, установленным пользователем, — чтобы корневой сертификат из MDM или
+  корпоративного профиля нельзя было использовать для просмотра трафика приложения.
+
+  domain-config — для device API узла (ADR 0010). Он пинует НАШ CA и только его:
+  публичные удостоверяющие центры для этого хоста не годятся вовсе.
+
+  Почему свой CA, а не Let's Encrypt:
+    * не нужен certbot, который однажды молча не продлится и оставит семью без
+      обновлений ровно тогда, когда обновление нужнее всего;
+    * имя узла не попадёт в публичные Certificate Transparency логи;
+    * это ровно та же модель, что у самого мессенджера: доверяем отпечатку, который
+      принесли лично, а не чужому списку доверенных центров.
 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false">
@@ -13,4 +25,12 @@
             <certificates src="system" />
         </trust-anchors>
     </base-config>
+
+    <domain-config cleartextTrafficPermitted="false">
+        <!-- Заменить на свой node.host при развёртывании другого узла. -->
+        <domain includeSubdomains="false">relay.myhearth.ru</domain>
+        <trust-anchors>
+            <certificates src="@raw/hearth_ca" />
+        </trust-anchors>
+    </domain-config>
 </network-security-config>

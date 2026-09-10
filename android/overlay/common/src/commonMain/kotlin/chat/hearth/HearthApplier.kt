@@ -118,4 +118,12 @@ class HearthCoreApplier : HearthBundleApplier {
     ChatController.appPrefs.hearthDeviceId.set(deviceId)
     ChatController.appPrefs.hearthEnrolledAt.set(issued)
   }
+
+  override suspend fun rememberNode(node: HearthNodeApi?) {
+    // Пишем даже null: bundle, выданный узлом без device API, должен СТИРАТЬ старые
+    // координаты, а не оставлять устройство стучаться туда, куда его больше не звали.
+    ChatController.appPrefs.hearthUpdateHost.set(node?.host)
+    ChatController.appPrefs.hearthUpdateToken.set(node?.token)
+    ChatController.appPrefs.hearthUpdatePort.set(node?.port?.toString())
+  }
 }

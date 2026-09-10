@@ -119,10 +119,24 @@ class HearthBundleTest {
     assertEquals(0, applier.serversCalls, "a bad bundle must not reach the SimpleX core")
   }
 
+  @Test
+  fun bundleWithoutNodeSectionStillImportsAndClearsCoordinates() = kotlinx.coroutines.runBlocking {
+    // Узел без device API — валидный случай (ADR 0010). Импорт обязан пройти, а
+    // координаты обязаны быть перезаписаны в null: устройство не должно продолжать
+    // стучаться туда, куда его больше не звали.
+    val applier = RecordingApplier()
+    val result = HearthOnboardingImporter(applier).import(valid)
+    assertTrue(result is HearthImportResult.Applied)
+    assertEquals(1, applier.nodeCalls, "rememberNode должен вызываться всегда, даже с null")
+    assertEquals(null, applier.node)
+  }
+
   private class RecordingApplier : HearthBundleApplier {
     var serversCalls = 0
     var defaultsCalls = 0
     var deviceId: String? = null
+    var node: HearthNodeApi? = null
+    var nodeCalls = 0
 
     override suspend fun setServers(servers: HearthServers) {
       serversCalls++
@@ -134,6 +148,11 @@ class HearthBundleTest {
 
     override suspend fun rememberDevice(deviceId: String, issued: String) {
       this.deviceId = deviceId
+    }
+
+    override suspend fun rememberNode(node: HearthNodeApi?) {
+      this.node = node
+      nodeCalls++
     }
   }
 }

@@ -36,6 +36,14 @@ interface HearthBundleApplier {
 
   /** Persist which device id this install was enrolled as, for support and revocation. */
   suspend fun rememberDevice(deviceId: String, issued: String)
+
+  /**
+   * Запомнить device API узла: обновления и свежие TURN-креды.
+   *
+   * `null` — узел без device API. Тогда устройство работает как раньше, но его звонки
+   * сломаются при следующей ротации TURN-секрета (см. ADR 0010).
+   */
+  suspend fun rememberNode(node: HearthNodeApi?)
 }
 
 /**
@@ -56,6 +64,7 @@ class HearthOnboardingImporter(private val applier: HearthBundleApplier) {
       applier.setServers(servers)
       applier.applyNetworkDefaults(bundle.net)
       applier.rememberDevice(bundle.device, bundle.issued)
+      applier.rememberNode(bundle.node)
       HearthImportResult.Applied(servers, bundle.device) as HearthImportResult
     }.getOrElse { error ->
       HearthImportResult.Rejected(error.message ?: "could not apply the bundle")
