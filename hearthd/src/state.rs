@@ -29,6 +29,7 @@ pub struct AppState {
     pub policy: EgressPolicy,
     pub alerts: Arc<AlertSink>,
     pub devices: RwLock<DeviceRegistry>,
+    pub invites: RwLock<crate::model::invite::InviteRegistry>,
     pub health: RwLock<HealthSnapshot>,
     pub egress: RwLock<EgressSnapshot>,
     pub integrity: RwLock<IntegritySnapshot>,
@@ -45,6 +46,7 @@ impl AppState {
 
         let alerts = Arc::new(AlertSink::open(&config, policy.clone(), sys.clone())?);
         let devices = DeviceRegistry::load(config.paths.devices_file())?;
+        let invites = crate::model::invite::InviteRegistry::load(config.paths.invites_file())?;
         let backup: BackupStatus =
             store::read_json(config.paths.backup_status_file())?.unwrap_or_default();
         let migrate: MigrateStatus =
@@ -59,6 +61,7 @@ impl AppState {
             policy,
             alerts,
             devices: RwLock::new(devices),
+            invites: RwLock::new(invites),
             health: RwLock::new(HealthSnapshot::pending(&node, &address)),
             egress: RwLock::new(pending_egress()),
             integrity: RwLock::new(pending_integrity()),

@@ -9,6 +9,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
 use hearthd::api::client::{self, AdminClient};
 use hearthd::config::Config;
@@ -16,6 +17,7 @@ use hearthd::error::{Error, Result};
 use hearthd::model::bundle::Bundle;
 use hearthd::model::device::Device;
 use hearthd::model::health::{HealthSnapshot, HealthState, NodeStatus};
+use hearthd::model::invite::Invite;
 use hearthd::{DEFAULT_CONFIG_PATH, VERSION};
 
 #[derive(Debug, Parser)]
@@ -68,6 +70,9 @@ enum Command {
     /// Device registry and bundles (ТЗ §10.3, §10.4).
     #[command(subcommand)]
     Device(DeviceCommand),
+    /// Приглашения: ими сборка заводит устройство сама (ADR 0010).
+    #[command(subcommand)]
+    Invite(InviteCommand),
     /// Rotate the coturn static secret (ТЗ §6.4).
     #[command(subcommand)]
     Rotate(RotateCommand),
@@ -122,6 +127,31 @@ enum DeviceCommand {
     },
     /// Manual setup checklist for a stock client (ТЗ §9).
     Checklist { id: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum InviteCommand {
+    /// Выписать приглашение и напечатать токен для вшивания в сборку.
+    Create {
+        /// Сколько устройств можно завести по нему.
+        #[arg(long, default_value_t = 1)]
+        uses: u32,
+        /// Сколько дней оно живо.
+        #[arg(long, default_value_t = 7)]
+        days: i64,
+        #[arg(long)]
+        note: Option<String>,
+        /// Записать токен в файл (0600) вместо печати на экран.
+        ///
+        /// Печать удобна у своего терминала, но токен оседает в истории и в логах
+        /// сессии. Для сборки нужен именно файл.
+        #[arg(long)]
+        write_token: Option<PathBuf>,
+    },
+    /// Показать приглашения и их состояние.
+    List,
+    /// Погасить приглашение. Уже заведённые по нему устройства не трогает.
+    Revoke { id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -470,6 +500,77 @@ async fn run(cli: Cli) -> Result<()> {
             println!("registered `{}` ({})", device.id, device.platform);
             println!();
             show_bundle(&api, &device.id, false, None).await?;
+        }
+        Command::Invite(InviteCommand::Create {
+            uses,
+            days,
+            note,
+            write_token,
+        }) => {
+            let invite: Invite = api
+                .post_json(
+                    "/invites",
+                    Some(serde_json::json!({
+                        "max_uses": uses,
+                        "ttl_days": days,
+                        "note": note,
+                    })),
+                )
+                .await?;
+            println!(
+                "выписано `{}`: {} устройств(а), до {}",
+                invite.id,
+                invite.max_uses,
+                invite.expires.format("%Y-%m-%d %H:%M UTC")
+            );
+            match write_token {
+                Some(path) => {
+                    hearthd::store::write_secret(&path, &invite.token)?;
+                    println!("токен записан в {} (0600)", path.display());
+                }
+                None => {
+                    println!();
+                    println!("токен (виден один раз, дальше только в сборке):");
+                    println!("{}", invite.token);
+                }
+            }
+            println!();
+            println!("Пока приглашение живо, файл APK с ним впускает в контур.");
+            println!("Когда раздали — `hearthctl invite revoke {}`.", invite.id);
+        }
+        Command::Invite(InviteCommand::List) => {
+            let invites: Vec<Invite> = api.get_json("/invites").await?;
+            if invites.is_empty() {
+                println!("приглашений нет");
+            }
+            let now = Utc::now();
+            for invite in invites {
+                println!(
+                    "{:<18} {:<10} {}/{} использований  до {}  {}",
+                    invite.id,
+                    invite.state_at(now),
+                    invite.uses,
+                    invite.max_uses,
+                    invite.expires.format("%Y-%m-%d"),
+                    invite.note.as_deref().unwrap_or("")
+                );
+                if !invite.claimed.is_empty() {
+                    println!("    завело: {}", invite.claimed.join(", "));
+                }
+            }
+        }
+        Command::Invite(InviteCommand::Revoke { id }) => {
+            let invite: Invite = api
+                .post_json(&format!("/invites/{id}/revoke"), None)
+                .await?;
+            println!("приглашение `{}` погашено", invite.id);
+            if !invite.claimed.is_empty() {
+                println!(
+                    "по нему уже завелись: {} — они продолжают работать,",
+                    invite.claimed.join(", ")
+                );
+                println!("отзывать их надо отдельно: `hearthctl device revoke <id>`");
+            }
         }
         Command::Device(DeviceCommand::Revoke { id }) => {
             let device: Device = api

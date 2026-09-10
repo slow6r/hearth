@@ -7,6 +7,7 @@ pub mod alert;
 pub mod bundle;
 pub mod device;
 pub mod health;
+pub mod invite;
 pub mod manifest;
 
 use chrono::{DateTime, SecondsFormat, Utc};

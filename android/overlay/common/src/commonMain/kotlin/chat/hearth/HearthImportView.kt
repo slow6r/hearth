@@ -3,6 +3,7 @@ package chat.hearth
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
 import androidx.compose.runtime.*
@@ -16,11 +17,18 @@ import chat.simplex.common.views.newchat.QRCodeScanner
 import chat.simplex.common.views.onboarding.OnboardingStage
 
 /**
- * Onboarding step 0 — импорт bundle узла (patches/0003-onboarding-import.md).
+ * Onboarding step 0 — настройка домашнего узла (patches/0003, ADR 0011).
  *
  * Единственный экран, который форк добавляет. Он идёт ПЕРЕД стоковым онбордингом и,
  * применив bundle, отдаёт управление upstream нетронутым — именно это делает ребейз
  * механическим (ТЗ §8.1, §8.5).
+ *
+ * Путей внутрь два, и первый обычно не виден человеку:
+ *
+ *  1. **Вшитое приглашение.** Если сборка раздана семье, экран сам спрашивает узел,
+ *     заводится и уходит дальше. Человек видит полсекунды «настраиваем» — это и есть
+ *     «поставил и пользуйся», как в SimpleX.
+ *  2. **QR.** Обычная сборка, или приглашение кончилось. Тогда показывается сканер.
  *
  * Сканер берётся upstream'овский. Своя камера означала бы новую зависимость, новое
  * разрешение и новую поверхность атаки ради экрана, который в жизни устройства
@@ -32,6 +40,26 @@ fun HearthImportView() {
   val error = remember { mutableStateOf<String?>(null) }
   val busy = remember { mutableStateOf(false) }
   val showScanner = remember { mutableStateOf(true) }
+  // Пока не знаем, есть ли приглашение, — не показываем ни сканер, ни объяснение про
+  // QR: иначе человек со вшитым приглашением увидит вспышку камеры и текст, которые
+  // через мгновение исчезнут.
+  val autoSetUp = remember { mutableStateOf(true) }
+
+  LaunchedEffect(Unit) {
+    when (val result = hearthAutoSetUp()) {
+      is HearthClaimResult.Applied -> {
+        // Дальше — обычный онбординг upstream, без единой правки.
+        ChatController.appPrefs.onboardingStage.set(OnboardingStage.Step1_SimpleXInfo)
+      }
+      is HearthClaimResult.NoInvite -> autoSetUp.value = false
+      is HearthClaimResult.Failed -> {
+        // Приглашение было, но не сработало: сеть, просроченный токен, полный узел.
+        // Человека не оставляем в тупике — показываем сканер и причину.
+        error.value = result.reason
+        autoSetUp.value = false
+      }
+    }
+  }
 
   Column(
     Modifier
@@ -47,6 +75,19 @@ fun HearthImportView() {
       textAlign = TextAlign.Center,
     )
     Spacer(Modifier.height(DEFAULT_PADDING))
+
+    if (autoSetUp.value) {
+      Text(
+        HearthOnboardingText.AUTO_BODY,
+        style = MaterialTheme.typography.body1,
+        textAlign = TextAlign.Center,
+      )
+      Spacer(Modifier.height(DEFAULT_PADDING * 2))
+      CircularProgressIndicator(Modifier.size(48.dp), color = MaterialTheme.colors.secondary)
+      Spacer(Modifier.height(DEFAULT_PADDING * 2))
+      return@Column
+    }
+
     Text(
       HearthOnboardingText.BODY,
       style = MaterialTheme.typography.body1,

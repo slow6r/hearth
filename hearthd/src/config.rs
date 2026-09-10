@@ -171,6 +171,11 @@ impl Paths {
     pub fn devices_file(&self) -> PathBuf {
         self.state_dir.join("devices.json")
     }
+    /// Приглашения: одноразовые токены, которыми новое устройство заводит себя само.
+    /// Рядом с devices.json и по тем же причинам — это состояние, а не конфигурация.
+    pub fn invites_file(&self) -> PathBuf {
+        self.state_dir.join("invites.json")
+    }
     /// Append-only alert journal.
     pub fn alerts_file(&self) -> PathBuf {
         self.state_dir.join("alerts.jsonl")

@@ -20,7 +20,7 @@ git switch -c hearth/<upstream-tag> <upstream-tag>
 android/
 ├── overlay/      файлы, которые форк ДОБАВЛЯЕТ (в чужих файлах не живут → не конфликтуют)
 ├── patches/      описания изменений в файлах upstream + порядок коммитов
-├── scripts/      sync-overlay.sh, rebase-upstream.sh, build-release.sh, verify-apk.sh
+├── scripts/      sync-overlay.sh, bake-invite.sh, rebase-upstream.sh, build-release.sh, verify-apk.sh
 └── UPSTREAM      пинованный тег
 ```
 
@@ -92,6 +92,8 @@ Haskell-ядро (`.so`) в v1 **не собираем**: берём релиз�
 | `overlay/android/.../hearth_icon_foreground.xml`, `hearth_icon.xml` | Иконка-костёр (adaptive) |
 | `overlay/android/.../mipmap-anydpi-v26-icon.xml` | Раскладывается в `icon.xml` и `icon_round.xml` |
 | `overlay/android/.../raw/hearth_ca.pem` | CA узла для пиннинга в network security config |
+| `overlay/common/.../HearthInvite.kt` | Вшитое приглашение: разбор, валидация, первый запуск (ADR 0011) |
+| `overlay/common/.../HearthInvite.android.kt` | Чтение ресурса приглашения и `POST /claim` |
 
 Перед сборкой overlay раскладывается по форку скриптом `scripts/sync-overlay.sh`;
 `build-release.sh` вызывает его сам. Собрать форк, не разложив overlay, — значит

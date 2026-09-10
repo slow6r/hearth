@@ -46,6 +46,10 @@ use crate::store;
 /// Заголовок с секретом устройства. Именно заголовок, не параметр URL: URL оседает в
 /// логах прокси, в истории и в отчётах об ошибках.
 const TOKEN_HEADER: &str = "x-hearth-device-token";
+/// Заголовок приглашения. Отдельный от токена устройства намеренно: у них разный
+/// срок жизни и разный смысл, и путать их в одном заголовке — значит однажды
+/// принять просроченное приглашение за живое устройство.
+const INVITE_HEADER: &str = "x-hearth-invite-token";
 /// Больше этого манифест обновления быть не может — он маленький по определению.
 const MANIFEST_LIMIT: u64 = 64 * 1024;
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -134,6 +138,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/updates/{file}", get(update_file))
         .route("/turn-credentials", get(turn_credentials))
         .route("/enroll", axum::routing::post(enroll))
+        .route("/claim", axum::routing::post(claim))
         .with_state(state)
 }
 
@@ -188,7 +193,7 @@ async fn authorize(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
     }
 }
 
-fn ct_eq(a: &str, b: &str) -> bool {
+pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
         return false;
@@ -421,6 +426,141 @@ async fn enroll(
             format!(
                 "устройство `{}` завело новое устройство `{}` — проверьте, что это ожидаемо",
                 inviter, device.id
+            ),
+        ))
+        .await;
+
+    Ok(Json(bundle).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimRequest {
+    /// Как назвать устройство в реестре. Приложение подставляет модель телефона —
+    /// человек в этот момент ничего не вводит, в этом и смысл.
+    name: String,
+}
+
+/// Завести себя по вшитому в сборку приглашению.
+///
+/// # Зачем
+///
+/// Это тот самый шаг, которого в SimpleX нет: там серверы публичные и вшиты, поэтому
+/// человек ставит приложение и сразу им пользуется. У нас серверы свои, и без этого
+/// эндпоинта каждый телефон требовал бы QR — то есть кого-то рядом с настроенным
+/// телефоном или у терминала.
+///
+/// # Чем это отличается от `/enroll`
+///
+/// `/enroll` предъявляет токен УЖЕ заведённого устройства: человек с работающим
+/// телефоном заводит следующий. Здесь предъявляется приглашение — секрет, который
+/// живёт в самой сборке и ограничен сроком, числом использований и отзывом.
+///
+/// # Что здесь можно потерять
+///
+/// Пока приглашение живо, файл APK ценен: кто его достал, тот войдёт в контур. Это
+/// названо в ADR 0010 и ограничивается тремя вещами — коротким сроком, счётчиком
+/// использований и тем, что каждое использование поднимает alert. Когда приглашение
+/// исчерпано, из сборки достать нечего: паролей релеев в ней нет.
+async fn claim(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<ClaimRequest>,
+) -> ApiResult<Response> {
+    let token = headers
+        .get(INVITE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if token.is_empty() {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "invite token required"));
+    }
+
+    let now = Utc::now();
+    let invite_id = {
+        let invites = state.invites.read().await;
+        match invites.find_usable(&token, now) {
+            Some(invite) => invite.id.clone(),
+            None => {
+                // Просроченное, исчерпанное и вовсе несуществующее приглашение
+                // отвечают одинаково: по ответу нельзя узнать, было ли оно.
+                tracing::warn!("device api: rejected an unusable invite token");
+                return Err(ApiError(StatusCode::UNAUTHORIZED, "unknown invite"));
+            }
+        }
+    };
+
+    let requested = req.name.trim();
+    if requested.chars().count() > 64 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "bad device name"));
+    }
+    let requested = if requested.is_empty() {
+        "Устройство"
+    } else {
+        requested
+    };
+
+    let device = {
+        let mut devices = state.devices.write().await;
+        // Имя приходит от приложения — это модель телефона, и два одинаковых телефона
+        // в семье не редкость. Совпадение имени не повод отказать человеку в заведении,
+        // поэтому подбираем свободное, а не возвращаем 409, как это делает `/enroll`,
+        // где имя набирает человек и повтор — почти всегда его опечатка.
+        let mut attempt = 0;
+        loop {
+            let name = if attempt == 0 {
+                requested.to_string()
+            } else {
+                format!("{requested} {}", attempt + 1)
+            };
+            match devices.add(
+                &name,
+                crate::model::device::Platform::Android,
+                Some(format!("заведено по приглашению {invite_id}")),
+                state.config.devices.max_devices,
+            ) {
+                Ok(device) => break device,
+                Err(crate::error::Error::Conflict(_)) if attempt < 9 => {
+                    attempt += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(%invite_id, error = %e, "device api: claim refused");
+                    return Err(ApiError(StatusCode::CONFLICT, "cannot add the device"));
+                }
+            }
+        }
+    };
+
+    let bundle = crate::configgen::build_bundle(&state.config, &device).map_err(|e| {
+        tracing::error!(%invite_id, error = %e, "device api: cannot build a bundle");
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot build a bundle")
+    })?;
+
+    // Счётчик приглашения поднимаем ПОСЛЕ того, как bundle собран: иначе неудачная
+    // сборка съедала бы использование, и человек с единственным приглашением
+    // оставался бы ни с чем.
+    if let Err(e) = state
+        .invites
+        .write()
+        .await
+        .note_claim(&invite_id, &device.id)
+    {
+        tracing::error!(%invite_id, error = %e, "device api: cannot record the claim");
+    }
+    let _ = state.devices.write().await.note_bundle_issued(&device.id);
+
+    tracing::warn!(
+        %invite_id,
+        new_device = %device.id,
+        "device api: a device claimed itself with an invite"
+    );
+    state
+        .alerts
+        .emit(crate::model::alert::Alert::warning(
+            "deviceapi",
+            format!(
+                "по приглашению `{}` завелось устройство `{}` — проверьте, что это свой",
+                invite_id, device.id
             ),
         ))
         .await;

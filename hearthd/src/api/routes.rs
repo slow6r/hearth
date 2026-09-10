@@ -47,6 +47,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/devices/{id}/bundle.json", get(bundle_json))
         .route("/devices/{id}/bundle.png", get(bundle_png))
         .route("/devices/{id}/checklist.txt", get(bundle_checklist))
+        .route("/invites", get(list_invites).post(create_invite))
+        .route("/invites/{id}/revoke", post(revoke_invite))
         .route("/rotate/turn-secret", post(rotate_turn_secret))
         .route("/backup/now", post(backup_now))
         .route("/backup/status", get(backup_status))
@@ -166,6 +168,70 @@ async fn egress_incidents(
 
 async fn list_devices(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(state.devices.read().await.devices.clone())
+}
+
+#[derive(Debug, Deserialize)]
+struct NewInvite {
+    /// Сколько устройств можно завести. По умолчанию одно.
+    #[serde(default)]
+    max_uses: Option<u32>,
+    /// Сколько дней приглашение живо. По умолчанию неделя.
+    #[serde(default)]
+    ttl_days: Option<i64>,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+async fn list_invites(State(state): State<Arc<AppState>>) -> ApiResult<impl IntoResponse> {
+    let invites = state.invites.read().await;
+    Ok(Json(invites.invites.clone()))
+}
+
+/// Выписать приглашение.
+///
+/// Ответ содержит токен — единственный раз, когда он покидает узел в открытом виде.
+/// Дальше он живёт в сборке приложения, а здесь остаётся только для сверки.
+async fn create_invite(
+    State(state): State<Arc<AppState>>,
+    Extension(admin): Extension<Admin>,
+    Json(body): Json<NewInvite>,
+) -> ApiResult<impl IntoResponse> {
+    let invite = state.invites.write().await.create(
+        body.max_uses
+            .unwrap_or(crate::model::invite::DEFAULT_MAX_USES),
+        body.ttl_days
+            .unwrap_or(crate::model::invite::DEFAULT_TTL_DAYS),
+        body.note,
+    )?;
+    tracing::warn!(
+        admin = %admin.name,
+        invite = %invite.id,
+        max_uses = invite.max_uses,
+        "invite issued"
+    );
+    state
+        .alerts
+        .emit(crate::model::alert::Alert::warning(
+            "api",
+            format!(
+                "выписано приглашение `{}` на {} устройств до {}",
+                invite.id,
+                invite.max_uses,
+                invite.expires.format("%Y-%m-%d")
+            ),
+        ))
+        .await;
+    Ok((StatusCode::CREATED, Json(invite)))
+}
+
+async fn revoke_invite(
+    State(state): State<Arc<AppState>>,
+    Extension(admin): Extension<Admin>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let invite = state.invites.write().await.revoke(&id)?;
+    tracing::warn!(admin = %admin.name, invite = %invite.id, "invite revoked");
+    Ok(Json(invite))
 }
 
 #[derive(Debug, Deserialize)]
