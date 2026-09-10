@@ -73,6 +73,11 @@ enum CaCommand {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Выписать серверный сертификат для device API на `node.host`.
+    ///
+    /// Отдельный от server.pem: тот выписан на IP-литерал admin API, а телефон
+    /// приходит по имени из bundle, и SAN должен совпадать.
+    IssueDeviceApi,
     /// Revoke an admin client certificate.
     Revoke {
         /// Admin name.
@@ -161,6 +166,18 @@ fn run(cli: Cli) -> Result<()> {
             );
             Ok(())
         }
+        Command::Ca(CaCommand::IssueDeviceApi) => {
+            let path = pki::issue_device_api_cert(&config.api.pki_dir, &config.node.host)?;
+            println!("сертификат device API выписан на `{}`", config.node.host);
+            println!("  {}", path.display());
+            println!();
+            println!("Приложение доверяет ему через пиннинг hearth CA в network security");
+            println!("config — публичный CA здесь не нужен: не будет ни записи в CT-логах,");
+            println!("ни certbot'а, который однажды молча не продлится.");
+            println!();
+            println!("Дальше: ./deploy/fix-permissions.sh && systemctl restart hearthd");
+            Ok(())
+        }
         Command::Ca(CaCommand::Revoke { name }) => {
             let mut registry = pki::AdminRegistry::load(&config.api.pki_dir)?;
             let admin = registry.revoke(&name)?;
@@ -203,7 +220,7 @@ fn serve(config: Config, dry_run: bool) -> Result<()> {
             tracing::error!("integrity check failed at start-up; relays stopped (see /alerts)");
         }
 
-        let tasks = vec![
+        let mut tasks = vec![
             tokio::spawn(supervisor::Supervisor::new(state.clone()).run(shutdown_rx.clone())),
             tokio::spawn(egress::EgressWatchdog::new(state.clone()).run(shutdown_rx.clone())),
             tokio::spawn(checker.run(shutdown_rx.clone())),
@@ -213,6 +230,29 @@ fn serve(config: Config, dry_run: bool) -> Result<()> {
         let api_state = state.clone();
         let api_shutdown = shutdown_rx.clone();
         let mut api = tokio::spawn(async move { api::serve(api_state, api_shutdown).await });
+
+        // Device API — в отличие от admin API он ОПЦИОНАЛЕН и его падение не должно
+        // ронять узел: без него телефоны не получат обновление и свежие TURN-креды,
+        // но сообщения продолжат ходить. Валить из-за этого весь мессенджер — хуже,
+        // чем работать с деградацией, о которой сказано в журнале и в алерте.
+        if state.config.device_api.enabled {
+            let device_state = state.clone();
+            let device_shutdown = shutdown_rx.clone();
+            let alerts = state.alerts.clone();
+            tasks.push(tokio::spawn(async move {
+                if let Err(e) = hearthd::deviceapi::serve(device_state, device_shutdown).await {
+                    tracing::error!(error = %e, "device api stopped");
+                    alerts
+                        .emit(hearthd::model::alert::Alert::warning(
+                            "deviceapi",
+                            format!(
+                                "device api stopped: {e}. Обновления и свежие TURN-креды                                  устройствам недоступны; сообщения не затронуты."
+                            ),
+                        ))
+                        .await;
+                }
+            }));
+        }
 
         tracing::info!(%api_listen, "hearthd ready");
 

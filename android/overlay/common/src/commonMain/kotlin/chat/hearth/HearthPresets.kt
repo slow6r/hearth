@@ -27,6 +27,25 @@ object HearthPresets {
   /** Public operator presets are off, permanently. */
   const val PRESETS_ENABLED = false
 
+  /**
+   * Показывать ли переключатель «Защитить экран приложения» (patches/0006).
+   *
+   * Нет. FLAG_SECURE ставится безусловно в MainActivity; переключатель, который может
+   * его снять, — это настройка, которую рано или поздно выключат, и именно на том
+   * устройстве, которое потеряют (ТЗ §3.1, §8.2 п.6).
+   */
+  const val SHOW_SCREEN_PROTECTION_TOGGLE = false
+
+  /**
+   * Показывать ли пункты, ведущие в публичную сеть SimpleX («написать основателю»,
+   * краудфандинг и подобное).
+   *
+   * Нет. Операторы выключены, публичные релеи недостижимы, поэтому такая кнопка —
+   * это кнопка, которая молча не сработает. Плюс её адрес — адрес публичной сети,
+   * зашитый в APK, что запрещает ТЗ §1.2 и ловит A5.
+   */
+  const val SHOW_UPSTREAM_LINKS = false
+
   /** ТЗ §8.2 п.5: private message routing is on by default and not weakened. */
   const val PRIVATE_ROUTING_DEFAULT = "always"
 

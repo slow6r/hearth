@@ -71,6 +71,24 @@ pub fn server_config(pki_dir: &Path) -> Result<Arc<ServerConfig>> {
 }
 
 /// Client side (`hearthctl`): trust only our CA, always present the admin certificate.
+/// TLS для device API: сертификат на имя узла, клиентских сертификатов НЕТ.
+///
+/// В отличие от admin API здесь нельзя требовать mTLS: у телефонов нет и не должно
+/// быть админских сертификатов. Их удостоверяет токен устройства на уровне HTTP, а
+/// TLS здесь нужен ровно для того, чтобы токен и APK не шли открытым текстом.
+pub fn device_server_config(pki_dir: &Path) -> Result<Arc<ServerConfig>> {
+    let certs = load_certs(&pki_dir.join(super::super::pki::DEVICE_API_CERT))?;
+    let key = load_key(&pki_dir.join(super::super::pki::DEVICE_API_KEY))?;
+
+    let config = ServerConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| Error::Tls(e.to_string()))?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| Error::Tls(format!("device api certificate: {e}")))?;
+    Ok(Arc::new(config))
+}
+
 pub fn client_config(ca_pem: &Path, cert: &Path, key: &Path) -> Result<Arc<ClientConfig>> {
     let roots = root_store(ca_pem)?;
     let certs = load_certs(cert)?;

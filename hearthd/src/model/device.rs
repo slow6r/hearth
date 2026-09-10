@@ -70,6 +70,14 @@ pub struct Device {
     pub last_bundle: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Секрет устройства для device API (обновления и свежие TURN-креды).
+    ///
+    /// Отдельный от пароля релея намеренно: пароль релея один на всю семью и внутри
+    /// адреса, а этот — свой у каждого устройства. Значит потерянный телефон
+    /// отзывается по-настоящему: `device revoke` гасит именно его доступ к узлу, не
+    /// трогая остальных. Пароль релея так отозвать нельзя — только ротацией адреса.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 impl Device {
@@ -151,6 +159,9 @@ impl DeviceRegistry {
             bundles_issued: 0,
             last_bundle: None,
             note,
+            // Свой секрет на устройство. 32 байта: подбирать нечего, а короче делать
+            // незачем — он едет в QR, который человек всё равно не набирает руками.
+            token: Some(crate::store::random_hex(32)),
         };
         self.devices.push(device.clone());
         self.save()?;

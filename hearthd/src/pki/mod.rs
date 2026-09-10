@@ -23,6 +23,8 @@ pub const CA_CERT: &str = "ca.pem";
 pub const CA_KEY: &str = "ca.key";
 pub const SERVER_CERT: &str = "server.pem";
 pub const SERVER_KEY: &str = "server.key";
+pub const DEVICE_API_CERT: &str = "device-api.pem";
+pub const DEVICE_API_KEY: &str = "device-api.key";
 pub const ADMINS: &str = "admins.json";
 
 /// CA validity. Long, because rotating it means re-issuing every admin certificate by
@@ -233,6 +235,58 @@ pub fn issue_admin(pki_dir: &Path, name: &str, days: i64) -> Result<IssuedAdmin>
         key_pem: key.serialize_pem(),
         expires,
     })
+}
+
+/// Серверный сертификат для device API, на ИМЯ узла.
+///
+/// Отдельный от `server.pem` намеренно: тот выписан на IP-литерал admin API, а
+/// телефон приходит по имени из bundle, и SAN должен совпадать. Подписывает тот же
+/// hearth CA, который приложение пинует в network security config — публичный CA тут
+/// не нужен и не желателен: не будет ни записи в CT-логах, ни certbot'а, который
+/// однажды молча не продлится и оставит семью без обновлений.
+pub fn issue_device_api_cert(pki_dir: &Path, host: &str) -> Result<PathBuf> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err(Error::invalid("node.host must not be empty"));
+    }
+    if !pki_dir.join(CA_CERT).exists() {
+        return Err(Error::NotFound(format!(
+            "{} — run `hearthd ca init` first",
+            pki_dir.join(CA_CERT).display()
+        )));
+    }
+    let ca_key_pem = store::read_secret(pki_dir.join(CA_KEY))?;
+    let ca_key = rcgen::KeyPair::from_pem(&ca_key_pem)?;
+    let ca_params = ca_params()?;
+    let issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
+
+    let key = rcgen::KeyPair::generate()?;
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new())?;
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, host);
+    // Имя, а не адрес: если провайдер сменит IP, сертификат переживёт это без
+    // перевыпуска — ровно та же причина, по которой node.host вообще домен.
+    params.subject_alt_names = if let Ok(ip) = host.parse::<IpAddr>() {
+        vec![rcgen::SanType::IpAddress(ip)]
+    } else {
+        vec![rcgen::SanType::DnsName(host.try_into().map_err(|_| {
+            Error::invalid(format!("node.host `{host}` is not a valid DNS name"))
+        })?)]
+    };
+    params.use_authority_key_identifier_extension = true;
+    params.key_usages = vec![
+        rcgen::KeyUsagePurpose::DigitalSignature,
+        rcgen::KeyUsagePurpose::KeyEncipherment,
+    ];
+    params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+    set_validity(&mut params, SERVER_DAYS);
+    let cert = params.signed_by(&key, &issuer)?;
+
+    let cert_path = pki_dir.join(DEVICE_API_CERT);
+    store::write_atomic(&cert_path, cert.pem().as_bytes(), store::MODE_STATE)?;
+    store::write_secret(pki_dir.join(DEVICE_API_KEY), key.serialize_pem().trim())?;
+    Ok(cert_path)
 }
 
 /// sha256 of a DER certificate, lowercase hex — the admin identity.

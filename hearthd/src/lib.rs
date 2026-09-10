@@ -38,6 +38,7 @@ pub mod alerts;
 pub mod api;
 pub mod backup;
 pub mod config;
+pub mod deviceapi;
 pub mod configgen;
 pub mod egress;
 pub mod error;

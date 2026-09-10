@@ -1,0 +1,457 @@
+//! Device API — единственный сервис узла, с которым говорят сами телефоны.
+//!
+//! # Зачем он вообще появился
+//!
+//! [ADR 0007](../../docs/adr/0007-public-relay-no-vpn.md) свёл публичную поверхность
+//! узла к релеям и TURN, то есть к стоковому коду upstream. Этот модуль добавляет к
+//! ней наш код, и это заметное изменение. Взамен снимаются две вещи, каждая из которых
+//! иначе неустранима:
+//!
+//! 1. **Обновление за ≤ 7 дней (ТЗ §1.4).** Раздача через домашний F-Droid не работает
+//!    для того, кто уехал, — а именно он и остаётся с непропатченной дырой.
+//! 2. **Звонки, ломающиеся раз в месяц.** TURN-креды в bundle — это HMAC текущего
+//!    секрета, и при ротации они умирают у всех сразу. Симптом коварный: сообщения
+//!    ходят, звонки молчат. Здесь телефон берёт свежие сам.
+//!
+//! # Чем он НЕ является
+//!
+//! Не admin API. Тот — mTLS, только из `admin_networks`, полные права. Этот — токен на
+//! устройство, из интернета, и умеет ровно две операции. Разные слушатели и разные
+//! модели доверия: ошибка в маршрутизации между ними стоила бы прав администратора.
+//!
+//! # Доверие
+//!
+//! TLS с сертификатом, выписанным hearth CA на `node.host`. Приложение пинует этот CA
+//! в network security config. Публичный CA не нужен: не будет ни записи в
+//! CT-логах, ни certbot'а, который однажды молча не продлится.
+
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::extract::{Path as AxumPath, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+use chrono::Utc;
+use serde::Serialize;
+use tokio::io::AsyncReadExt as _;
+use tokio::net::TcpListener;
+
+use crate::configgen::turn;
+use crate::error::{Error, Result};
+use crate::state::AppState;
+use crate::store;
+
+/// Заголовок с секретом устройства. Именно заголовок, не параметр URL: URL оседает в
+/// логах прокси, в истории и в отчётах об ошибках.
+const TOKEN_HEADER: &str = "x-hearth-device-token";
+/// Больше этого манифест обновления быть не может — он маленький по определению.
+const MANIFEST_LIMIT: u64 = 64 * 1024;
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+pub async fn serve(
+    state: Arc<AppState>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    let listen = state.config.device_api.listen;
+    let listener = TcpListener::bind(listen)
+        .await
+        .map_err(|e| Error::io(listen.to_string(), e))?;
+    serve_on(state, listener, shutdown).await
+}
+
+pub async fn serve_on(
+    state: Arc<AppState>,
+    listener: TcpListener,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    let tls_config = crate::api::tls::device_server_config(&state.config.api.pki_dir)?;
+    let acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
+    tracing::info!(
+        listen = ?listener.local_addr().ok(),
+        host = %state.config.node.host,
+        "device api listening (TLS, token auth)"
+    );
+
+    let app = router(state.clone());
+
+    loop {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    tracing::info!("device api stopping");
+                    return Ok(());
+                }
+                continue;
+            }
+        };
+
+        let (tcp, peer) = match accepted {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!(error = %e, "device api accept failed");
+                continue;
+            }
+        };
+
+        // Фильтра по адресу здесь нет и быть не может: телефоны приходят из
+        // произвольных мобильных сетей. Единственный замок — токен устройства.
+        let acceptor = acceptor.clone();
+        let app = app.clone();
+        tokio::spawn(async move {
+            let tls = match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(e)) => {
+                    tracing::debug!(%peer, error = %e, "device api tls handshake failed");
+                    return;
+                }
+                Err(_) => {
+                    tracing::debug!(%peer, "device api tls handshake timed out");
+                    return;
+                }
+            };
+            let io = hyper_util::rt::TokioIo::new(tls);
+            let service = hyper::service::service_fn(move |req| {
+                let app = app.clone();
+                async move { tower::ServiceExt::oneshot(app, req).await }
+            });
+            if let Err(e) = hyper_util::server::conn::auto::Builder::new(
+                hyper_util::rt::TokioExecutor::new(),
+            )
+            .serve_connection(io, service)
+            .await
+            {
+                tracing::debug!(%peer, error = %e, "device api connection closed");
+            }
+        });
+    }
+}
+
+fn router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/updates/manifest.json", get(update_manifest))
+        .route("/updates/{file}", get(update_file))
+        .route("/turn-credentials", get(turn_credentials))
+        .with_state(state)
+}
+
+/// Ошибка device API.
+///
+/// Отдельный маленький тип, а не `Response` в `Err`: `Response` весит больше сотни
+/// байт, и каждый `Result` в модуле раздувался бы до его размера на обеих ветках.
+struct ApiError(StatusCode, &'static str);
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.0, self.1).into_response()
+    }
+}
+
+type ApiResult<T> = std::result::Result<T, ApiError>;
+
+/// Кто пришёл. Возвращает id устройства, чтобы его можно было назвать в логах.
+async fn authorize(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
+    let token = headers
+        .get(TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    if token.is_empty() {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "device token required"));
+    }
+
+    let devices = state.devices.read().await;
+    // Сравнение в постоянное время: токен — секрет, а разница во времени ответа
+    // на «первый символ не тот» и «все символы кроме последнего те» подбирается.
+    let found = devices
+        .active()
+        .find(|d| d.token.as_deref().map(|t| ct_eq(t, &token)).unwrap_or(false))
+        .map(|d| d.id.clone());
+
+    match found {
+        Some(id) => Ok(id),
+        None => {
+            // Отозванное устройство приходит сюда же и получает то же самое: узнать по
+            // ответу, «был ли такой токен когда-то», нельзя.
+            tracing::warn!("device api: rejected an unknown or revoked token");
+            Err(ApiError(StatusCode::UNAUTHORIZED, "unknown device"))
+        }
+    }
+}
+
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Имя файла, и только имя.
+///
+/// Без этой проверки `..%2f..%2fetc%2fshadow` отдал бы что угодно, до чего дотягивается
+/// пользователь `hearth` — включая секреты релеев. axum декодирует percent-encoding ДО
+/// того, как значение попадает сюда, так что проверять надо уже раскодированное.
+fn is_safe_apk_name(file: &str) -> bool {
+    !file.is_empty()
+        && !file.contains('/')
+        && !file.contains('\\')
+        && !file.contains("..")
+        && !file.starts_with('.')
+        && file.ends_with(".apk")
+}
+
+async fn update_manifest(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let device = authorize(&state, &headers).await?;
+    let path = state.config.device_api.updates_dir.join("manifest.json");
+
+    let meta = tokio::fs::metadata(&path).await.map_err(|_| {
+        // Обновлений просто нет — это нормальное состояние, а не ошибка.
+        ApiError(StatusCode::NOT_FOUND, "no update published")
+    })?;
+    if meta.len() > MANIFEST_LIMIT {
+        tracing::error!(path = %path.display(), "update manifest is implausibly large");
+        return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "bad manifest"));
+    }
+
+    let body = tokio::fs::read(&path).await.map_err(|e| {
+        tracing::error!(path = %path.display(), error = %e, "cannot read update manifest");
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "bad manifest")
+    })?;
+
+    tracing::debug!(%device, "device api: manifest served");
+    Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
+}
+
+async fn update_file(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(file): AxumPath<String>,
+) -> ApiResult<Response> {
+    let device = authorize(&state, &headers).await?;
+
+    if !is_safe_apk_name(&file) {
+        tracing::warn!(%device, %file, "device api: refused a suspicious file name");
+        return Err(ApiError(StatusCode::BAD_REQUEST, "bad file name"));
+    }
+
+    let path = state.config.device_api.updates_dir.join(&file);
+    let mut f = tokio::fs::File::open(&path)
+        .await
+        .map_err(|_| ApiError(StatusCode::NOT_FOUND, "no such file"))?;
+    let total = f
+        .metadata()
+        .await
+        .map(|m| m.len())
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot stat"))?;
+
+    // Докачка. Обновление весит сотни мегабайт, а телефон в дороге теряет сеть
+    // постоянно; без этого каждый обрыв означал бы скачивание заново с нуля.
+    //
+    // Объявлять `accept-ranges: bytes` и не реализовать разбор — хуже, чем не
+    // объявлять вовсе: клиент поверит заголовку, пошлёт Range, получит 200 со всем
+    // файлом и молча начнёт сначала.
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| parse_range(v, total));
+
+    let (status, start, len) = match range {
+        Some(Some((start, end))) => (StatusCode::PARTIAL_CONTENT, start, end - start + 1),
+        // Заголовок был, но разобрать его не удалось или он вне файла: по RFC 9110
+        // это 416, а не «отдать всё» — иначе клиент склеит мусор с тем, что уже есть.
+        Some(None) => {
+            return Err(ApiError(
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "range not satisfiable",
+            ))
+        }
+        None => (StatusCode::OK, 0, total),
+    };
+
+    if start > 0 {
+        use tokio::io::AsyncSeekExt as _;
+        f.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot seek"))?;
+    }
+
+    // Потоком и с ограничением по длине: APK весит сотни мегабайт, а узел — мини-ПК,
+    // читать файл целиком в память нельзя.
+    let body = Body::from_stream(tokio_util::io::ReaderStream::new(f.take(len)));
+
+    let mut resp = Response::builder()
+        .status(status)
+        .header(
+            header::CONTENT_TYPE,
+            "application/vnd.android.package-archive",
+        )
+        .header(header::CONTENT_LENGTH, len.to_string())
+        .header(header::ACCEPT_RANGES, "bytes");
+    if status == StatusCode::PARTIAL_CONTENT {
+        resp = resp.header(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{}/{}", start, start + len - 1, total),
+        );
+    }
+
+    tracing::info!(%device, %file, start, len, total, "device api: update download");
+    resp.body(body)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot build response"))
+}
+
+/// Разобрать `Range: bytes=START-[END]`.
+///
+/// * `None` — заголовок не про байты или не наш случай, отдаём файл целиком;
+/// * `Some(None)` — заголовок про байты, но диапазон бессмысленный: 416;
+/// * `Some(Some((start, end)))` — включительные границы внутри файла.
+///
+/// Поддерживается только один диапазон. Множественные (`bytes=0-9,20-29`) клиенту
+/// обновлений не нужны, а их поддержка требует multipart-ответа — лишний код в месте,
+/// которое смотрит в интернет.
+fn parse_range(value: &str, total: u64) -> Option<Option<(u64, u64)>> {
+    let spec = value.trim().strip_prefix("bytes=")?.trim();
+    if spec.contains(',') {
+        return Some(None);
+    }
+    let (start_s, end_s) = spec.split_once('-')?;
+    let (start, end) = match (start_s.trim(), end_s.trim()) {
+        // `bytes=-N` — последние N байт.
+        ("", n) => {
+            let n: u64 = n.parse().ok()?;
+            if n == 0 || total == 0 {
+                return Some(None);
+            }
+            (total.saturating_sub(n), total - 1)
+        }
+        (s, "") => (s.parse().ok()?, total.saturating_sub(1)),
+        (s, e) => (s.parse().ok()?, e.parse().ok()?),
+    };
+    if total == 0 || start > end || start >= total {
+        return Some(None);
+    }
+    Some(Some((start, end.min(total - 1))))
+}
+
+#[derive(Debug, Serialize)]
+struct TurnCredentials {
+    username: String,
+    credential: String,
+    /// Строки ICE в том виде, в каком их принимает клиент — тот же формат, что в bundle.
+    ice: Vec<String>,
+    #[serde(with = "crate::model::rfc3339")]
+    expires: chrono::DateTime<Utc>,
+}
+
+/// Свежие TURN-креды.
+///
+/// Это и есть лечение той асимметрии, которую описывает `rotate_turn_secret`: раньше
+/// после ротации секрета у всех устройств умирали звонки, а сообщения продолжали
+/// ходить, и симптом читался как «сломался микрофон», а не «протухли креды».
+async fn turn_credentials(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let device = authorize(&state, &headers).await?;
+
+    if !state.config.turn.enabled {
+        return Err(ApiError(StatusCode::NOT_FOUND, "turn is disabled"));
+    }
+
+    let secret = store::read_secret(&state.config.turn.secret_file).map_err(|e| {
+        tracing::error!(error = %e, "device api: cannot read the turn secret");
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "turn secret unavailable")
+    })?;
+    let cred = turn::credential(&secret, state.config.turn.credential_ttl_secs, Utc::now())
+        .map_err(|e| {
+            tracing::error!(error = %e, "device api: cannot mint turn credentials");
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot mint credentials")
+        })?;
+    let ice = turn::ice_servers(&state.config.turn, &state.config.node.host, &cred).map_err(|e| {
+        tracing::error!(error = %e, "device api: cannot build ice servers");
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot build ice")
+    })?;
+
+    tracing::debug!(%device, "device api: turn credentials issued");
+    Ok(Json(TurnCredentials {
+        username: cred.username,
+        credential: cred.credential,
+        ice,
+        expires: cred.expires,
+    })
+    .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_a_plain_apk_name() {
+        assert!(is_safe_apk_name("hearth-7.0.1-arm64-v8a.apk"));
+    }
+
+    #[test]
+    fn refuses_traversal_and_anything_that_is_not_an_apk() {
+        for bad in [
+            "",
+            "../../etc/shadow",
+            "..",
+            "../hearth.apk",
+            "sub/dir/hearth.apk",
+            ".hidden.apk",
+            "manifest.json",
+            "hearth.apk.exe",
+        ] {
+            assert!(!is_safe_apk_name(bad), "должно быть отвергнуто: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_windows_style_traversal() {
+        assert!(!is_safe_apk_name("..\\hearth.apk"));
+    }
+
+    #[test]
+    fn token_comparison_is_length_safe() {
+        assert!(ct_eq("abc", "abc"));
+        assert!(!ct_eq("abc", "abd"));
+        // Разная длина не должна ни паниковать, ни совпадать.
+        assert!(!ct_eq("abc", "abcd"));
+        assert!(!ct_eq("", "x"));
+        assert!(ct_eq("", ""));
+    }
+
+    #[test]
+    fn parses_ordinary_ranges() {
+        assert_eq!(parse_range("bytes=0-99", 1000), Some(Some((0, 99))));
+        assert_eq!(parse_range("bytes=100-", 1000), Some(Some((100, 999))));
+        // Конец за пределами файла подрезается, а не отвергается: так делает
+        // большинство клиентов, и RFC 9110 это разрешает.
+        assert_eq!(parse_range("bytes=900-5000", 1000), Some(Some((900, 999))));
+        assert_eq!(parse_range("bytes=-100", 1000), Some(Some((900, 999))));
+    }
+
+    #[test]
+    fn refuses_nonsense_ranges() {
+        // Начало за концом файла — 416, а не «отдать всё»: иначе клиент склеит
+        // полученное с тем, что уже скачал, и получит мусор.
+        assert_eq!(parse_range("bytes=1000-", 1000), Some(None));
+        assert_eq!(parse_range("bytes=500-100", 1000), Some(None));
+        assert_eq!(parse_range("bytes=0-9,20-29", 1000), Some(None));
+        assert_eq!(parse_range("bytes=-0", 1000), Some(None));
+    }
+
+    #[test]
+    fn ignores_units_it_does_not_speak() {
+        assert_eq!(parse_range("items=0-99", 1000), None);
+        assert_eq!(parse_range("bytes=abc", 1000), None);
+    }
+}

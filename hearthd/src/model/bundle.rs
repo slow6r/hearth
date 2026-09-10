@@ -48,6 +48,24 @@ pub struct Bundle {
     pub issued: DateTime<Utc>,
     /// Device id this bundle was minted for.
     pub device: String,
+    /// Device API узла: откуда брать обновления и свежие TURN-креды.
+    ///
+    /// `None` — узел без device API; клиент тогда живёт как раньше, но звонки у него
+    /// сломаются при следующей ротации TURN-секрета, и bundle придётся выдать заново.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<NodeApi>,
+}
+
+/// Адрес device API и токен этого устройства.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeApi {
+    /// Тот же хост, что и в адресе релея. Клиент обязан брать адрес отсюда, а не из
+    /// документов, которые этот же API потом отдаёт: иначе подменённый ответ увёл бы
+    /// устройство на чужой сервер.
+    pub host: String,
+    pub port: u16,
+    /// Секрет этого устройства. Уходит заголовком, не в URL: URL оседает в логах.
+    pub token: String,
 }
 
 /// Network preferences forced onto the client (ТЗ §8.2 п.3–5).
@@ -418,6 +436,7 @@ mod tests {
                 .single()
                 .expect("ts"),
             device: "mama-pixel8".into(),
+            node: None,
         }
     }
 

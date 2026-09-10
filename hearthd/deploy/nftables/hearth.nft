@@ -42,6 +42,8 @@ table inet hearth {
     counter turn_egress { }
     # host stack: inbound traffic that has nothing to do with the messenger.
     counter app_in { }
+    # Device API: обновления и свежие TURN-креды для самих телефонов.
+    counter device_in { }
     # Link-scoped chatter this host must answer: NDP and mDNS. Counted rather than
     # accepted silently, so it is visible without polluting app_egress.
     counter link_local { }
@@ -110,6 +112,13 @@ table inet hearth {
         # TURN media relay. This is what actually carries a call between two phones
         # that are both behind NAT.
         udp dport $TURN_RANGE counter name turn_media accept
+
+        # Device API (7444). Публичный, как релеи, и это осознанно: телефон в
+        # мобильной сети должен получить обновление и свежие TURN-креды откуда угодно.
+        # Замок — токен устройства, а не адрес источника; отзыв устройства гасит
+        # именно его доступ, не трогая остальных. Не путать с 7443: тот admin API,
+        # он остаётся только для LAN и требует клиентский сертификат.
+        tcp dport 7444 counter name device_in accept
 
         # --- LAN only: administration ----------------------------------------
         ip saddr @lan_nets tcp dport 7443 counter name admin_in accept

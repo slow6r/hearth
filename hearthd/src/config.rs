@@ -38,6 +38,69 @@ pub struct Config {
     pub alerts: Alerts,
     #[serde(default)]
     pub devices: Devices,
+    /// API для самих устройств семьи: обновления и свежие TURN-креды.
+    #[serde(default)]
+    pub device_api: DeviceApi,
+}
+
+/// Device API — единственный сервис узла, доступный ТЕЛЕФОНАМ, а не только LAN.
+///
+/// # Чем он отличается от admin API и почему это отдельная сущность
+///
+/// Admin API (`[api]`) — mTLS, только из `admin_networks`, права администратора.
+/// Этот — токен на устройство, из интернета, и умеет ровно две вещи: отдать
+/// обновление и выписать свежие TURN-креды. Смешивать их в одном слушателе нельзя:
+/// у них разные модели доверия, и ошибка в маршрутизации стоила бы прав админа.
+///
+/// # Чего он стоит
+///
+/// [ADR 0007](../../docs/adr/0007-public-relay-no-vpn.md) сводил публичную поверхность
+/// узла к релеям и TURN — то есть к стоковому коду upstream. Этот сервис добавляет к
+/// ней НАШ код. Взамен снимаются две вещи: обновление за ≤ 7 дней (ТЗ §1.4) для того,
+/// кто в отъезде, и поломка звонков у всех при каждой ротации TURN-секрета.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceApi {
+    /// Выключен по умолчанию: включение расширяет публичную поверхность узла, и это
+    /// должно быть осознанным действием, а не следствием обновления конфига.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Где слушать. В отличие от admin API здесь wildcard допустим и нормален:
+    /// подключаются телефоны из интернета.
+    #[serde(default = "DeviceApi::default_listen")]
+    pub listen: std::net::SocketAddr,
+    /// Порт, который попадает в bundle. Отличается от `listen`, когда роутер
+    /// пробрасывает снаружи другой порт.
+    #[serde(default = "DeviceApi::default_public_port")]
+    pub public_port: u16,
+    /// Каталог с APK и manifest.json.
+    #[serde(default = "DeviceApi::default_updates_dir")]
+    pub updates_dir: PathBuf,
+}
+
+impl Default for DeviceApi {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: Self::default_listen(),
+            public_port: Self::default_public_port(),
+            updates_dir: Self::default_updates_dir(),
+        }
+    }
+}
+
+impl DeviceApi {
+    fn default_listen() -> std::net::SocketAddr {
+        // Собираем из частей, а не парсим строку: у парсинга есть ветка ошибки,
+        // которой здесь взяться неоткуда, и clippy справедливо не любит expect().
+        SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 7444)
+    }
+    fn default_public_port() -> u16 {
+        7444
+    }
+    fn default_updates_dir() -> PathBuf {
+        PathBuf::from("/srv/hearth/updates")
+    }
 }
 
 /// Node identity: how clients reach it, and which networks hearthd itself may talk to.
@@ -565,6 +628,22 @@ impl Config {
                     "alerts.gotify.addr {} is outside node.lan_networks \
                      (external alerting is forbidden by ТЗ §7.3)",
                     gotify.addr
+                )));
+            }
+        }
+
+        if self.device_api.enabled {
+            // Порт device API не должен совпадать ни с релейным, ни с admin API:
+            // иначе один из слушателей не поднимется, и какой именно — зависит от
+            // порядка старта, то есть отладка будет случайной.
+            let port = self.device_api.listen.port();
+            let mut taken: Vec<u16> = self.smp.all_ports();
+            taken.extend(self.xftp.all_ports());
+            taken.push(self.api.listen.port());
+            taken.push(self.turn.port);
+            if taken.contains(&port) {
+                return Err(Error::config(format!(
+                    "device_api.listen port {port} is already used by another service"
                 )));
             }
         }

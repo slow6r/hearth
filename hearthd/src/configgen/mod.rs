@@ -13,7 +13,7 @@ use chrono::Utc;
 
 use crate::config::{Config, Relay};
 use crate::error::{Error, Result};
-use crate::model::bundle::{Bundle, NetPrefs, ServerUri, BUNDLE_VERSION};
+use crate::model::bundle::{Bundle, NetPrefs, ServerUri, BUNDLE_VERSION, NodeApi};
 use crate::model::device::{Device, Platform};
 use crate::store;
 
@@ -49,6 +49,17 @@ pub fn build_bundle(config: &Config, device: &Device) -> Result<Bundle> {
         net: NetPrefs::default(),
         issued: Utc::now(),
         device: device.id.clone(),
+        // Device API, если он включён И у устройства есть токен. Старые устройства,
+        // заведённые до появления токенов, получают bundle без этой секции и живут
+        // как раньше — но их звонки сломаются на следующей ротации TURN-секрета.
+        node: match (config.device_api.enabled, device.token.as_ref()) {
+            (true, Some(token)) => Some(NodeApi {
+                host: config.node.host.clone(),
+                port: config.device_api.public_port,
+                token: token.clone(),
+            }),
+            _ => None,
+        },
     };
     bundle.validate(&config.node.host)?;
     Ok(bundle)
@@ -182,6 +193,7 @@ mod tests {
             bundles_issued: 0,
             last_bundle: None,
             note: None,
+            token: None,
         }
     }
 

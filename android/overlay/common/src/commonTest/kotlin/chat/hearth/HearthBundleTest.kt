@@ -102,7 +102,7 @@ class HearthBundleTest {
   }
 
   @Test
-  fun importerAppliesEverythingOnce() = kotlinx.coroutines.test.runTest {
+  fun importerAppliesEverythingOnce() = kotlinx.coroutines.runBlocking {
     val applier = RecordingApplier()
     val result = HearthOnboardingImporter(applier).import(valid)
     assertTrue(result is HearthImportResult.Applied)
@@ -112,7 +112,7 @@ class HearthBundleTest {
   }
 
   @Test
-  fun importerReportsRejectionWithoutTouchingTheCore() = kotlinx.coroutines.test.runTest {
+  fun importerReportsRejectionWithoutTouchingTheCore() = kotlinx.coroutines.runBlocking {
     val applier = RecordingApplier()
     val result = HearthOnboardingImporter(applier).import("{}")
     assertTrue(result is HearthImportResult.Rejected)

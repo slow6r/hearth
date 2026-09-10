@@ -39,3 +39,12 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+
+# --- Форк upstream и артефакты сборки ---
+# Форк подключается как submodule (android/README.md) и в этот репозиторий не
+# вкладывается: здесь только overlay-файлы, описания патчей и скрипты.
+/android/simplex-chat/
+# Собранные APK и подписи — артефакты, а не исходники. Для сверки достаточно
+# отпечатка ключа в keys/apksigner-fingerprints.txt.
+/android/*.apk
+/android/*.apk.idsig

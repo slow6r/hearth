@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Фон адаптивной иконки Hearth.
+
+  Свой цвет, а не правка upstream'ового @color/icon_background: тот же ресурс
+  используют альтернативные иконки SimpleX (icon_dark_blue), и менять его — значит
+  трогать то, о чём нас не просили.
+
+  Тёмный тёплый: костёр читается на тёмном, на белом он выглядит вырезанным из бумаги.
+-->
+<resources>
+    <color name="hearth_icon_background">#1A1109</color>
+</resources>

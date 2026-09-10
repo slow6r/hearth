@@ -30,6 +30,10 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 hyper = { version = "1.11", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "client", "client-legacy", "http1", "service"] }
 http-body-util = "0.1"
+# Потоковая отдача APK в device API: файл весит сотни мегабайт, читать его
+# целиком в память на мини-ПК нельзя. tokio-util и так уже в дереве зависимостей
+# через hyper-util — здесь он просто объявлен явно, как требует Rust.
+tokio-util = { version = "0.7", features = ["io"] }
 tower = { version = "0.5", features = ["util"] }
 
 # --- TLS / PKI (ring provider: no C toolchain, clean musl static build) -----

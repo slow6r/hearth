@@ -8,16 +8,30 @@ set -euo pipefail
 FORK_DIR="${FORK_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../simplex-chat" && pwd)}"
 cd "$FORK_DIR/apps/multiplatform"
 
+# Нативное ядро на Haskell мы не собираем (android/README.md, раздел «Стратегия»):
+# берём libsimplex.so и libsupport.so из официального APK пинованного тега и кладём
+# туда же, куда их кладёт upstream'овский scripts/android/prepare.sh. Именно из APK,
+# а не из сборки CI: так они гарантированно соответствуют тегу.
+LIBS_DIR="common/src/commonMain/cpp/android/libs/arm64-v8a"
+for lib in libsimplex.so libsupport.so; do
+    [ -f "$LIBS_DIR/$lib" ] || { echo "нет $LIBS_DIR/$lib — см. android/README.md" >&2; exit 1; }
+done
+echo "== Нативное ядро (upstream, не наша сборка)"
+sha256sum "$LIBS_DIR"/*.so
+
 echo "== Версии инструментов (должны совпадать с gradle/libs.versions.toml)"
 java -version 2>&1 | head -1
 ./gradlew --version | grep -E 'Gradle|JVM'
 
 echo "== Сборка release (только arm64-v8a)"
-./gradlew clean :android:assembleRelease \
+# assembleFossRelease, а НЕ assembleRelease: upstream делает агрегирующие задачи
+# (build, assemble, assembleRelease, bundle) падающими намеренно — они собрали бы
+# релиз с Play Billing либо app bundle без него. Флейвор foss — это F-Droid и GitHub.
+./gradlew clean :android:assembleFossRelease \
     -Pandroid.injected.build.abi=arm64-v8a \
     --no-daemon
 
-APK="$(find android/build/outputs/apk/release -name '*.apk' | head -1)"
+APK="$(find android/build/outputs/apk/fossRelease -name '*.apk' | head -1)"
 echo "== Собрано: $APK"
 sha256sum "$APK"
 
