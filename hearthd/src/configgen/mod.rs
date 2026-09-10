@@ -13,7 +13,7 @@ use chrono::Utc;
 
 use crate::config::{Config, Relay};
 use crate::error::{Error, Result};
-use crate::model::bundle::{Bundle, NetPrefs, ServerUri, BUNDLE_VERSION, NodeApi};
+use crate::model::bundle::{Bundle, NetPrefs, NodeApi, ServerUri, BUNDLE_VERSION};
 use crate::model::device::{Device, Platform};
 use crate::store;
 

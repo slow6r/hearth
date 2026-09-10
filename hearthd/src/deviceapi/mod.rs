@@ -34,7 +34,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt as _;
 use tokio::net::TcpListener;
 
@@ -117,11 +117,10 @@ pub async fn serve_on(
                 let app = app.clone();
                 async move { tower::ServiceExt::oneshot(app, req).await }
             });
-            if let Err(e) = hyper_util::server::conn::auto::Builder::new(
-                hyper_util::rt::TokioExecutor::new(),
-            )
-            .serve_connection(io, service)
-            .await
+            if let Err(e) =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection(io, service)
+                    .await
             {
                 tracing::debug!(%peer, error = %e, "device api connection closed");
             }
@@ -134,6 +133,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/updates/manifest.json", get(update_manifest))
         .route("/updates/{file}", get(update_file))
         .route("/turn-credentials", get(turn_credentials))
+        .route("/enroll", axum::routing::post(enroll))
         .with_state(state)
 }
 
@@ -169,7 +169,12 @@ async fn authorize(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
     // на «первый символ не тот» и «все символы кроме последнего те» подбирается.
     let found = devices
         .active()
-        .find(|d| d.token.as_deref().map(|t| ct_eq(t, &token)).unwrap_or(false))
+        .find(|d| {
+            d.token
+                .as_deref()
+                .map(|t| ct_eq(t, &token))
+                .unwrap_or(false)
+        })
         .map(|d| d.id.clone());
 
     match found {
@@ -340,6 +345,89 @@ fn parse_range(value: &str, total: u64) -> Option<Option<(u64, u64)>> {
     Some(Some((start, end.min(total - 1))))
 }
 
+#[derive(Debug, Deserialize)]
+struct EnrollRequest {
+    /// Человеческое имя нового устройства, как его вводит член семьи.
+    name: String,
+}
+
+/// Завести НОВОЕ устройство по просьбе уже заведённого.
+///
+/// # Зачем это вообще
+///
+/// Иначе каждый новый телефон требует администратора у терминала: `hearthctl device
+/// add` доступен только по admin API из LAN. Для семьи из двадцати человек это узкое
+/// место, а в стоковом SimpleX ничего подобного нет вовсе — там просто ставят
+/// приложение, потому что серверы публичные.
+///
+/// # Почему это не дыра
+///
+/// Любой уже заведённый телефон ДЕРЖИТ пароль релея у себя: он внутри адреса
+/// `smp://<fp>:<pass>@host`. То есть член семьи и так может показать свой QR новому
+/// телефону, и никакой код этому не помешает — секрет уже роздан.
+///
+/// Что этот эндпоинт добавляет — не секретность, а УЧЁТ: новое устройство получает
+/// собственную запись в реестре и СВОЙ токен. Без него самодельное «поделись QR»
+/// плодило бы телефоны, которых узел не знает и которые нечем отозвать, да ещё и с
+/// общим токеном — отзыв одного гасил бы всех.
+///
+/// Ограничение — `devices.max_devices`, то же, что и у admin API.
+async fn enroll(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<EnrollRequest>,
+) -> ApiResult<Response> {
+    let inviter = authorize(&state, &headers).await?;
+
+    let name = req.name.trim();
+    if name.is_empty() || name.chars().count() > 64 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "bad device name"));
+    }
+
+    let device = state
+        .devices
+        .write()
+        .await
+        .add(
+            name,
+            crate::model::device::Platform::Android,
+            Some(format!("заведено с устройства {inviter}")),
+            state.config.devices.max_devices,
+        )
+        .map_err(|e| {
+            tracing::warn!(%inviter, error = %e, "device api: enroll refused");
+            // Лимит устройств и повтор имени — это не ошибка сервера, а ответ ему.
+            ApiError(StatusCode::CONFLICT, "cannot add the device")
+        })?;
+
+    let bundle = crate::configgen::build_bundle(&state.config, &device).map_err(|e| {
+        tracing::error!(%inviter, error = %e, "device api: cannot build a bundle");
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot build a bundle")
+    })?;
+
+    // Помечаем выдачу так же, как это делает admin API: счётчик bundle'ов — часть
+    // того, по чему потом разбирают инцидент.
+    let _ = state.devices.write().await.note_bundle_issued(&device.id);
+
+    tracing::warn!(
+        %inviter,
+        new_device = %device.id,
+        "device api: a family member enrolled a new device"
+    );
+    state
+        .alerts
+        .emit(crate::model::alert::Alert::warning(
+            "deviceapi",
+            format!(
+                "устройство `{}` завело новое устройство `{}` — проверьте, что это ожидаемо",
+                inviter, device.id
+            ),
+        ))
+        .await;
+
+    Ok(Json(bundle).into_response())
+}
+
 #[derive(Debug, Serialize)]
 struct TurnCredentials {
     username: String,
@@ -374,10 +462,11 @@ async fn turn_credentials(
             tracing::error!(error = %e, "device api: cannot mint turn credentials");
             ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot mint credentials")
         })?;
-    let ice = turn::ice_servers(&state.config.turn, &state.config.node.host, &cred).map_err(|e| {
-        tracing::error!(error = %e, "device api: cannot build ice servers");
-        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot build ice")
-    })?;
+    let ice =
+        turn::ice_servers(&state.config.turn, &state.config.node.host, &cred).map_err(|e| {
+            tracing::error!(error = %e, "device api: cannot build ice servers");
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot build ice")
+        })?;
 
     tracing::debug!(%device, "device api: turn credentials issued");
     Ok(Json(TurnCredentials {
