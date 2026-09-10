@@ -106,6 +106,40 @@ Haskell-ядро (`.so`) в v1 **не собираем**: берём релиз�
 
 ---
 
+## Десктоп (Windows)
+
+Ядро для десктопа мы тоже не собираем, а берём из официального релиза upstream — как
+и для Android. Отличие в том, что для Windows оно лежит внутри `.msi`:
+
+```bash
+curl -L -o u.msi https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.1/simplex-desktop-windows-x86_64.msi
+sha256sum u.msi     # bcb227c15189615a3dd67193e1cb5842f4873c24e53d2e33284dbcae48dbb810
+7z e u.msi filec6d138a347f4390987170efb9d87b121   # 136 МБ, это libsimplex.dll
+```
+
+Хеш обязателен и проверяется **из двух сетей** — та же процедура, что для релеев
+(`relays/README.md`). Записанные значения:
+
+| Файл | sha256 |
+|---|---|
+| `simplex-desktop-windows-x86_64.msi` (v7.0.1) | `bcb227c15189615a3dd67193e1cb5842f4873c24e53d2e33284dbcae48dbb810` |
+| `libsimplex.dll` из него | `5586c3b77a1ddb2844a8aa62bb3e774fac4f62d7671fe2d10da32340d23ae929` |
+
+Дальше DLL кладётся в `common/src/commonMain/cpp/desktop/libs/windows-x86_64/` и в
+`desktop/build/cmake/main/windows-amd64/` (оттуда её забирает `cmakeBuildAndCopy`), и:
+
+```bash
+./gradlew :desktop:cmakeBuildAndCopy :desktop:createDistributable   # готовое приложение
+./gradlew :desktop:packageMsi                                       # установщик, нужен WiX
+```
+
+Что должно быть на машине: `cmake`, `gcc` (MinGW-w64), `make` — плагин генерирует
+Unix Makefiles, и `mingw32-make` сам по себе не подходит, нужен именно `make` в PATH.
+Для MSI дополнительно WiX Toolset 3.x (`winget install WiXToolset.WiXToolset`,
+требует прав администратора).
+
+---
+
 ## Раскатка (ТЗ §8.2 п.9)
 
 Канал — **собственный F-Droid-репозиторий на `hearth-node`, доступный из домашней сети**.

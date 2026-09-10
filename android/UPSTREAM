@@ -5,8 +5,8 @@
 #
 # Обновление: android/scripts/rebase-upstream.sh <tag>, порядок — ТЗ §10.6.
 
-simplex_chat_tag=REPLACE-WITH-PINNED-TAG
-simplexmq_tag=REPLACE-WITH-PINNED-TAG
+simplex_chat_tag=v7.0.1
+simplexmq_tag=v7.0.1
 
 # Ветка форка: hearth/<simplex_chat_tag>
 # Подпись тега проверяется в rebase-upstream.sh (git verify-tag).
