@@ -208,9 +208,7 @@ mod tests {
         assert_eq!(bundle.v, 1);
         assert_eq!(
             bundle.smp,
-            vec![format!(
-                "smp://smpFingerPrintAbC:smpPassword123@{host}:5223"
-            )]
+            vec![format!("smp://smpFingerPrintAbC:smpPassword123@{host}:443")]
         );
         assert_eq!(
             bundle.xftp,

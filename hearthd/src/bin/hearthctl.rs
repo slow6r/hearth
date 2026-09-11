@@ -360,7 +360,9 @@ async fn run(cli: Cli) -> Result<()> {
             let target = path.clone().unwrap_or_else(|| entry.path.clone());
             let digest = hearthd::model::manifest::sha256_file(&target)?;
             let updated = hearthd::model::manifest::pin(&raw, name, &digest, version.as_deref())?;
-            hearthd::store::write_atomic(
+            // С сохранением владельца: pin запускают через sudo, а читает манифест
+            // служба по группе hearth (см. store::write_atomic_keep_owner).
+            hearthd::store::write_atomic_keep_owner(
                 &config.paths.manifest,
                 updated.as_bytes(),
                 hearthd::store::MODE_STATE,

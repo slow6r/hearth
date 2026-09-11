@@ -80,7 +80,39 @@ pub fn write_json_atomic<T: Serialize>(path: impl AsRef<Path>, value: &T, mode: 
 
 /// Atomic byte write with the given mode.
 pub fn write_atomic(path: impl AsRef<Path>, body: &[u8], mode: u32) -> Result<()> {
+    write_atomic_owned(path.as_ref(), body, mode, None)
+}
+
+/// Как [`write_atomic`], но новый файл получает владельца и группу прежнего.
+///
+/// Атомарная запись создаёт НОВЫЙ файл и переименовывает его поверх старого, поэтому
+/// владельцем становится тот, кто пишет. Для файлов, которые правят через `sudo`, а
+/// читает служба по группе, это ломает доступ: так 2026-09-11 `hearthctl manifest pin`
+/// оставил `/etc/hearth/manifest.toml` с `root:root` вместо `root:hearth`, служба при
+/// следующем старте не смогла его прочитать, сочла целостность нарушенной и
+/// остановила релеи.
+///
+/// Владелец выставляется временному файлу ДО переименования: иначе на мгновение на
+/// месте старого файла лежал бы файл, который служба прочитать не может. Если сменить
+/// владельца нельзя, запись отменяется и старый файл остаётся как был.
+pub fn write_atomic_keep_owner(path: impl AsRef<Path>, body: &[u8], mode: u32) -> Result<()> {
     let path = path.as_ref();
+    #[cfg(unix)]
+    let owner = {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::metadata(path).ok().map(|m| (m.uid(), m.gid()))
+    };
+    #[cfg(not(unix))]
+    let owner = None;
+    write_atomic_owned(path, body, mode, owner)
+}
+
+fn write_atomic_owned(
+    path: &Path,
+    body: &[u8],
+    mode: u32,
+    owner: Option<(u32, u32)>,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             ensure_dir(parent)?;
@@ -98,7 +130,21 @@ pub fn write_atomic(path: impl AsRef<Path>, body: &[u8], mode: u32) -> Result<()
         file.sync_all().map_err(|e| Error::io(&tmp, e))?;
     }
     set_mode(&tmp, mode)?;
+    if let Some((uid, gid)) = owner {
+        if let Err(e) = set_owner(&tmp, uid, gid) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    }
     std::fs::rename(&tmp, path).map_err(|e| Error::io(path, e))?;
+    Ok(())
+}
+
+fn set_owner(path: &Path, uid: u32, gid: u32) -> Result<()> {
+    #[cfg(unix)]
+    std::os::unix::fs::chown(path, Some(uid), Some(gid)).map_err(|e| Error::io(path, e))?;
+    #[cfg(not(unix))]
+    let _ = (path, uid, gid);
     Ok(())
 }
 
@@ -223,6 +269,35 @@ pub fn random_hex(bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn write_keeping_owner_replaces_content_and_keeps_the_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.toml");
+        write_atomic(&path, b"old", MODE_STATE).unwrap();
+        #[cfg(unix)]
+        let before = {
+            use std::os::unix::fs::MetadataExt as _;
+            let m = std::fs::metadata(&path).unwrap();
+            (m.uid(), m.gid())
+        };
+        write_atomic_keep_owner(&path, b"new", MODE_STATE).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let m = std::fs::metadata(&path).unwrap();
+            assert_eq!((m.uid(), m.gid()), before);
+        }
+    }
+
+    #[test]
+    fn write_keeping_owner_creates_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fresh.toml");
+        write_atomic_keep_owner(&path, b"x", MODE_STATE).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"x");
+    }
     use super::*;
     use serde::Deserialize;
 
