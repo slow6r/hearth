@@ -36,6 +36,10 @@ SimpleX и не конфликтовал с ним при обновлениях
 | `usersettings/Appearance.android.kt` | секция выбора иконки: второй вариант — синяя иконка SimpleX |
 | `model/SimpleXAPI.kt` → `simplexChatLink` | показ ссылки как `https://simplex.chat/...` — домен убран |
 | `SettingsView.kt`, `ChatHelpView.kt` | «Что нового», «написать письмо», «звезда», «оценить», «внести вклад», ссылка на команду |
+| `NtfManager.android.kt`, `SimplexService.kt`, `CallService.kt` | акцентный цвет уведомлений `setColor(0x88FFFF)` — им система красит значок и имя приложения в шторке |
+| `drawable-*/ntf_icon.png`, `drawable-*/ntf_service_icon.png` | значки в строке состояния: у сообщений и у постоянного фонового уведомления. Белый силуэт — Android берёт только альфу |
+| `drawable-hdpi/icon.png` | большая картинка в уведомлении, когда у контакта нет аватара или превью скрыто |
+| `mipmap-*/icon*.png`, `common/src/androidMain/res/drawable/icon_foreground_android_common.png`, `@color/icon_dark_blue_background` | старые растровые иконки. При `minSdk 26` лаунчер их не берёт, но они в APK, и запасной ярлык `icon_dark_blue` в манифесте на них ссылается |
 | `desktop/build.gradle.kts` | `packageName`, иконки, `upgradeUuid`, `bundleID`, копирайт |
 
 Схема `simplex:` в ссылках-приглашениях **остаётся**: её разбирает ядро на принимающей
