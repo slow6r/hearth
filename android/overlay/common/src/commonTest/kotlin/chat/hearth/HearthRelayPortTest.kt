@@ -5,7 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
 /**
- * Переписывание адреса своего релея на порт 443.
+ * Переписывание адреса своего релея на порт 8443.
  *
  * Ошибка здесь не падает, а тихо оставляет телефон на порту, который режут, — снова
  * «ссылка крутится и не создаётся». Поэтому проверяется каждый случай, включая те,
@@ -17,21 +17,27 @@ class HearthRelayPortTest {
   private val fp = "dl4E-N71pfkpNzTLXnI5sHuAeT-zDx21sCkqMCQNk9M="
 
   @Test
-  fun anExplicit5223MovesTo443() {
+  fun anExplicit5223MovesTo8443() {
     assertEquals(
-      "smp://$fp:pass_123-x@$host:443",
+      "smp://$fp:pass_123-x@$host:8443",
       hearthRelayAddressOnWebPort("smp://$fp:pass_123-x@$host:5223", host),
     )
   }
 
   @Test
   fun aMissingPortMeans5223AndAlsoMoves() {
-    assertEquals("smp://$fp:p@$host:443", hearthRelayAddressOnWebPort("smp://$fp:p@$host", host))
+    assertEquals("smp://$fp:p@$host:8443", hearthRelayAddressOnWebPort("smp://$fp:p@$host", host))
   }
 
   @Test
-  fun alreadyOn443IsLeftAlone() {
-    assertNull(hearthRelayAddressOnWebPort("smp://$fp:p@$host:443", host))
+  fun alreadyOn8443IsLeftAlone() {
+    assertNull(hearthRelayAddressOnWebPort("smp://$fp:p@$host:8443", host))
+  }
+
+  @Test
+  fun theInspected443AlsoMoves() {
+    // 443 выдавался один день, пока не выяснилось, что провайдер его досматривает.
+    assertEquals("smp://$fp:p@$host:8443", hearthRelayAddressOnWebPort("smp://$fp:p@$host:443", host))
   }
 
   @Test
@@ -52,13 +58,13 @@ class HearthRelayPortTest {
 
   @Test
   fun hostComparisonIgnoresCaseAndSpaces() {
-    assertEquals("smp://$fp:p@RELAY.myhearth.ru:443", hearthRelayAddressOnWebPort("  smp://$fp:p@RELAY.myhearth.ru:5223  ", host))
+    assertEquals("smp://$fp:p@RELAY.myhearth.ru:8443", hearthRelayAddressOnWebPort("  smp://$fp:p@RELAY.myhearth.ru:5223  ", host))
   }
 
   @Test
   fun aListOfHostsWithOursMoves() {
     assertEquals(
-      "smp://$fp:p@$host,backup.myhearth.ru:443",
+      "smp://$fp:p@$host,backup.myhearth.ru:8443",
       hearthRelayAddressOnWebPort("smp://$fp:p@$host,backup.myhearth.ru:5223", host),
     )
   }
