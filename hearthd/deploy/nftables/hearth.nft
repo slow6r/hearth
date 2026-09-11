@@ -80,7 +80,7 @@ table inet hearth {
     set relay_ports {
         type inet_service
         flags interval
-        elements = { 443, 5223, 5443 }
+        elements = { 443, 5223, 5443, 8443 }
     }
 
     # coturn relay allocation range: keep in step with min-port/max-port in

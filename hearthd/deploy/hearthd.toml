@@ -56,13 +56,15 @@ manifest = "/etc/hearth/manifest.toml"
 enabled = true
 unit = "smp-server.service"
 scheme = "smp"
-# Порт в адресах клиентов. 443 первым: нестандартный 5223 режут офисный и публичный
-# Wi-Fi — соединение пропускают, а первое сообщение шифрования глушат. Серверы
-# SimpleX клиент и сам водит через 443. Релей слушает оба.
-port = 443
+# Порт в адресах клиентов. НЕ 443 и НЕ 5223: домашний провайдер узла (AS50254) на
+# входе досматривает эти два порта и выбрасывает TLS-приветствие клиента SimpleX по
+# отпечатку — к узлу не мог подключиться никто и ниоткуда, хотя openssl проходил.
+# Любой другой порт проходит (проверено на двадцати). 8443 — обычный HTTPS-alt,
+# его пропускают и офисные сети. Релей слушает и старые порты.
+port = 8443
 # Upstream's own default is "5223,443". Port 443 is what gets through hotel wifi and
 # restrictive mobile networks — keep it unless something else needs 443 on this host.
-extra_ports = [5223]
+extra_ports = [443, 5223]
 control = "127.0.0.1:5224"
 config_file = "/etc/opt/simplex/smp-server.ini"
 fingerprint_file = "/etc/opt/simplex/fingerprint"

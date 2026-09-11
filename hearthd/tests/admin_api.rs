@@ -156,7 +156,7 @@ async fn device_lifecycle_and_bundle_issue() {
         .expect("bundle is valid");
     assert_eq!(
         bundle.smp,
-        vec!["smp://smpCaFingerprint:smpQueuePassword@relay.example.org:443".to_string()]
+        vec!["smp://smpCaFingerprint:smpQueuePassword@relay.example.org:8443".to_string()]
     );
     assert_eq!(bundle.device, "mama-pixel-8");
     assert!(!bundle.net.presets_enabled);

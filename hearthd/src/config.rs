@@ -854,7 +854,7 @@ mod tests {
     #[test]
     fn catches_port_collisions_between_services() {
         let mut cfg = reference();
-        cfg.xftp.port = 443; // already smp.port
+        cfg.xftp.port = 443; // already in smp.extra_ports
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("both use port 443"), "got {err}");
 
@@ -891,9 +891,9 @@ mod tests {
     #[test]
     fn relay_ports_include_the_extras() {
         let cfg = reference();
-        assert_eq!(cfg.smp.all_ports(), vec![443, 5223]);
+        assert_eq!(cfg.smp.all_ports(), vec![443, 5223, 8443]);
         // Проверка здоровья идёт на порт из адресов клиентов — теперь это 443.
-        assert_eq!(cfg.smp.probe_addr().port(), 443);
+        assert_eq!(cfg.smp.probe_addr().port(), 8443);
         assert!(cfg.smp.probe_addr().ip().is_loopback());
     }
 

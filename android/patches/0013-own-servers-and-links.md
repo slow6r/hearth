@@ -60,7 +60,7 @@ rg -n "simplexChatLink|hearthLinksToCore|hearthLinkToCore" apps/multiplatform/co
   `/var/opt/simplex/smp-server-metrics.txt`. Не растёт — телефон ходит не к нам.
 - В ссылке хост `relay.myhearth.ru`, а не `*.simplex.im`.
 
-## Дополнение: свой релей на порту 443
+## Дополнение: свой релей на порту 8443
 
 ### Что и почему
 Телефон в офисном Wi-Fi не мог создать ссылку: TCP-соединение с релеем на 5223
@@ -70,15 +70,19 @@ rg -n "simplexChatLink|hearthLinksToCore|hearthLinkToCore" apps/multiplatform/co
 через 443 (`smpWebPortServers = SWPPreset`), поэтому из той же сети ссылки на их
 серверах создавались.
 
-Узел теперь выдаёт адрес с `:443` (`[smp] port = 443`, `extra_ports = [5223]`).
-Клиенты, настроенные раньше, переписывают адрес сами.
+Сначала порт сменили на 443 — и ничего не изменилось. Настоящая причина оказалась у
+**домашнего провайдера узла** (AS50254): на входе он досматривает 443 и 5223 и
+выбрасывает TLS-приветствие клиента SimpleX по отпечатку; любой другой порт
+проходит (см. `docs/deploy-fels-2026-09-09.md`, запись от 2026-09-11). Узел выдаёт
+адрес с `:8443` (`[smp] port = 8443`, `extra_ports = [443, 5223]`). Клиенты,
+настроенные раньше, переписывают `:5223` и `:443` на `:8443` сами.
 
 ### Точки интеграции
 ```bash
 rg -n "hearthMigrateRelayToWebPort|hearthCleanUpForeignLinks" apps/multiplatform/common/src
 ```
 - `chat/hearth/HearthRelayPort.kt` — чистая функция: только SMP, только свой хост,
-  только порт 5223 (явный или подразумеваемый). XFTP и сознательно заданные порты не
+  только порты 5223 (явный или подразумеваемый) и 443. XFTP и сознательно заданные порты не
   трогаются. Регулярное выражение намеренно **без обратных косых** — при генерации
   файла они теряются, и Kotlin отвергает `\s`.
 - `chat/hearth/HearthServers.kt`:
@@ -93,6 +97,6 @@ rg -n "hearthMigrateRelayToWebPort|hearthCleanUpForeignLinks" apps/multiplatform
 
 ### Проверка
 - `HearthRelayPortTest`: 9 случаев, включая те, которые трогать нельзя.
-- На узле: у телефона, поставившего обновление, сессии идут на `:443`
-  (`ss -tn state established '( sport = :443 )'`), растёт
+- На узле: у телефона, поставившего обновление, сессии идут на `:8443`
+  (`ss -tn state established '( sport = :8443 )'`), растёт
   `simplex_smp_queues_created`.

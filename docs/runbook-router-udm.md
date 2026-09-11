@@ -88,6 +88,7 @@ UniFi Network → **Settings → Routing & Firewall → Port Forwarding**. Вс�
 | hearth-turn-tcp | 3478 | TCP | то же для сетей, где UDP зарезан | да |
 | hearth-turn-media | 49160–49200 | UDP | **медиапоток звонков** | да |
 | hearth-device-api | 7444 | TCP | обновления по воздуху и заведение устройств (ADR 0010) | да |
+| hearth-smp-8443 | 8443 | TCP | SMP — **основной порт в адресах клиентов** (443 и 5223 провайдер досматривает, см. deploy-fels-2026-09-09.md) | да |
 
 Последнее правило — то, которое забывают. Без него звонок соединяется, сигнализация
 выглядит здоровой, и в трубке тишина.
@@ -194,7 +195,7 @@ TARGET=<node.host> ./tests/acceptance/a04-port-scan.sh
 Или руками:
 
 ```bash
-for p in 5223 443 5443 3478 7444; do nc -vz -w5 <node.host> $p; done  # должны открыться
+for p in 8443 5223 443 5443 3478 7444; do nc -vz -w5 <node.host> $p; done  # должны открыться
 for p in 22 7443 47984; do nc -vz -w5 <node.host> $p; done        # должны молчать
 ```
 
