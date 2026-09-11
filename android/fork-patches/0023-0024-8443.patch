@@ -1,0 +1,158 @@
+From 30eab578ecb24a4999746932d8f5ffcdb081c791 Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Fri, 11 Sep 2026 11:21:12 +0300
+Subject: [PATCH 23/24] =?UTF-8?q?0024:=20=D1=81=D0=B2=D0=BE=D0=B9=20=D1=80?=
+ =?UTF-8?q?=D0=B5=D0=BB=D0=B5=D0=B9=20=D0=BD=D0=B0=20=D0=BF=D0=BE=D1=80?=
+ =?UTF-8?q?=D1=82=D1=83=208443?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Описание — hearth/docs/deploy-fels-2026-09-09.md (запись от 2026-09-11) и
+hearth/android/patches/0013-own-servers-and-links.md. Провайдер узла досматривает
+443 и 5223; HearthRelayPort переводит адрес с обоих на 8443. Версия 7.0.1-h14 / 385.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rFCpGgTKkXuYYaCC7Zsew
+---
+ .../kotlin/chat/hearth/HearthRelayPort.kt     | 31 ++++++++++---------
+ .../kotlin/chat/hearth/HearthRelayPortTest.kt | 22 ++++++++-----
+ apps/multiplatform/gradle.properties          |  4 +--
+ 3 files changed, 32 insertions(+), 25 deletions(-)
+
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthRelayPort.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthRelayPort.kt
+index 163ff54..c042d22 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthRelayPort.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthRelayPort.kt
+@@ -3,22 +3,23 @@ package chat.hearth
+ /**
+  * Порт, на котором телефоны ходят к своему релею.
+  *
+- * # Почему 443, а не 5223
++ * # Почему 8443, а не 443 и не 5223
+  *
+- * 5223 — родной порт SMP, но нестандартный, и его режут офисный и публичный Wi-Fi и
+- * часть провайдеров: соединение пропускают, а первое сообщение шифрования глушат.
+- * Именно так телефон «не мог создать ссылку» — на узле было видно, что соединение
+- * открывается, а до сервера не доходит ни байта, и через 60 секунд сервер его
+- * закрывает. 443 — порт обычных сайтов, его не режет почти никто.
++ * К узлу не мог подключиться никто и ниоткуда — ни из офиса, ни через VPN, ни с
++ * сервера в Москве, — хотя openssl с тех же машин соединялся без проблем. Разбор по
++ * пакетам показал: домашний провайдер узла на входе досматривает порты 443 и 5223 и
++ * выбрасывает именно TLS-приветствие клиента SimpleX (213 байт, по «отпечатку» —
++ * даже с изменённым random). Тот же пакет на любой другой порт доходит; проверено на
++ * двадцати портах. Роутер, узел и сети клиентов ни при чём: изнутри дома то же
++ * приветствие на 443 получает ответ.
+  *
+- * Серверы SimpleX клиент и сам водит через 443 (`smpWebPortServers = preset` в ядре);
+- * поэтому ссылки на их серверах из той же сети создавались, а на наших — нет.
+- *
+- * Релей слушает оба порта, так что переписывание ничего не ломает: уже созданные
+- * очереди продолжают жить на 5223, новые идут через 443.
++ * 8443 — обычный «альтернативный HTTPS», его пропускают и офисные сети. Релей слушает
++ * и старые порты, так что переписывание ничего не ломает.
+  */
+-const val HEARTH_RELAY_WEB_PORT = 443
++const val HEARTH_RELAY_WEB_PORT = 8443
+ private const val SMP_DEFAULT_PORT = 5223
++/** Порты, с которых переводим: родной SMP и тот, что выдавался до обнаружения DPI. */
++private val MOVE_FROM = setOf(SMP_DEFAULT_PORT, 443)
+ 
+ // smp://<отпечаток>:<пароль>@<хост[,хост…]>[:порт]
+ private val SMP_ADDRESS = Regex("^(smp://[^@/?# ]+@)([A-Za-z0-9.,-]+)(?::([0-9]{1,5}))?$")
+@@ -26,8 +27,8 @@ private val SMP_ADDRESS = Regex("^(smp://[^@/?# ]+@)([A-Za-z0-9.,-]+)(?::([0-9]{
+ /**
+  * Адрес своего релея, переведённый на 443, или `null`, если трогать нечего.
+  *
+- * Переписываем только SMP, только свой хост и только порт 5223 — явный или
+- * подразумеваемый. Чужие серверы, XFTP (у него свой порт) и нестандартные порты,
++ * Переписываем только SMP, только свой хост и только порты 5223 (явный или
++ * подразумеваемый) и 443. Чужие серверы, XFTP (у него свой порт) и нестандартные порты,
+  * которые кто-то задал сознательно, не трогаем.
+  */
+ fun hearthRelayAddressOnWebPort(address: String, relayHost: String): String? {
+@@ -35,6 +36,6 @@ fun hearthRelayAddressOnWebPort(address: String, relayHost: String): String? {
+   val (prefix, hosts, port) = m.destructured
+   if (hosts.split(',').none { it.equals(relayHost, ignoreCase = true) }) return null
+   val current = port.toIntOrNull() ?: SMP_DEFAULT_PORT
+-  if (current != SMP_DEFAULT_PORT) return null
++  if (current !in MOVE_FROM) return null
+   return "$prefix$hosts:$HEARTH_RELAY_WEB_PORT"
+ }
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthRelayPortTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthRelayPortTest.kt
+index 14efa07..63f05a4 100644
+--- a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthRelayPortTest.kt
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthRelayPortTest.kt
+@@ -5,7 +5,7 @@ import kotlin.test.assertEquals
+ import kotlin.test.assertNull
+ 
+ /**
+- * Переписывание адреса своего релея на порт 443.
++ * Переписывание адреса своего релея на порт 8443.
+  *
+  * Ошибка здесь не падает, а тихо оставляет телефон на порту, который режут, — снова
+  * «ссылка крутится и не создаётся». Поэтому проверяется каждый случай, включая те,
+@@ -17,21 +17,27 @@ class HearthRelayPortTest {
+   private val fp = "dl4E-N71pfkpNzTLXnI5sHuAeT-zDx21sCkqMCQNk9M="
+ 
+   @Test
+-  fun anExplicit5223MovesTo443() {
++  fun anExplicit5223MovesTo8443() {
+     assertEquals(
+-      "smp://$fp:pass_123-x@$host:443",
++      "smp://$fp:pass_123-x@$host:8443",
+       hearthRelayAddressOnWebPort("smp://$fp:pass_123-x@$host:5223", host),
+     )
+   }
+ 
+   @Test
+   fun aMissingPortMeans5223AndAlsoMoves() {
+-    assertEquals("smp://$fp:p@$host:443", hearthRelayAddressOnWebPort("smp://$fp:p@$host", host))
++    assertEquals("smp://$fp:p@$host:8443", hearthRelayAddressOnWebPort("smp://$fp:p@$host", host))
+   }
+ 
+   @Test
+-  fun alreadyOn443IsLeftAlone() {
+-    assertNull(hearthRelayAddressOnWebPort("smp://$fp:p@$host:443", host))
++  fun alreadyOn8443IsLeftAlone() {
++    assertNull(hearthRelayAddressOnWebPort("smp://$fp:p@$host:8443", host))
++  }
++
++  @Test
++  fun theInspected443AlsoMoves() {
++    // 443 выдавался один день, пока не выяснилось, что провайдер его досматривает.
++    assertEquals("smp://$fp:p@$host:8443", hearthRelayAddressOnWebPort("smp://$fp:p@$host:443", host))
+   }
+ 
+   @Test
+@@ -52,13 +58,13 @@ class HearthRelayPortTest {
+ 
+   @Test
+   fun hostComparisonIgnoresCaseAndSpaces() {
+-    assertEquals("smp://$fp:p@RELAY.myhearth.ru:443", hearthRelayAddressOnWebPort("  smp://$fp:p@RELAY.myhearth.ru:5223  ", host))
++    assertEquals("smp://$fp:p@RELAY.myhearth.ru:8443", hearthRelayAddressOnWebPort("  smp://$fp:p@RELAY.myhearth.ru:5223  ", host))
+   }
+ 
+   @Test
+   fun aListOfHostsWithOursMoves() {
+     assertEquals(
+-      "smp://$fp:p@$host,backup.myhearth.ru:443",
++      "smp://$fp:p@$host,backup.myhearth.ru:8443",
+       hearthRelayAddressOnWebPort("smp://$fp:p@$host,backup.myhearth.ru:5223", host),
+     )
+   }
+diff --git a/apps/multiplatform/gradle.properties b/apps/multiplatform/gradle.properties
+index e0ba5a6..abd62ec 100644
+--- a/apps/multiplatform/gradle.properties
++++ b/apps/multiplatform/gradle.properties
+@@ -26,8 +26,8 @@ kotlin.jvm.target=11
+ 
+ # hearth: своя нумерация поверх тега upstream. versionCode обязан расти
+ # монотонно — по нему приложение решает, новее ли сборка на узле.
+-android.version_name=7.0.1-h13
+-android.version_code=384
++android.version_name=7.0.1-h14
++android.version_code=385
+ 
+ desktop.version_name=7.0.1
+ desktop.version_code=157

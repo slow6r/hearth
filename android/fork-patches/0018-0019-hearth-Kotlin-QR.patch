@@ -1,0 +1,208 @@
+From e8ce02b0a4ab6b7b8d9fda78dbeda10f24bb85f8 Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Thu, 10 Sep 2026 18:25:23 +0300
+Subject: [PATCH 18/24] =?UTF-8?q?0019:=20=D1=81=D1=85=D0=B5=D0=BC=D0=B0=20?=
+ =?UTF-8?q?hearth:=20=D0=BD=D0=B0=20=D0=B3=D1=80=D0=B0=D0=BD=D0=B8=D1=86?=
+ =?UTF-8?q?=D0=B5=20Kotlin,=20QR=20=D0=BD=D0=B5=20=D1=81=D0=B8=D0=BD=D0=B8?=
+ =?UTF-8?q?=D0=B9?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../android/src/main/AndroidManifest.xml      |  4 ++
+ .../chat/simplex/common/model/SimpleXAPI.kt   | 36 ++++++++++--
+ .../common/views/newchat/ConnectPlan.kt       |  4 ++
+ .../simplex/common/views/newchat/QRCode.kt    |  8 ++-
+ .../kotlin/chat/hearth/HearthLinkTest.kt      | 56 +++++++++++++++++++
+ apps/multiplatform/gradle.properties          |  4 +-
+ 6 files changed, 102 insertions(+), 10 deletions(-)
+ create mode 100644 apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthLinkTest.kt
+
+diff --git a/apps/multiplatform/android/src/main/AndroidManifest.xml b/apps/multiplatform/android/src/main/AndroidManifest.xml
+index fcca9f9..b9dbebc 100644
+--- a/apps/multiplatform/android/src/main/AndroidManifest.xml
++++ b/apps/multiplatform/android/src/main/AndroidManifest.xml
+@@ -86,6 +86,10 @@
+         <category android:name="android.intent.category.DEFAULT" />
+         <category android:name="android.intent.category.BROWSABLE" />
+ 
++        <!-- hearth: своя схема ссылок-приглашений. Прежняя оставлена, чтобы
++             открывались ссылки, выданные до перехода, и ссылки от стокового
++             SimpleX: обратная замена делается в hearthLinkToCore. -->
++        <data android:scheme="hearth" />
+         <data android:scheme="simplex" />
+       </intent-filter>
+       <intent-filter android:autoVerify="true">
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+index c43aa41..a47e7ad 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+@@ -7162,11 +7162,37 @@ data class CreatedConnLink(val connFullLink: String, val connShortLink: String?)
+   val cmdString: String get() = connFullLink + (if (connShortLink == null) "" else " $connShortLink")
+ }
+ 
+-// hearth: upstream показывал ссылку как https://simplex.chat/... — то есть звал
+-// человека на чужой сайт и подписывал наши приглашения чужим доменом. Схема
+-// `simplex:` остаётся: её разбирает ядро на принимающей стороне, и переписать её
+-// значит сломать соединение. А вот домен — чистая косметика показа, и он убран.
+-fun simplexChatLink(uri: String): String = uri
++/** Префикс, который ядро ставит в ссылках-приглашениях. Внутрь его и возвращаем. */
++const val CORE_LINK_PREFIX = "simplex:/"
++/** Префикс, который видит человек. */
++const val HEARTH_LINK_PREFIX = "hearth:/"
++
++/**
++ * Ссылка в том виде, в каком её показывают и передают.
++ *
++ * upstream переписывал `simplex:/…` в `https://simplex.chat/…`, то есть звал человека
++ * на чужой сайт и подписывал наши приглашения чужим доменом. Мы переписываем в свою
++ * схему.
++ *
++ * Это подмена ТОЛЬКО на границе показа. Ядру всегда уходит `simplex:/…` — форматы
++ * адресов и разбор не трогаются (ТЗ §8.3), Haskell не правится ни строкой. Обратная
++ * замена делается в одном месте на входе — [hearthLinkToCore], — через которое
++ * проходят все ссылки: сканер, вставка, нажатие в чате, открытие по ссылке извне.
++ */
++fun simplexChatLink(uri: String): String =
++  if (uri.startsWith(CORE_LINK_PREFIX)) HEARTH_LINK_PREFIX + uri.removePrefix(CORE_LINK_PREFIX)
++  else uri
++
++/** Обратно к тому, что понимает ядро. Терпит и старый вид, и чужой домен. */
++fun hearthLinkToCore(uri: String): String {
++  val s = uri.trim()
++  return when {
++    s.startsWith(HEARTH_LINK_PREFIX) -> CORE_LINK_PREFIX + s.removePrefix(HEARTH_LINK_PREFIX)
++    // Ссылки, выданные до перехода на свою схему, и ссылки от стокового SimpleX.
++    s.startsWith("https://simplex.chat/") -> CORE_LINK_PREFIX + s.removePrefix("https://simplex.chat/")
++    else -> s
++  }
++}
+ 
+ @Serializable
+ sealed class OwnerVerification {
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/ConnectPlan.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/ConnectPlan.kt
+index 161681c..d1f3c36 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/ConnectPlan.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/ConnectPlan.kt
+@@ -30,6 +30,10 @@ suspend fun planAndConnect(
+   filterKnownContact: ((Contact) -> Unit)? = null,
+   filterKnownGroup: ((GroupInfo) -> Unit)? = null,
+ ): CompletableDeferred<Boolean> {
++  // hearth: сюда сходятся ВСЕ ссылки — сканер, вставка, нажатие в чате, открытие
++  // извне. Возвращаем ядру привычный ему префикс: разбор идёт в Haskell, и своей
++  // схемы он не знает.
++  val shortOrFullLink = hearthLinkToCore(shortOrFullLink)
+   when (val target = strConnectTarget(shortOrFullLink.trim())) {
+     is ConnectTarget.Link -> {
+       if (target.linkType == SimplexLinkType.relay) {
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/QRCode.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/QRCode.kt
+index 1289607..44bb837 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/QRCode.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/QRCode.kt
+@@ -25,7 +25,9 @@ fun SimpleXCreatedLinkQRCode(
+   short: Boolean,
+   modifier: Modifier = Modifier,
+   padding: PaddingValues = PaddingValues(horizontal = DEFAULT_PADDING * 2f, vertical = DEFAULT_PADDING_HALF),
+-  tintColor: Color = Color(0xff062d56),
++  // hearth: у upstream QR рисовался тёмно-синим (#062d56). Тёмно-коричневый той же
++  // светлоты — контраст со белым фоном не меняется, значит читаемость кода тоже.
++  tintColor: Color = Color(0xff2e1d12),
+   withLogo: Boolean = true,
+   onShare: (() -> Unit)? = null,
+ ) {
+@@ -45,7 +47,7 @@ fun SimpleXLinkQRCode(
+   connReq: String,
+   modifier: Modifier = Modifier,
+   padding: PaddingValues = PaddingValues(horizontal = DEFAULT_PADDING * 2f, vertical = DEFAULT_PADDING_HALF),
+-  tintColor: Color = Color(0xff062d56),
++  tintColor: Color = Color(0xff2e1d12),
+   withLogo: Boolean = true,
+   onShare: (() -> Unit)? = null,
+ ) {
+@@ -66,7 +68,7 @@ fun QRCode(
+   small: Boolean = false,
+   modifier: Modifier = Modifier,
+   padding: PaddingValues = PaddingValues(horizontal = DEFAULT_PADDING * 2f, vertical = DEFAULT_PADDING_HALF),
+-  tintColor: Color = Color(0xff062d56),
++  tintColor: Color = Color(0xff2e1d12),
+   withLogo: Boolean = true,
+   onShare: (() -> Unit)? = null,
+ ) {
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthLinkTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthLinkTest.kt
+new file mode 100644
+index 0000000..a25f1c2
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthLinkTest.kt
+@@ -0,0 +1,56 @@
++package chat.hearth
++
++import chat.simplex.common.model.hearthLinkToCore
++import chat.simplex.common.model.simplexChatLink
++import kotlin.test.Test
++import kotlin.test.assertEquals
++
++/**
++ * Своя схема ссылок-приглашений.
++ *
++ * Наружу человек видит `hearth:/…`, ядру уходит `simplex:/…`. Подмена живёт в двух
++ * функциях и больше нигде, поэтому проверяется здесь: ошибка в них не выглядит как
++ * ошибка, она выглядит как «QR не сканируется», и разбираться пришлось бы вдвоём по
++ * телефону.
++ */
++class HearthLinkTest {
++
++  private val core = "simplex:/invitation#/?v=2-7&smp=smp%3A%2F%2Ffp%40relay.example.org"
++
++  @Test
++  fun outwardsTheSchemeIsOurs() {
++    assertEquals("hearth:/invitation#/?v=2-7&smp=smp%3A%2F%2Ffp%40relay.example.org", simplexChatLink(core))
++  }
++
++  @Test
++  fun theRoundTripIsExact() {
++    // Ровно то же, что ушло — включая якорь и процентное кодирование: ядро разбирает
++    // строку целиком, и потерянный символ там не «почти работает».
++    assertEquals(core, hearthLinkToCore(simplexChatLink(core)))
++  }
++
++  @Test
++  fun linksIssuedBeforeTheSwitchStillOpen() {
++    assertEquals(core, hearthLinkToCore(core))
++  }
++
++  @Test
++  fun aLinkFromStockSimpleXStillOpens() {
++    // Кто-то пришлёт ссылку из обычного SimpleX — открыть её мы обязаны.
++    val fromStock = "https://simplex.chat/invitation#/?v=2-7&smp=x"
++    assertEquals("simplex:/invitation#/?v=2-7&smp=x", hearthLinkToCore(fromStock))
++  }
++
++  @Test
++  fun surroundingSpacesAreTrimmed() {
++    // Вставка из буфера почти всегда приносит перевод строки на конце.
++    assertEquals(core, hearthLinkToCore("  " + simplexChatLink(core) + "\n"))
++  }
++
++  @Test
++  fun somethingElseIsLeftAlone() {
++    // Не ссылка-приглашение — не наше дело: пусть разбирается ядро и скажет своё.
++    assertEquals("не ссылка вовсе", hearthLinkToCore("не ссылка вовсе"))
++    assertEquals("https://example.org/x", hearthLinkToCore("https://example.org/x"))
++  }
++}
+diff --git a/apps/multiplatform/gradle.properties b/apps/multiplatform/gradle.properties
+index 13ae96f..8219e10 100644
+--- a/apps/multiplatform/gradle.properties
++++ b/apps/multiplatform/gradle.properties
+@@ -26,8 +26,8 @@ kotlin.jvm.target=11
+ 
+ # hearth: своя нумерация поверх тега upstream. versionCode обязан расти
+ # монотонно — по нему приложение решает, новее ли сборка на узле.
+-android.version_name=7.0.1-h8
+-android.version_code=379
++android.version_name=7.0.1-h9
++android.version_code=380
+ 
+ desktop.version_name=7.0.1
+ desktop.version_code=157

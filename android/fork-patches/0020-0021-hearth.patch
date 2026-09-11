@@ -1,0 +1,514 @@
+From 29408d1ca6853de58596e9638ca5f37f50f51674 Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Fri, 11 Sep 2026 09:07:35 +0300
+Subject: [PATCH 20/24] =?UTF-8?q?0021:=20=D1=82=D0=BE=D0=BB=D1=8C=D0=BA?=
+ =?UTF-8?q?=D0=BE=20=D1=81=D0=B2=D0=BE=D0=B8=20=D1=81=D0=B5=D1=80=D0=B2?=
+ =?UTF-8?q?=D0=B5=D1=80=D1=8B,=20=D0=BA=D0=BE=D1=80=D0=BE=D1=82=D0=BA?=
+ =?UTF-8?q?=D0=B8=D0=B5=20=D1=81=D1=81=D1=8B=D0=BB=D0=BA=D0=B8=20hearth://?=
+ =?UTF-8?q?,=20=D1=80=D0=B0=D0=B7=D0=B1=D0=BE=D1=80=20=D1=81=D0=B2=D0=BE?=
+ =?UTF-8?q?=D0=B8=D1=85=20=D1=81=D1=81=D1=8B=D0=BB=D0=BE=D0=BA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Описание — hearth/android/patches/0013-own-servers-and-links.md.
+
+Операторы SimpleX выключаются на старте и после применения bundle; экраны
+онбординга про операторов не показываются. Короткие ссылки показываются со
+схемой hearth://; обратная замена в strConnectTarget, planAndConnect и тексте
+отправляемого сообщения. QR адресов контакта, участника и канала — через
+simplexChatLink. Версия 7.0.1-h11 / 382.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rFCpGgTKkXuYYaCC7Zsew
+---
+ .../kotlin/chat/hearth/HearthApplier.kt       |  4 +
+ .../kotlin/chat/hearth/HearthServers.kt       | 59 ++++++++++++++
+ .../chat/simplex/common/model/SimpleXAPI.kt   | 68 +++++++++++-----
+ .../chat/simplex/common/platform/Core.kt      |  3 +
+ .../chat/simplex/common/views/WelcomeView.kt  |  1 +
+ .../simplex/common/views/chat/ChatInfoView.kt |  2 +-
+ .../simplex/common/views/chat/ComposeView.kt  |  5 +-
+ .../views/chat/group/GroupChatInfoView.kt     |  2 +-
+ .../views/chat/group/GroupMemberInfoView.kt   |  2 +-
+ .../common/views/newchat/ConnectPlan.kt       |  6 +-
+ .../common/views/newchat/NewChatView.kt       |  5 +-
+ .../views/onboarding/ChooseServerOperators.kt | 11 +++
+ .../common/views/onboarding/YourNetwork.kt    | 11 +++
+ .../kotlin/chat/hearth/HearthLinkTest.kt      | 77 ++++++++++++++-----
+ apps/multiplatform/gradle.properties          |  4 +-
+ 15 files changed, 209 insertions(+), 51 deletions(-)
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthServers.kt
+
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthApplier.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthApplier.kt
+index 9999047..faabd3b 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthApplier.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthApplier.kt
+@@ -65,6 +65,10 @@ class HearthCoreApplier : HearthBundleApplier {
+     // Перечитать: ядро присваивает serverId вновь добавленным записям, и без этого
+     // модель в UI разойдётся с тем, что реально записано.
+     ChatController.getServerOperators(rh)?.let { chatModel.conditions.value = it }
++    // И выключить операторов отдельной командой. setUserServers выключает их тоже, но
++    // именно APISetServerOperators сразу пересобирает списки серверов агента: без неё
++    // до перезапуска очереди могли уходить на прежние серверы (HearthServers.kt).
++    hearthDisableOperators()
+ 
+     // ICE (patches/0004). Хранятся строками через перевод строки — тот же формат,
+     // который читает `getIceServers()` и разбирает `parseRTCIceServers`. Именно под
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthServers.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthServers.kt
+new file mode 100644
+index 0000000..7c51c2f
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthServers.kt
+@@ -0,0 +1,59 @@
++package chat.hearth
++
++import chat.simplex.common.model.ChatController
++import chat.simplex.common.platform.Log
++import chat.simplex.common.platform.chatModel
++
++/**
++ * Держать телефон на серверах своего узла.
++ *
++ * # Что было
++ *
++ * Ядро SimpleX знает своих операторов — SimpleX Chat и Flux — и их серверы. Импорт
++ * bundle операторов выключает. Но включить их обратно умеет не только человек в
++ * настройках: экран условий в онбординге при нажатии «Принять» включает операторов,
++ * отмеченных на нём по умолчанию. Телефон, прошедший этот экран, создавал очереди на
++ * серверах SimpleX, хотя на узле был заведён и выглядел настроенным. Узнали по живым
++ * ссылкам — в них стоял хост smp8.simplex.im, — и по узлу: на нашем релее за всё время
++ * одна очередь, ноль подписок, ноль сообщений.
++ *
++ * # Что делаем
++ *
++ * Выключаем всех операторов сразу после применения bundle и при каждом запуске
++ * заведённого устройства. Команда ядра `APISetServerOperators` тут же пересобирает
++ * списки серверов агента для всех профилей, так что перезапуск не нужен.
++ *
++ * Уже созданное это не переносит: адрес и неиспользованные приглашения, выданные до
++ * исправления, остаются на тех серверах, где были созданы. Их надо удалить и создать
++ * заново.
++ */
++
++/** Выключить всех операторов. `true`, если какой-то был включён и выключился. */
++suspend fun hearthDisableOperators(): Boolean {
++  val rh = chatModel.remoteHostId()
++  val detail = ChatController.getServerOperators(rh) ?: return false
++  val wasEnabled = detail.serverOperators.filter { it.enabled }
++  if (wasEnabled.isEmpty()) return false
++  val updated = ChatController.setServerOperators(rh, detail.serverOperators.map { it.copy(enabled = false) })
++  if (updated == null) {
++    Log.e("hearth", "операторы не выключились: ядро отказало")
++    return false
++  }
++  chatModel.conditions.value = updated
++  Log.w("hearth", "выключены операторы: ${wasEnabled.joinToString { it.operatorId.toString() }}")
++  return true
++}
++
++/**
++ * То же, но только для устройства, заведённого на узле.
++ *
++ * Незаведённое не трогаем: без bundle у него нет своих серверов, и выключение
++ * операторов оставило бы его вовсе без серверов — с ошибкой вместо экрана настройки.
++ */
++suspend fun hearthEnforceOwnServers(): Boolean {
++  if (ChatController.appPrefs.hearthDeviceId.get().isNullOrBlank()) return false
++  return runCatching { hearthDisableOperators() }.getOrElse { e ->
++    Log.e("hearth", "не удалось проверить операторов: ${e.message}")
++    false
++  }
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+index 08b5d08..0d34c37 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+@@ -7156,42 +7156,68 @@ sealed class ChatDeleteMode {
+ @Serializable
+ data class CreatedConnLink(val connFullLink: String, val connShortLink: String?) {
+   fun simplexChatUri(short: Boolean): String =
+-    if (short) connShortLink ?: simplexChatLink(connFullLink)
++    if (short) connShortLink?.let(::simplexChatLink) ?: simplexChatLink(connFullLink)
+     else simplexChatLink(connFullLink)
+ 
+   val cmdString: String get() = connFullLink + (if (connShortLink == null) "" else " $connShortLink")
+ }
+ 
+-/** Префикс, который ядро ставит в ссылках-приглашениях. Внутрь его и возвращаем. */
++/** Префикс полной ссылки, как её пишет ядро. Внутрь возвращаем именно его. */
+ const val CORE_LINK_PREFIX = "simplex:/"
+-/** Префикс, который видит человек. */
++/** Префикс полной ссылки, который видит человек. */
+ const val HEARTH_LINK_PREFIX = "hearth:/"
++/** Короткая ссылка у ядра — обычный https-адрес сервера, на котором лежит приглашение. */
++const val CORE_SHORT_LINK_PREFIX = "https://"
++/** Короткая ссылка, которую видит человек. */
++const val HEARTH_SHORT_LINK_PREFIX = "hearth://"
++
++/**
++ * Короткая ссылка ядра: `https://<сервер>/<тип>#<данные>`, тип — одна буква
++ * (`i` одноразовая, `a` адрес, `g` группа, `r` релей).
++ *
++ * Хост здесь — не украшение, а сервер, на котором лежит приглашение: принимающая
++ * сторона идёт за ним именно туда. Поэтому хост и всё после него переносятся
++ * посимвольно, меняется только схема.
++ */
++private val CORE_SHORT_LINK = Regex("^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/[a-z]#")
+ 
+ /**
+  * Ссылка в том виде, в каком её показывают и передают.
+  *
+- * upstream переписывал `simplex:/…` в `https://simplex.chat/…`, то есть звал человека
+- * на чужой сайт и подписывал наши приглашения чужим доменом. Мы переписываем в свою
+- * схему.
++ * Полная `simplex:/…` становится `hearth:/…`, короткая `https://…/i#…` —
++ * `hearth://…/i#…`. upstream вместо этого переписывал полную ссылку в
++ * `https://simplex.chat/…`, то есть подписывал наши приглашения чужим доменом.
+  *
+- * Это подмена ТОЛЬКО на границе показа. Ядру всегда уходит `simplex:/…` — форматы
+- * адресов и разбор не трогаются (ТЗ §8.3), Haskell не правится ни строкой. Обратная
+- * замена делается в одном месте на входе — [hearthLinkToCore], — через которое
+- * проходят все ссылки: сканер, вставка, нажатие в чате, открытие по ссылке извне.
++ * Это подмена ТОЛЬКО на границе показа. Ядру всегда уходит ровно то, что оно выдало:
++ * форматы адресов не трогаются (ТЗ §8.3), Haskell не правится ни строкой. Обратная
++ * замена — [hearthLinksToCore] — стоит там, где текст попадает в ядро: в разборе
++ * вставленного и отсканированного (`strConnectTarget`), в `planAndConnect` и в тексте
++ * отправляемого сообщения (`ComposeView.checkLinkPreview`).
++ */
++fun simplexChatLink(uri: String): String = when {
++  uri.startsWith(CORE_LINK_PREFIX) -> HEARTH_LINK_PREFIX + uri.removePrefix(CORE_LINK_PREFIX)
++  CORE_SHORT_LINK.containsMatchIn(uri) -> HEARTH_SHORT_LINK_PREFIX + uri.removePrefix(CORE_SHORT_LINK_PREFIX)
++  else -> uri
++}
++
++// Граница слева: в «myhearth://» и «x.hearth:/» это не наши ссылки.
++private val HEARTH_SHORT_ANYWHERE = Regex("(?<![A-Za-z0-9+.-])hearth://")
++private val HEARTH_FULL_ANYWHERE = Regex("(?<![A-Za-z0-9+.-])hearth:/(?!/)")
++
++/**
++ * Вернуть ядру его ссылки — во всём тексте, а не только в начале: человек вставляет
++ * «вот моя ссылка: …», и такой текст тоже должен разбираться.
+  */
+-fun simplexChatLink(uri: String): String =
+-  if (uri.startsWith(CORE_LINK_PREFIX)) HEARTH_LINK_PREFIX + uri.removePrefix(CORE_LINK_PREFIX)
+-  else uri
++fun hearthLinksToCore(text: String): String =
++  text.replace(HEARTH_SHORT_ANYWHERE, CORE_SHORT_LINK_PREFIX)
++    .replace(HEARTH_FULL_ANYWHERE, CORE_LINK_PREFIX)
+ 
+-/** Обратно к тому, что понимает ядро. Терпит и старый вид, и чужой домен. */
++/** Одна ссылка обратно к виду ядра. Терпит пробелы по краям, старый вид и чужой домен. */
+ fun hearthLinkToCore(uri: String): String {
+-  val s = uri.trim()
+-  return when {
+-    s.startsWith(HEARTH_LINK_PREFIX) -> CORE_LINK_PREFIX + s.removePrefix(HEARTH_LINK_PREFIX)
+-    // Ссылки, выданные до перехода на свою схему, и ссылки от стокового SimpleX.
+-    s.startsWith("https://simplex.chat/") -> CORE_LINK_PREFIX + s.removePrefix("https://simplex.chat/")
+-    else -> s
+-  }
++  val s = hearthLinksToCore(uri.trim())
++  // Полные ссылки от стокового SimpleX: ядро понимает и их, но к общему виду приводим,
++  // чтобы разбор шёл одной дорогой.
++  return if (s.startsWith("https://simplex.chat/")) CORE_LINK_PREFIX + s.removePrefix("https://simplex.chat/") else s
+ }
+ 
+ @Serializable
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
+index 3ebe367..3f228fb 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
+@@ -176,6 +176,9 @@ suspend fun initChatController(useKey: String? = null, confirmMigrations: Migrat
+       // hearth (ADR 0011): если bundle приняли, но применить не успели — приложение
+       // закрыли между экраном узла и созданием профиля, — доводим дело здесь.
+       chat.hearth.hearthApplyPendingBundle()
++      // hearth: операторы SimpleX могли включиться обратно — экраном условий на старой
++      // сборке или иначе. На каждом запуске выключаем: см. HearthServers.kt.
++      chat.hearth.hearthEnforceOwnServers()
+       // hearth: ядро заводит карточку «Ask SimpleX Team» на каждый новый профиль.
+       // Стираем — см. HearthPresetCards.kt.
+       chat.hearth.hearthRemovePresetContactCards()
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/WelcomeView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/WelcomeView.kt
+index cba2fc3..05a6a1a 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/WelcomeView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/WelcomeView.kt
+@@ -364,6 +364,7 @@ fun createProfileInNoProfileSetup(displayName: String, image: String? = null, cl
+     // узла, до этого момента лежал отложенным.
+     controller.startChat(user)
+     val nodeReady = chat.hearth.hearthApplyPendingBundle()
++    chat.hearth.hearthEnforceOwnServers()
+     chat.hearth.hearthRemovePresetContactCards()
+     controller.appPrefs.onboardingStage.set(
+       if (nodeReady) {
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/chat/ChatInfoView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/chat/ChatInfoView.kt
+index 91b3270..baeb0c9 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/chat/ChatInfoView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/chat/ChatInfoView.kt
+@@ -633,7 +633,7 @@ fun ChatInfoLayout(
+ 
+     if (contact.contactLink != null) {
+       SectionView(stringResource(MR.strings.address_section_title)) {
+-        SimpleXLinkQRCode(contact.contactLink)
++        SimpleXLinkQRCode(simplexChatLink(contact.contactLink))
+         val clipboard = LocalClipboardManager.current
+         ShareAddressButton { clipboard.shareText(simplexChatLink(contact.contactLink)) }
+       }
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/chat/ComposeView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/chat/ComposeView.kt
+index 6bfbad5..b45f6b0 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/chat/ComposeView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/chat/ComposeView.kt
+@@ -1,6 +1,7 @@
+ @file:UseSerializers(UriSerializer::class, ComposeMessageSerializer::class)
+ package chat.simplex.common.views.chat
+ 
++import chat.simplex.common.model.hearthLinksToCore
+ import SectionItemView
+ import androidx.compose.foundation.background
+ import androidx.compose.foundation.clickable
+@@ -595,7 +596,9 @@ fun ComposeView(
+   // TODO [short links] connectCheckLinkPreview
+   // the state is passed in by a send that must not read the current one - see sendMessageAsync
+   fun checkLinkPreview(cs: ComposeState = composeState.value): MsgContent {
+-    val msgText = cs.message.text
++    // hearth: ссылки hearth:/… в тексте уходят в виде ядра — тогда у получателя они
++    // разбираются как приглашения и нажимаются, а показываются подписью, без адреса.
++    val msgText = hearthLinksToCore(cs.message.text)
+     return when (val composePreview = cs.preview) {
+       is ComposePreview.CLinkPreview -> {
+         val parsedMsg = parseToMarkdown(msgText)
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/chat/group/GroupChatInfoView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/chat/group/GroupChatInfoView.kt
+index 49e7ac6..c33be73 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/chat/group/GroupChatInfoView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/chat/group/GroupChatInfoView.kt
+@@ -1269,7 +1269,7 @@ private fun ChannelWebPageButton(groupInfo: GroupInfo, onClick: () -> Unit) {
+ private fun ChannelLinkQRCodeSection(groupLink: String) {
+   val clipboard = LocalClipboardManager.current
+   Box(Modifier.padding(vertical = DEFAULT_PADDING_HALF)) {
+-    SimpleXLinkQRCode(connReq = groupLink)
++    SimpleXLinkQRCode(connReq = simplexChatLink(groupLink))
+   }
+   SectionItemView({
+     clipboard.shareText(simplexChatLink(groupLink))
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/chat/group/GroupMemberInfoView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/chat/group/GroupMemberInfoView.kt
+index 3e5f646..97e6278 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/chat/group/GroupMemberInfoView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/chat/group/GroupMemberInfoView.kt
+@@ -567,7 +567,7 @@ fun GroupMemberInfoLayout(
+ 
+     if (member.contactLink != null) {
+       SectionView(stringResource(MR.strings.address_section_title)) {
+-        SimpleXLinkQRCode(member.contactLink)
++        SimpleXLinkQRCode(simplexChatLink(member.contactLink))
+         val clipboard = LocalClipboardManager.current
+         ShareAddressButton { clipboard.shareText(simplexChatLink(member.contactLink)) }
+         if (contactId != null) {
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/ConnectPlan.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/ConnectPlan.kt
+index d1f3c36..5358b3c 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/ConnectPlan.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/ConnectPlan.kt
+@@ -30,9 +30,9 @@ suspend fun planAndConnect(
+   filterKnownContact: ((Contact) -> Unit)? = null,
+   filterKnownGroup: ((GroupInfo) -> Unit)? = null,
+ ): CompletableDeferred<Boolean> {
+-  // hearth: сюда сходятся ВСЕ ссылки — сканер, вставка, нажатие в чате, открытие
+-  // извне. Возвращаем ядру привычный ему префикс: разбор идёт в Haskell, и своей
+-  // схемы он не знает.
++  // hearth: вернуть ядру его вид ссылки. Для вставки и скана это уже сделал
++  // strConnectTarget; здесь — для путей, где текст приходит мимо него: нажатие на
++  // ссылку в чате и открытие по ссылке извне.
+   val shortOrFullLink = hearthLinkToCore(shortOrFullLink)
+   when (val target = strConnectTarget(shortOrFullLink.trim())) {
+     is ConnectTarget.Link -> {
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/NewChatView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/NewChatView.kt
+index f3006d2..ede971c 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/NewChatView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/NewChatView.kt
+@@ -832,7 +832,10 @@ sealed class ConnectTarget {
+ }
+ 
+ fun strConnectTarget(str: String): ConnectTarget? {
+-  val parsedMd = parseToMarkdown(str) ?: return null
++  // hearth: наши ссылки показываются как hearth:/… и hearth://…, а ядро их не знает.
++  // Этот разбор идёт ДО planAndConnect — при вставке, скане и поиске, — поэтому
++  // вернуть ядру его вид надо здесь, иначе своя же ссылка отвергается как «не ссылка».
++  val parsedMd = parseToMarkdown(chat.simplex.common.model.hearthLinksToCore(str)) ?: return null
+   val links = parsedMd.filter { it.format?.isSimplexLink ?: false }
+   if (links.size == 1) {
+     val fmt = links[0].format as Format.SimplexLink
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/onboarding/ChooseServerOperators.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/onboarding/ChooseServerOperators.kt
+index d11e396..1423d12 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/onboarding/ChooseServerOperators.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/onboarding/ChooseServerOperators.kt
+@@ -40,6 +40,17 @@ import dev.icerock.moko.resources.compose.stringResource
+ 
+ @Composable
+ fun OnboardingConditionsView(chatModel: ChatModel) {
++  // hearth: операторов в контуре нет. Экран предлагал только их, а принятие условий
++  // включало их обратно и уводило телефон на серверы SimpleX. Если стадия всё же
++  // сюда привела — профиль создан на старой сборке, приложение закрыли посреди
++  // онбординга, — выключаем операторов и уходим дальше, не показывая экран.
++  if (!chat.hearth.HearthPresets.PRESETS_ENABLED) {
++    LaunchedEffect(Unit) {
++      chat.hearth.hearthEnforceOwnServers()
++      chatModel.controller.appPrefs.onboardingStage.set(OnboardingStage.OnboardingComplete)
++    }
++    return
++  }
+   LaunchedEffect(Unit) {
+     prepareChatBeforeFinishingOnboarding()
+   }
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/onboarding/YourNetwork.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/onboarding/YourNetwork.kt
+index b20cfe3..8b8db0a 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/onboarding/YourNetwork.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/onboarding/YourNetwork.kt
+@@ -40,6 +40,17 @@ internal object OnboardingSharedState {
+ 
+ @Composable
+ fun YourNetworkView(chatModel: ChatModel) {
++  // hearth: операторов в контуре нет. Экран предлагал только их, а принятие условий
++  // включало их обратно и уводило телефон на серверы SimpleX. Если стадия всё же
++  // сюда привела — профиль создан на старой сборке, приложение закрыли посреди
++  // онбординга, — выключаем операторов и уходим дальше, не показывая экран.
++  if (!chat.hearth.HearthPresets.PRESETS_ENABLED) {
++    LaunchedEffect(Unit) {
++      chat.hearth.hearthEnforceOwnServers()
++      chatModel.controller.appPrefs.onboardingStage.set(OnboardingStage.OnboardingComplete)
++    }
++    return
++  }
+   LaunchedEffect(Unit) {
+     prepareChatBeforeFinishingOnboarding()
+   }
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthLinkTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthLinkTest.kt
+index a25f1c2..9c7895e 100644
+--- a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthLinkTest.kt
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthLinkTest.kt
+@@ -1,6 +1,7 @@
+ package chat.hearth
+ 
+ import chat.simplex.common.model.hearthLinkToCore
++import chat.simplex.common.model.hearthLinksToCore
+ import chat.simplex.common.model.simplexChatLink
+ import kotlin.test.Test
+ import kotlin.test.assertEquals
+@@ -8,49 +9,85 @@ import kotlin.test.assertEquals
+ /**
+  * Своя схема ссылок-приглашений.
+  *
+- * Наружу человек видит `hearth:/…`, ядру уходит `simplex:/…`. Подмена живёт в двух
+- * функциях и больше нигде, поэтому проверяется здесь: ошибка в них не выглядит как
+- * ошибка, она выглядит как «QR не сканируется», и разбираться пришлось бы вдвоём по
+- * телефону.
++ * Наружу человек видит `hearth:/…` и `hearth://…`, ядру уходит ровно то, что оно
++ * выдало. Подмена живёт в двух функциях, поэтому проверяется здесь: ошибка в них
++ * выглядит не как ошибка, а как «QR не сканируется», и разбираться пришлось бы вдвоём
++ * по телефону.
+  */
+ class HearthLinkTest {
+ 
+-  private val core = "simplex:/invitation#/?v=2-7&smp=smp%3A%2F%2Ffp%40relay.example.org"
++  private val full = "simplex:/invitation#/?v=2-7&smp=smp%3A%2F%2Ffp%40relay.example.org"
++
++  // Формат коротких ссылок взят из живых ссылок и тестов ядра: хост — сервер, где
++  // лежит приглашение, после «#» — данные, у своего сервера ещё и параметры.
++  private val shortInvitation =
++    "https://relay.myhearth.ru/i#9sBaQl3759sivr1nRraBqnalQzXZixl9/jwM_JDNTdfQQ6nwm9kkKNLC1INvAQg-t9eL7r-fjT_Y"
++  private val shortAddress =
++    "https://relay.myhearth.ru:5223/a#KKcTdpWmVWZO7WH4WswN_oHFg-DpwHbKmtgmXIZumRc?c=dl4E-N71pfk&p=5223"
++
++  @Test
++  fun aFullLinkGetsOurScheme() {
++    assertEquals("hearth:/invitation#/?v=2-7&smp=smp%3A%2F%2Ffp%40relay.example.org", simplexChatLink(full))
++  }
++
++  @Test
++  fun aShortLinkKeepsItsServerAndChangesOnlyTheScheme() {
++    // Хост не трогаем: принимающая сторона пойдёт за приглашением именно на этот сервер.
++    assertEquals(
++      "hearth://relay.myhearth.ru/i#9sBaQl3759sivr1nRraBqnalQzXZixl9/jwM_JDNTdfQQ6nwm9kkKNLC1INvAQg-t9eL7r-fjT_Y",
++      simplexChatLink(shortInvitation),
++    )
++  }
+ 
+   @Test
+-  fun outwardsTheSchemeIsOurs() {
+-    assertEquals("hearth:/invitation#/?v=2-7&smp=smp%3A%2F%2Ffp%40relay.example.org", simplexChatLink(core))
++  fun everyRoundTripIsExact() {
++    // Ровно то же, что ушло — включая порт, якорь, слеш в данных и параметры: ядро
++    // разбирает строку целиком, и потерянный символ там не «почти работает».
++    for (link in listOf(full, shortInvitation, shortAddress)) {
++      assertEquals(link, hearthLinkToCore(simplexChatLink(link)))
++    }
+   }
+ 
+   @Test
+-  fun theRoundTripIsExact() {
+-    // Ровно то же, что ушло — включая якорь и процентное кодирование: ядро разбирает
+-    // строку целиком, и потерянный символ там не «почти работает».
+-    assertEquals(core, hearthLinkToCore(simplexChatLink(core)))
++  fun aLinkInsideTextIsReturnedToTheCore() {
++    // Так человек и вставляет: с подписью вокруг.
++    val text = "вот моя ссылка: ${simplexChatLink(shortInvitation)} — жду"
++    assertEquals("вот моя ссылка: $shortInvitation — жду", hearthLinksToCore(text))
++  }
++
++  @Test
++  fun bothFormsInOneTextAreReturned() {
++    val text = "${simplexChatLink(full)}\n${simplexChatLink(shortAddress)}"
++    assertEquals("$full\n$shortAddress", hearthLinksToCore(text))
+   }
+ 
+   @Test
+   fun linksIssuedBeforeTheSwitchStillOpen() {
+-    assertEquals(core, hearthLinkToCore(core))
++    assertEquals(full, hearthLinkToCore(full))
++    assertEquals(shortInvitation, hearthLinkToCore(shortInvitation))
+   }
+ 
+   @Test
+-  fun aLinkFromStockSimpleXStillOpens() {
+-    // Кто-то пришлёт ссылку из обычного SimpleX — открыть её мы обязаны.
+-    val fromStock = "https://simplex.chat/invitation#/?v=2-7&smp=x"
+-    assertEquals("simplex:/invitation#/?v=2-7&smp=x", hearthLinkToCore(fromStock))
++  fun aFullLinkFromStockSimpleXStillOpens() {
++    assertEquals("simplex:/invitation#/?v=2-7&smp=x", hearthLinkToCore("https://simplex.chat/invitation#/?v=2-7&smp=x"))
+   }
+ 
+   @Test
+   fun surroundingSpacesAreTrimmed() {
+     // Вставка из буфера почти всегда приносит перевод строки на конце.
+-    assertEquals(core, hearthLinkToCore("  " + simplexChatLink(core) + "\n"))
++    assertEquals(shortInvitation, hearthLinkToCore("  " + simplexChatLink(shortInvitation) + "\n"))
++  }
++
++  @Test
++  fun anOrdinaryWebLinkIsNotDecorated() {
++    // Украшается только короткая ссылка ядра: «/буква#». Обычный адрес сайта — нет.
++    assertEquals("https://example.org/news", simplexChatLink("https://example.org/news"))
++    assertEquals("https://example.org/page#top", simplexChatLink("https://example.org/page#top"))
+   }
+ 
+   @Test
+-  fun somethingElseIsLeftAlone() {
+-    // Не ссылка-приглашение — не наше дело: пусть разбирается ядро и скажет своё.
++  fun aWordThatMerelyEndsInHearthIsLeftAlone() {
++    assertEquals("myhearth://x и a.hearth:/y", hearthLinksToCore("myhearth://x и a.hearth:/y"))
+     assertEquals("не ссылка вовсе", hearthLinkToCore("не ссылка вовсе"))
+-    assertEquals("https://example.org/x", hearthLinkToCore("https://example.org/x"))
+   }
+ }
+diff --git a/apps/multiplatform/gradle.properties b/apps/multiplatform/gradle.properties
+index eea52f8..015d64a 100644
+--- a/apps/multiplatform/gradle.properties
++++ b/apps/multiplatform/gradle.properties
+@@ -26,8 +26,8 @@ kotlin.jvm.target=11
+ 
+ # hearth: своя нумерация поверх тега upstream. versionCode обязан расти
+ # монотонно — по нему приложение решает, новее ли сборка на узле.
+-android.version_name=7.0.1-h10
+-android.version_code=381
++android.version_name=7.0.1-h11
++android.version_code=382
+ 
+ desktop.version_name=7.0.1
+ desktop.version_code=157

@@ -1,0 +1,796 @@
+From 058ec00d9786a9f03e0e4405f965cc54ce315fa6 Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Thu, 10 Sep 2026 09:39:53 +0300
+Subject: [PATCH 01/24] =?UTF-8?q?hearth:=20overlay-=D1=84=D0=B0=D0=B9?=
+ =?UTF-8?q?=D0=BB=D1=8B=20=D1=84=D0=BE=D1=80=D0=BA=D0=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Файлы, которые форк ДОБАВЛЯЕТ. В чужих файлах не живут, поэтому при ребейзе
+на новый тег upstream не конфликтуют (patches/README.md).
+
+HearthApplier реализует то, что обещал patches/0001-presets.md, но иначе:
+константы с пресетами в v7.0.1 нет, список операторов живёт в Haskell-ядре
+и приходит через apiGetServerOperators. Править Haskell запрещает ТЗ §8.3,
+поэтому операторы выключаются, а не удаляются.
+---
+ .../res/xml/hearth_data_extraction_rules.xml  |  25 +++
+ .../xml/hearth_network_security_config.xml    |  16 ++
+ .../kotlin/chat/hearth/HearthApplier.kt       | 121 ++++++++++++++
+ .../kotlin/chat/hearth/HearthBundle.kt        | 149 ++++++++++++++++++
+ .../kotlin/chat/hearth/HearthImportView.kt    | 102 ++++++++++++
+ .../kotlin/chat/hearth/HearthOnboarding.kt    |  81 ++++++++++
+ .../kotlin/chat/hearth/HearthPresets.kt       |  80 ++++++++++
+ .../kotlin/chat/hearth/HearthBundleTest.kt    | 139 ++++++++++++++++
+ 8 files changed, 713 insertions(+)
+ create mode 100644 apps/multiplatform/android/src/main/res/xml/hearth_data_extraction_rules.xml
+ create mode 100644 apps/multiplatform/android/src/main/res/xml/hearth_network_security_config.xml
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthApplier.kt
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthBundle.kt
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthPresets.kt
+ create mode 100644 apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthBundleTest.kt
+
+diff --git a/apps/multiplatform/android/src/main/res/xml/hearth_data_extraction_rules.xml b/apps/multiplatform/android/src/main/res/xml/hearth_data_extraction_rules.xml
+new file mode 100644
+index 0000000..2e5e9e0
+--- /dev/null
++++ b/apps/multiplatform/android/src/main/res/xml/hearth_data_extraction_rules.xml
+@@ -0,0 +1,25 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ТЗ §3.1 "Утечка через бэкапы ОС" and acceptance test A9.
++
++  Android 12+ honours this file for both cloud backup and device-to-device transfer.
++  Everything is excluded: the app's database holds the message history and the relay
++  credentials, and a Google-side copy of that is exactly the dependency this project
++  exists to remove.
++-->
++<data-extraction-rules>
++    <cloud-backup>
++        <exclude domain="root" />
++        <exclude domain="database" />
++        <exclude domain="sharedpref" />
++        <exclude domain="file" />
++        <exclude domain="external" />
++    </cloud-backup>
++    <device-transfer>
++        <exclude domain="root" />
++        <exclude domain="database" />
++        <exclude domain="sharedpref" />
++        <exclude domain="file" />
++        <exclude domain="external" />
++    </device-transfer>
++</data-extraction-rules>
+diff --git a/apps/multiplatform/android/src/main/res/xml/hearth_network_security_config.xml b/apps/multiplatform/android/src/main/res/xml/hearth_network_security_config.xml
+new file mode 100644
+index 0000000..33802e8
+--- /dev/null
++++ b/apps/multiplatform/android/src/main/res/xml/hearth_network_security_config.xml
+@@ -0,0 +1,16 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  Network security config for the hearth fork.
++
++  The SimpleX core does its own TLS with the relay CA pinned inside the smp:// address,
++  so this file is not what protects the messenger traffic. It is here to make the
++  *absence* of anything else explicit: no cleartext anywhere, and no trust in
++  user-installed CAs, so a corporate/MDM root cannot be used to inspect the app.
++-->
++<network-security-config>
++    <base-config cleartextTrafficPermitted="false">
++        <trust-anchors>
++            <certificates src="system" />
++        </trust-anchors>
++    </base-config>
++</network-security-config>
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthApplier.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthApplier.kt
+new file mode 100644
+index 0000000..2f4623e
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthApplier.kt
+@@ -0,0 +1,121 @@
++package chat.hearth
++
++import chat.simplex.common.model.ChatController
++import chat.simplex.common.model.SMPProxyMode
++import chat.simplex.common.model.UserOperatorServers
++import chat.simplex.common.model.UserServer
++import chat.simplex.common.platform.chatModel
++
++/**
++ * [HearthBundleApplier] against the upstream controller API of the pinned tag (v7.0.1).
++ *
++ * # Почему это не «подменить константу с пресетами»
++ *
++ * patches/0001-presets.md предписывает заменить список предустановленных серверов на
++ * пустой. В v7.0.1 такого списка в Kotlin НЕТ: операторы и их релеи живут в
++ * Haskell-ядре и приходят наверх через `apiGetServerOperators` / `getUserServers`.
++ * Kotlin их только отображает. Править Haskell запрещает ТЗ §8.3 — это блокер ревью.
++ *
++ * Поэтому вместо «пресетов нет» делается «пресеты выключены и заменены»:
++ *
++ *   1. все операторы upstream переводятся в `enabled = false`;
++ *   2. добавляется запись без оператора (`operator = null` — «nil operator», форма,
++ *      в которой upstream хранит пользовательские серверы) ровно с нашими SMP и XFTP;
++ *   3. экран операторов скрыт (patches/0002), включить обратно из UI нельзя.
++ *
++ * Разница в гарантии, и её надо называть вслух: приложение НЕ «неспособно» уйти в
++ * публичную сеть, как формулирует 0002 — ядро по-прежнему знает публичных операторов.
++ * Оно настроено не уходить, и настройку не видно. Для семейного контура этого
++ * достаточно; обещать большее без диффа в Haskell нельзя.
++ */
++class HearthCoreApplier : HearthBundleApplier {
++
++  override suspend fun setServers(servers: HearthServers) {
++    val rh = chatModel.remoteHostId()
++    val current = ChatController.getUserServers(rh)
++      ?: throw IllegalStateException("не удалось прочитать текущие серверы")
++
++    // Операторы upstream остаются в списке, но выключенными. Удалять их нельзя:
++    // ядро их всё равно знает, а запись с чужим operatorId, исчезнувшая из списка,
++    // приводит к рассинхрону при следующем getUserServers.
++    val disabledOperators = current
++      .filter { it.operator != null }
++      .map { entry -> entry.copy(operator = entry.operator?.copy(enabled = false)) }
++
++    val ours = UserOperatorServers(
++      operator = null,
++      smpServers = servers.smp.map { userServer(it) },
++      xftpServers = servers.xftp.map { userServer(it) },
++    )
++
++    val updated = disabledOperators + ours
++
++    // Проверяем ДО записи: ядро умеет объяснить, что не так с набором серверов,
++    // и лучше отказать при импорте, чем оставить устройство в полурабочем виде.
++    val validation = ChatController.validateServers(rh, updated)
++    val errors = validation?.first.orEmpty()
++    if (errors.isNotEmpty()) {
++      throw IllegalStateException("ядро отвергло набор серверов: ${errors.joinToString()}")
++    }
++
++    if (!ChatController.setUserServers(rh, updated)) {
++      throw IllegalStateException("не удалось записать серверы")
++    }
++
++    // Перечитать: ядро присваивает serverId вновь добавленным записям, и без этого
++    // модель в UI разойдётся с тем, что реально записано.
++    ChatController.getServerOperators(rh)?.let { chatModel.conditions.value = it }
++
++    // ICE (patches/0004). Хранятся строками через перевод строки — тот же формат,
++    // который читает `getIceServers()` и разбирает `parseRTCIceServers`. Именно под
++    // него hearthd собирает строки вида `turn:<user>:<cred>@host:port`.
++    //
++    // Пустой список пишем как пустую строку, а не оставляем настройку неустановленной:
++    // разница в поведении нулевая (в обоих случаях ICE нет и звонок не состоится), но
++    // явно записанное значение видно в настройках и не выглядит как «забыли настроить».
++    ChatController.appPrefs.webrtcIceServers.set(servers.ice.joinToString(separator = "\n"))
++  }
++
++  /** `preset = false`: это НАШ сервер, а не предустановленный оператором upstream. */
++  private fun userServer(address: String) = UserServer(
++    remoteHostId = null,
++    serverId = null,
++    server = address,
++    preset = false,
++    tested = null,
++    enabled = true,
++    deleted = false,
++  )
++
++  override suspend fun applyNetworkDefaults(prefs: HearthNetPrefs) {
++    // Приватный роутинг. В v7.0.1 `SMPProxyMode.default` УЖЕ `Always`, то есть
++    // patches/0008 в этой части — пустышка. Выставляем всё равно: дефолт upstream
++    // может измениться на следующем теге, а bundle требует именно `always`, и
++    // HearthBundle.validate это проверяет на входе.
++    val mode = when (prefs.privateRouting.lowercase()) {
++      "always" -> SMPProxyMode.Always
++      "unknown" -> SMPProxyMode.Unknown
++      "unprotected" -> SMPProxyMode.Unprotected
++      "never" -> SMPProxyMode.Never
++      else -> throw IllegalArgumentException("неизвестный режим роутинга: ${prefs.privateRouting}")
++    }
++    if (mode != SMPProxyMode.Always) {
++      // Ослаблять роутинг ниже Always в этом контуре нельзя (ТЗ §8.2 п.5): релей не
++      // должен видеть, кто с кем. Bundle с таким значением — испорченный bundle.
++      throw IllegalArgumentException("приватный роутинг обязан быть always, получено ${prefs.privateRouting}")
++    }
++
++    val cfg = ChatController.getNetCfg().copy(smpProxyMode = mode)
++    if (!ChatController.apiSetNetworkConfig(cfg)) {
++      throw IllegalStateException("не удалось применить сетевые настройки")
++    }
++    ChatController.setNetCfg(cfg)
++  }
++
++  override suspend fun rememberDevice(deviceId: String, issued: String) {
++    // Идентификатор устройства нужен для отзыва (ТЗ §10.4): по нему администратор
++    // понимает, какой bundle отзывать. Это не секрет — секреты в адресах серверов.
++    ChatController.appPrefs.hearthDeviceId.set(deviceId)
++    ChatController.appPrefs.hearthEnrolledAt.set(issued)
++  }
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthBundle.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthBundle.kt
+new file mode 100644
+index 0000000..b27ffef
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthBundle.kt
+@@ -0,0 +1,149 @@
++package chat.hearth
++
++import kotlinx.serialization.SerialName
++import kotlinx.serialization.Serializable
++import kotlinx.serialization.json.Json
++
++/**
++ * Client bundle — the QR a family member scans during onboarding, produced by
++ * `hearthd` (`GET /devices/{id}/bundle.png`).
++ *
++ * Parsing it is the only new data format this fork introduces. Both string formats
++ * inside it are upstream's, verified against simplexmq / simplex-chat v7.0.1:
++ *
++ *  - relays: `smp://<fingerprint>:<password>@host:port`
++ *  - ICE:    `scheme:[user:credential@]host:port[?query]`, the exact form
++ *            `parseRTCIceServer` in `views/call/WebRTC.kt` accepts.
++ *
++ * The validation here mirrors `hearthd`'s. The node already checked all of it; checking
++ * again on the device means a tampered or stale QR cannot quietly point a phone at a
++ * foreign relay.
++ */
++@Serializable
++data class HearthBundle(
++  val v: Int,
++  val smp: List<String>,
++  val xftp: List<String> = emptyList(),
++  /** ICE entries as strings, ready to hand to `parseRTCIceServers`. */
++  val ice: List<String> = emptyList(),
++  val net: HearthNetPrefs,
++  val issued: String,
++  val device: String,
++) {
++  companion object {
++    const val SUPPORTED_VERSION = 1
++
++    private val json = Json {
++      ignoreUnknownKeys = true
++      isLenient = false
++    }
++
++    /** Parse and validate a scanned QR payload. */
++    fun parse(payload: String): Result<HearthBundle> = runCatching {
++      val bundle = json.decodeFromString(serializer(), payload)
++      bundle.validate().getOrThrow()
++      bundle
++    }
++  }
++
++  /**
++   * Reject anything that would take this device outside the family contour.
++   *
++   * Each rule maps to a requirement, so an upstream rebase that quietly changes a
++   * default is caught here rather than in production.
++   */
++  fun validate(): Result<Unit> = runCatching {
++    require(v == SUPPORTED_VERSION) { "unsupported bundle version $v" }
++    require(smp.isNotEmpty()) { "bundle has no SMP servers" }
++    require(device.isNotBlank()) { "bundle has no device id" }
++
++    val host = hostOf(smp.first()) ?: throw IllegalArgumentException("SMP address has no host")
++    smp.forEach { requireServerUri(it, "smp", host) }
++    xftp.forEach { requireServerUri(it, "xftp", host) }
++
++    // Calls: our own STUN/TURN only. A public STUN would hand the caller's address to
++    // a third party.
++    require(ice.isNotEmpty()) { "bundle has no ICE servers" }
++    ice.forEach { requireIceEntry(it, host) }
++
++    require(net.privateRouting == "always") { "privateRouting must be `always`" }
++    require(!net.presetsEnabled) { "public operator presets must stay disabled" }
++    require(net.ntfMode == "instant") { "notification mode must be `instant`" }
++  }
++
++  /** The host every address in this bundle points at. */
++  fun host(): String? = smp.firstOrNull()?.let { hostOf(it) }
++}
++
++@Serializable
++data class HearthNetPrefs(
++  @SerialName("privateRouting") val privateRouting: String,
++  @SerialName("presetsEnabled") val presetsEnabled: Boolean,
++  @SerialName("ntfMode") val ntfMode: String,
++)
++
++/**
++ * `smp://<fingerprint>:<password>@<host>:<port>`.
++ *
++ * Every address in one bundle must point at the same host: a bundle that mixes hosts
++ * means either a mistake or an attempt to slip one foreign server into the set.
++ */
++private fun requireServerUri(uri: String, scheme: String, expectedHost: String) {
++  require(uri.startsWith("$scheme://")) { "expected a $scheme:// address, got $uri" }
++  val auth = uri.removePrefix("$scheme://")
++  val at = auth.lastIndexOf('@')
++  require(at > 0) { "$scheme address has no fingerprint: $uri" }
++  val credentials = auth.substring(0, at)
++  // Upstream requires a password to create queues; without one the relay is open.
++  require(credentials.contains(':')) { "$scheme address carries no relay password: $uri" }
++
++  val hostPort = auth.substring(at + 1)
++  val host = hostPort.substringBeforeLast(':', "")
++  require(host.isNotEmpty()) { "$scheme address has no host: $uri" }
++  require(host.equals(expectedHost, ignoreCase = true)) {
++    "$scheme address points at $host, not at $expectedHost"
++  }
++  val port = hostPort.substringAfterLast(':', "").toIntOrNull()
++  require(port != null && port in 1..65535) { "bad port in $uri" }
++}
++
++/**
++ * `scheme:[user:credential@]host:port[?query]`.
++ *
++ * The strictness here is not pedantry. `parseRTCIceServers` returns null for the WHOLE
++ * list if any single entry fails to parse, and the client then falls back to its
++ * built-in **public** STUN/TURN. A malformed entry would therefore not break calls
++ * loudly — it would quietly route them through a third party.
++ */
++private fun requireIceEntry(entry: String, expectedHost: String) {
++  val scheme = entry.substringBefore(':', "")
++  require(scheme in setOf("stun", "stuns", "turn", "turns")) {
++    "unsupported ICE scheme: $entry"
++  }
++  val rest = entry.substringAfter(':').substringBefore('?')
++  val hostPort = if (rest.contains('@')) rest.substringAfterLast('@') else rest
++  val host = hostPort.substringBeforeLast(':', "")
++  require(host.isNotEmpty()) { "ICE entry has no host: $entry" }
++  require(host.equals(expectedHost, ignoreCase = true)) {
++    "ICE entry points at $host, not at $expectedHost — a public STUN/TURN would leak " +
++      "the caller's address"
++  }
++  val port = hostPort.substringAfterLast(':', "").toIntOrNull()
++  require(port != null && port in 1..65535) { "bad port in ICE entry: $entry" }
++
++  if (scheme.startsWith("turn")) {
++    val userInfo = if (rest.contains('@')) rest.substringBeforeLast('@') else ""
++    require(userInfo.contains(':')) { "TURN entry without credentials: $entry" }
++    // A '/' would start a URI path and make the client discard the entry — and with
++    // it the whole list. hearthd guarantees this, so seeing one means the QR is not
++    // the one hearthd minted.
++    require(!userInfo.contains('/')) { "TURN credentials contain '/': $entry" }
++  }
++}
++
++private fun hostOf(uri: String): String? {
++  val auth = uri.substringAfter("://", "")
++  if (auth.isEmpty()) return null
++  val hostPort = auth.substringAfterLast('@', auth)
++  return hostPort.substringBeforeLast(':', "").ifEmpty { null }
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt
+new file mode 100644
+index 0000000..485083c
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt
+@@ -0,0 +1,102 @@
++package chat.hearth
++
++import androidx.compose.foundation.layout.*
++import androidx.compose.foundation.rememberScrollState
++import androidx.compose.foundation.verticalScroll
++import androidx.compose.material.MaterialTheme
++import androidx.compose.material.Text
++import androidx.compose.runtime.*
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.text.style.TextAlign
++import androidx.compose.ui.unit.dp
++import chat.simplex.common.model.ChatController
++import chat.simplex.common.ui.theme.DEFAULT_PADDING
++import chat.simplex.common.views.newchat.QRCodeScanner
++import chat.simplex.common.views.onboarding.OnboardingStage
++
++/**
++ * Onboarding step 0 — импорт bundle узла (patches/0003-onboarding-import.md).
++ *
++ * Единственный экран, который форк добавляет. Он идёт ПЕРЕД стоковым онбордингом и,
++ * применив bundle, отдаёт управление upstream нетронутым — именно это делает ребейз
++ * механическим (ТЗ §8.1, §8.5).
++ *
++ * Сканер берётся upstream'овский. Своя камера означала бы новую зависимость, новое
++ * разрешение и новую поверхность атаки ради экрана, который в жизни устройства
++ * используется один раз.
++ */
++@Composable
++fun HearthImportView() {
++  val importer = remember { HearthOnboardingImporter(HearthCoreApplier()) }
++  val error = remember { mutableStateOf<String?>(null) }
++  val busy = remember { mutableStateOf(false) }
++  val showScanner = remember { mutableStateOf(true) }
++
++  Column(
++    Modifier
++      .fillMaxSize()
++      .verticalScroll(rememberScrollState())
++      .padding(horizontal = DEFAULT_PADDING),
++    horizontalAlignment = Alignment.CenterHorizontally,
++  ) {
++    Spacer(Modifier.height(DEFAULT_PADDING * 2))
++    Text(
++      HearthOnboardingText.TITLE,
++      style = MaterialTheme.typography.h1,
++      textAlign = TextAlign.Center,
++    )
++    Spacer(Modifier.height(DEFAULT_PADDING))
++    Text(
++      HearthOnboardingText.BODY,
++      style = MaterialTheme.typography.body1,
++      textAlign = TextAlign.Center,
++    )
++    Spacer(Modifier.height(DEFAULT_PADDING))
++
++    QRCodeScanner(showScanner) { payload ->
++      // Повторные срабатывания сканера при уже идущем импорте игнорируем: applier
++      // не идемпотентен, а камера отдаёт один и тот же код несколько раз подряд.
++      if (busy.value) return@QRCodeScanner false
++      busy.value = true
++      error.value = null
++
++      when (val result = importer.import(payload)) {
++        is HearthImportResult.Applied -> {
++          showScanner.value = false
++          // Дальше — обычный онбординг upstream, без единой правки.
++          ChatController.appPrefs.onboardingStage.set(OnboardingStage.Step1_SimpleXInfo)
++          true
++        }
++
++        is HearthImportResult.Rejected -> {
++          // Ошибку показываем на экране, а не всплывающим окном: человек стоит с
++          // телефоном перед чужим QR, и текст должен остаться на виду, пока он
++          // разбирается. Сканер оставляем включённым — можно сразу сканировать снова.
++          error.value = result.reason
++          busy.value = false
++          false
++        }
++      }
++    }
++
++    val message = error.value
++    if (message != null) {
++      Spacer(Modifier.height(DEFAULT_PADDING))
++      Text(
++        message,
++        color = MaterialTheme.colors.error,
++        style = MaterialTheme.typography.body2,
++        textAlign = TextAlign.Center,
++      )
++    }
++
++    Spacer(Modifier.height(DEFAULT_PADDING))
++    Text(
++      HearthOnboardingText.NETWORK_HINT,
++      style = MaterialTheme.typography.body2,
++      textAlign = TextAlign.Center,
++    )
++    Spacer(Modifier.height(DEFAULT_PADDING * 2))
++  }
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
+new file mode 100644
+index 0000000..f155141
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
+@@ -0,0 +1,81 @@
++package chat.hearth
++
++/**
++ * Onboarding step 0 — "Отсканируй QR настройки узла" (ТЗ §8.2 п.7).
++ *
++ * This is the whole of the fork's added UI surface. It runs BEFORE upstream's own
++ * profile onboarding, applies the bundle, and then hands control back to upstream
++ * unchanged. Keeping it a separate screen (rather than editing upstream's onboarding
++ * flow) is what keeps the rebase mechanical (ТЗ §8.1, §8.5).
++ *
++ * INTEGRATION POINTS (see ../../../../../patches/0003-onboarding-import.md):
++ *   - QR scanning: reuse upstream's existing scanner composable; do not add a camera
++ *     library — a second scanner would be a new dependency and a new permission story.
++ *   - [HearthBundleApplier] is implemented in the Android source set against the
++ *     upstream chat controller API of the pinned tag.
++ */
++
++/** Result of importing a bundle. */
++sealed interface HearthImportResult {
++  data class Applied(val servers: HearthServers, val device: String) : HearthImportResult
++  data class Rejected(val reason: String) : HearthImportResult
++}
++
++/**
++ * Applies an imported bundle to the SimpleX core.
++ *
++ * Implemented per-platform against upstream's controller API, because that API is the
++ * one thing that moves between tags. Everything above this interface is stable.
++ */
++interface HearthBundleApplier {
++  /** Replace the configured SMP/XFTP servers with exactly these. */
++  suspend fun setServers(servers: HearthServers)
++
++  /** Apply ТЗ §8.2 network defaults: private routing, no presets, instant delivery. */
++  suspend fun applyNetworkDefaults(prefs: HearthNetPrefs)
++
++  /** Persist which device id this install was enrolled as, for support and revocation. */
++  suspend fun rememberDevice(deviceId: String, issued: String)
++}
++
++/**
++ * Import a scanned payload.
++ *
++ * Pure orchestration: parse, validate, apply, report. No UI, no platform types, so it
++ * is unit-testable on the JVM (see HearthBundleTest).
++ */
++class HearthOnboardingImporter(private val applier: HearthBundleApplier) {
++
++  suspend fun import(payload: String): HearthImportResult {
++    val bundle = HearthBundle.parse(payload).getOrElse { error ->
++      return HearthImportResult.Rejected(error.message ?: "bundle is not valid")
++    }
++
++    val servers = HearthPresets.serversFrom(bundle)
++    return runCatching {
++      applier.setServers(servers)
++      applier.applyNetworkDefaults(bundle.net)
++      applier.rememberDevice(bundle.device, bundle.issued)
++      HearthImportResult.Applied(servers, bundle.device) as HearthImportResult
++    }.getOrElse { error ->
++      HearthImportResult.Rejected(error.message ?: "could not apply the bundle")
++    }
++  }
++}
++
++/**
++ * Copy shown on the first screen. Kept here so translators and reviewers can see the
++ * whole of the fork's user-facing text in one file.
++ */
++object HearthOnboardingText {
++  const val TITLE = "Настройка домашнего узла"
++  const val BODY =
++    "Отсканируйте QR-код, который показал администратор узла.\n\n" +
++      "Код содержит пароли релеев — показывайте его лично, " +
++      "не пересылайте и не сохраняйте в галерею."
++  const val SCAN_BUTTON = "Сканировать QR"
++  const val NETWORK_HINT =
++    "Дополнительной настройки сети не нужно: узел доступен из интернета. " +
++      "Если сообщения не идут — проверьте, что узел включён."
++  const val APPLIED = "Узел настроен. Дальше — обычная настройка профиля."
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthPresets.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthPresets.kt
+new file mode 100644
+index 0000000..f45ada5
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthPresets.kt
+@@ -0,0 +1,80 @@
++package chat.hearth
++
++/**
++ * Hearth network defaults — the single place where "which servers does this app talk to"
++ * is decided (ТЗ §8.2 п.1–5).
++ *
++ * Upstream ships a list of SimpleX operators and their relays. In this fork that list is
++ * empty and the operator screen is hidden: the app must be incapable of reaching the
++ * public network, not merely configured not to (ТЗ §1.2).
++ *
++ * INTEGRATION POINTS (see ../../../../../patches/0001-presets.md):
++ *   - upstream preset list  -> return [presetServers] (empty until a bundle is imported)
++ *   - upstream ICE defaults -> [defaultIceServers]
++ *   - upstream operator UI  -> hidden, see patches/0002-hide-operators.md
++ */
++object HearthPresets {
++
++  /**
++   * Servers shipped in the APK: none.
++   *
++   * The relay address contains a password (ТЗ §6.2), so it cannot be baked into a
++   * binary that is passed around on a USB stick — it arrives with the bundle QR and
++   * lives in the app's encrypted storage from then on.
++   */
++  val presetServers: List<String> = emptyList()
++
++  /** Public operator presets are off, permanently. */
++  const val PRESETS_ENABLED = false
++
++  /**
++   * Показывать ли переключатель «Защитить экран приложения» (patches/0006).
++   *
++   * Нет. FLAG_SECURE ставится безусловно в MainActivity; переключатель, который может
++   * его снять, — это настройка, которую рано или поздно выключат, и именно на том
++   * устройстве, которое потеряют (ТЗ §3.1, §8.2 п.6).
++   */
++  const val SHOW_SCREEN_PROTECTION_TOGGLE = false
++
++  /** ТЗ §8.2 п.5: private message routing is on by default and not weakened. */
++  const val PRIVATE_ROUTING_DEFAULT = "always"
++
++  /**
++   * Delivery is a foreground service holding a persistent connection to our relay.
++   * There is no notification server in the contour, so Periodic/Push are not offered.
++   */
++  const val NOTIFICATION_MODE = "instant"
++
++  /** ТЗ §8.2 п.6: disappearing messages default for new contacts. */
++  const val DEFAULT_DISAPPEARING_MESSAGES_SECONDS = 7 * 24 * 60 * 60
++
++  /**
++   * ICE servers currently configured on this device.
++   *
++   * Empty until a bundle is imported. Upstream's fallback to public STUN must be
++   * removed rather than left as a fallback: an empty ICE list means calls fail loudly,
++   * which is the correct outcome — a call that succeeds via `stun.l.google.com` has
++   * already leaked the participant's address (ТЗ §6.4).
++   */
++  fun defaultIceServers(applied: HearthBundle?): List<String> =
++    applied?.ice ?: emptyList()
++
++  /**
++   * Servers to hand to the SimpleX core after a bundle import.
++   *
++   * Returns them in upstream's own `smp://` / `xftp://` string form: this fork never
++   * touches the address format or the parser (ТЗ §8.3).
++   */
++  fun serversFrom(bundle: HearthBundle): HearthServers = HearthServers(
++    smp = bundle.smp,
++    xftp = bundle.xftp,
++    ice = bundle.ice,
++  )
++}
++
++/** The set of servers this device uses. Nothing else is reachable. */
++data class HearthServers(
++  val smp: List<String>,
++  val xftp: List<String>,
++  val ice: List<String>,
++)
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthBundleTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthBundleTest.kt
+new file mode 100644
+index 0000000..51212dd
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthBundleTest.kt
+@@ -0,0 +1,139 @@
++package chat.hearth
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertFalse
++import kotlin.test.assertTrue
++
++/**
++ * The device-side half of the bundle contract.
++ *
++ * Runs on the JVM without an emulator, so an upstream rebase that changes a default
++ * fails here rather than on a family member's phone.
++ */
++class HearthBundleTest {
++
++  private val host = "relay.example.org"
++
++  private val valid = """
++    {"v":1,
++     "smp":["smp://fp1:pass1@relay.example.org:5223"],
++     "xftp":["xftp://fp2:pass2@relay.example.org:5443"],
++     "ice":["stun:relay.example.org:3478",
++            "turn:1757160000:aGVhcnRoK2NyZWQ=@relay.example.org:3478"],
++     "net":{"privateRouting":"always","presetsEnabled":false,"ntfMode":"instant"},
++     "issued":"2026-09-06T12:00:00Z",
++     "device":"mama-pixel8"}
++  """.trimIndent()
++
++  @Test
++  fun parsesTheDocumentHearthdProduces() {
++    val bundle = HearthBundle.parse(valid).getOrThrow()
++    assertEquals(1, bundle.v)
++    assertEquals("mama-pixel8", bundle.device)
++    assertEquals(host, bundle.host())
++    assertEquals(2, bundle.ice.size)
++    assertFalse(bundle.net.presetsEnabled)
++  }
++
++  @Test
++  fun rejectsAPublicRelay() {
++    val payload = valid.replace("smp://fp1:pass1@relay.example.org:5223", "smp://fp1:pass1@smp8.simplex.im:5223")
++    assertTrue(HearthBundle.parse(payload).isFailure, "a foreign relay must never be accepted")
++  }
++
++  @Test
++  fun rejectsAPublicStun() {
++    val payload = valid.replace("stun:relay.example.org:3478", "stun:stun.simplex.im:443")
++    assertTrue(HearthBundle.parse(payload).isFailure, "a public STUN would leak the caller's address")
++  }
++
++  @Test
++  fun rejectsAMixedHostBundle() {
++    val payload = valid.replace("xftp://fp2:pass2@relay.example.org:5443", "xftp://fp2:pass2@other.example.org:5443")
++    assertTrue(HearthBundle.parse(payload).isFailure)
++  }
++
++  @Test
++  fun rejectsTurnWithoutCredentials() {
++    val payload = valid.replace("turn:1757160000:aGVhcnRoK2NyZWQ=@relay.example.org:3478", "turn:relay.example.org:3478")
++    assertTrue(HearthBundle.parse(payload).isFailure)
++  }
++
++  @Test
++  fun rejectsCredentialsTheClientWouldDiscard() {
++    // A '/' in the credential starts a URI path; parseRTCIceServers then returns null
++    // for the whole list and the client silently falls back to public servers.
++    val payload = valid.replace("aGVhcnRoK2NyZWQ=", "aGVhcnRo/2NyZWQ=")
++    assertTrue(HearthBundle.parse(payload).isFailure)
++  }
++
++  @Test
++  fun rejectsEnabledOperatorPresets() {
++    assertTrue(HearthBundle.parse(valid.replace("\"presetsEnabled\":false", "\"presetsEnabled\":true")).isFailure)
++  }
++
++  @Test
++  fun rejectsNonInstantDelivery() {
++    assertTrue(HearthBundle.parse(valid.replace("\"ntfMode\":\"instant\"", "\"ntfMode\":\"periodic\"")).isFailure)
++  }
++
++  @Test
++  fun rejectsARelayAddressWithoutAPassword() {
++    assertTrue(HearthBundle.parse(valid.replace("smp://fp1:pass1@", "smp://fp1@")).isFailure)
++  }
++
++  @Test
++  fun rejectsAnUnsupportedVersion() {
++    assertTrue(HearthBundle.parse(valid.replace("\"v\":1", "\"v\":2")).isFailure)
++  }
++
++  @Test
++  fun rejectsGarbage() {
++    assertTrue(HearthBundle.parse("not json").isFailure)
++    assertTrue(HearthBundle.parse("").isFailure)
++  }
++
++  @Test
++  fun acceptsABareIpHost() {
++    val payload = valid.replace("relay.example.org", "203.0.113.10")
++    val bundle = HearthBundle.parse(payload).getOrThrow()
++    assertEquals("203.0.113.10", bundle.host())
++  }
++
++  @Test
++  fun importerAppliesEverythingOnce() = kotlinx.coroutines.runBlocking {
++    val applier = RecordingApplier()
++    val result = HearthOnboardingImporter(applier).import(valid)
++    assertTrue(result is HearthImportResult.Applied)
++    assertEquals(1, applier.serversCalls)
++    assertEquals(1, applier.defaultsCalls)
++    assertEquals("mama-pixel8", applier.deviceId)
++  }
++
++  @Test
++  fun importerReportsRejectionWithoutTouchingTheCore() = kotlinx.coroutines.runBlocking {
++    val applier = RecordingApplier()
++    val result = HearthOnboardingImporter(applier).import("{}")
++    assertTrue(result is HearthImportResult.Rejected)
++    assertEquals(0, applier.serversCalls, "a bad bundle must not reach the SimpleX core")
++  }
++
++  private class RecordingApplier : HearthBundleApplier {
++    var serversCalls = 0
++    var defaultsCalls = 0
++    var deviceId: String? = null
++
++    override suspend fun setServers(servers: HearthServers) {
++      serversCalls++
++    }
++
++    override suspend fun applyNetworkDefaults(prefs: HearthNetPrefs) {
++      defaultsCalls++
++    }
++
++    override suspend fun rememberDevice(deviceId: String, issued: String) {
++      this.deviceId = deviceId
++    }
++  }
++}

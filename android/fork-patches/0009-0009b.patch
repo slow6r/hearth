@@ -1,0 +1,445 @@
+From e2287e985cbac32908cfe96858aaf237ac4ee72e Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Thu, 10 Sep 2026 10:24:48 +0300
+Subject: [PATCH 09/24] =?UTF-8?q?0009b:=20=D0=B8=D0=BC=D1=8F=20=D0=B2?=
+ =?UTF-8?q?=D0=BE=20=D0=B2=D1=81=D0=B5=D1=85=20=D0=BB=D0=BE=D0=BA=D0=B0?=
+ =?UTF-8?q?=D0=BB=D1=8F=D1=85=20=D0=B8=20=D1=81=D0=B2=D0=BE=D1=8F=20=D0=B8?=
+ =?UTF-8?q?=D0=BA=D0=BE=D0=BD=D0=BA=D0=B0=20=E2=80=94=20=D0=BA=D0=BE=D1=81?=
+ =?UTF-8?q?=D1=82=D1=91=D1=80?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Две дырки в 0009, обе видны на живом телефоне.
+
+ИМЯ. app_name был заменён только в базовой локали. Android берёт строку
+под язык телефона, поэтому на русском устройстве приложение продолжало
+называться SimpleX. Исправлено во всех 21 локали.
+
+ИКОНКА. Не была тронута вовсе, хотя patches/0009 прямо называет
+res/mipmap-* точкой изменения. Сделана векторная адаптивная иконка:
+костёр из двух поленьев и трёхслойного пламени.
+
+Вектор, а не PNG по плотностям: minSdk=26, адаптивная иконка работает на
+всех поддерживаемых устройствах, одного файла достаточно вместо пяти
+растров. Цвет фона заведён свой, а не переписан upstream'овский
+@color/icon_background — его используют альтернативные иконки SimpleX,
+и ломать их незачем.
+---
+ .../res/drawable/hearth_icon_foreground.xml   | 76 +++++++++++++++++++
+ .../src/main/res/mipmap-anydpi-v26/icon.xml   |  7 +-
+ .../main/res/mipmap-anydpi-v26/icon_round.xml |  7 +-
+ .../src/main/res/values/hearth_icon.xml       | 13 ++++
+ .../commonMain/resources/MR/cs/strings.xml    |  2 +-
+ .../commonMain/resources/MR/de/strings.xml    |  2 +-
+ .../commonMain/resources/MR/el/strings.xml    |  2 +-
+ .../commonMain/resources/MR/es/strings.xml    |  2 +-
+ .../commonMain/resources/MR/fi/strings.xml    |  2 +-
+ .../commonMain/resources/MR/fr/strings.xml    |  2 +-
+ .../commonMain/resources/MR/it/strings.xml    |  2 +-
+ .../commonMain/resources/MR/iw/strings.xml    |  2 +-
+ .../commonMain/resources/MR/ja/strings.xml    |  2 +-
+ .../commonMain/resources/MR/ko/strings.xml    |  2 +-
+ .../commonMain/resources/MR/lt/strings.xml    |  2 +-
+ .../commonMain/resources/MR/nl/strings.xml    |  2 +-
+ .../commonMain/resources/MR/pl/strings.xml    |  2 +-
+ .../resources/MR/pt-rBR/strings.xml           |  2 +-
+ .../commonMain/resources/MR/pt/strings.xml    |  2 +-
+ .../commonMain/resources/MR/ru/strings.xml    |  2 +-
+ .../commonMain/resources/MR/th/strings.xml    |  2 +-
+ .../commonMain/resources/MR/uk/strings.xml    |  2 +-
+ .../resources/MR/zh-rCN/strings.xml           |  2 +-
+ .../resources/MR/zh-rTW/strings.xml           |  2 +-
+ 24 files changed, 117 insertions(+), 26 deletions(-)
+ create mode 100644 apps/multiplatform/android/src/main/res/drawable/hearth_icon_foreground.xml
+ create mode 100644 apps/multiplatform/android/src/main/res/values/hearth_icon.xml
+
+diff --git a/apps/multiplatform/android/src/main/res/drawable/hearth_icon_foreground.xml b/apps/multiplatform/android/src/main/res/drawable/hearth_icon_foreground.xml
+new file mode 100644
+index 0000000..d9ecccf
+--- /dev/null
++++ b/apps/multiplatform/android/src/main/res/drawable/hearth_icon_foreground.xml
+@@ -0,0 +1,76 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  Иконка Hearth — костёр (patches/0009-branding.md).
++
++  Векторная, а не набор PNG по плотностям: minSdk = 26, значит адаптивная иконка
++  применяется на всех поддерживаемых устройствах, и одного файла достаточно.
++
++  Холст адаптивной иконки — 108×108, но лаунчер обрезает его маской и двигает при
++  параллаксе. Безопасная зона — центральные 72×72, то есть примерно от 18 до 90.
++  Всё значимое здесь укладывается в 30..84, с запасом.
++-->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="108dp"
++    android:height="108dp"
++    android:viewportWidth="108"
++    android:viewportHeight="108">
++
++    <!-- Поленья. Два, крест-накрест, чтобы читалось именно как костёр,
++         а не как одинокий язык пламени. -->
++    <group
++        android:pivotX="54"
++        android:pivotY="80"
++        android:rotation="16">
++        <path
++            android:fillColor="#8A5A33"
++            android:pathData="M32,76 L76,76 A4,4 0 0,1 76,84 L32,84 A4,4 0 0,1 32,76 Z" />
++        <path
++            android:fillColor="#6B4526"
++            android:pathData="M32,81 L76,81 A4,4 0 0,1 76,84 L32,84 A4,4 0 0,1 32,81 Z" />
++    </group>
++    <group
++        android:pivotX="54"
++        android:pivotY="80"
++        android:rotation="-16">
++        <path
++            android:fillColor="#9C6739"
++            android:pathData="M32,76 L76,76 A4,4 0 0,1 76,84 L32,84 A4,4 0 0,1 32,76 Z" />
++        <path
++            android:fillColor="#7A4F2C"
++            android:pathData="M32,81 L76,81 A4,4 0 0,1 76,84 L32,84 A4,4 0 0,1 32,81 Z" />
++    </group>
++
++    <!-- Внешнее пламя. -->
++    <path
++        android:fillColor="#F4600C"
++        android:pathData="M54,20
++            c0,0 -4,10.5 -10,18
++            c-5,6.3 -10,11.6 -10,19.4
++            C34,68.6 43,77 54,77
++            c11,0 20,-8.4 20,-19.6
++            c0,-7.8 -5,-13.1 -10,-19.4
++            C58,30.5 54,20 54,20 Z" />
++
++    <!-- Внутреннее пламя: горячее ядро. Именно оно делает силуэт огнём,
++         а не каплей. -->
++    <path
++        android:fillColor="#FFB020"
++        android:pathData="M54,42
++            c0,0 -2.3,5.9 -5.7,10.1
++            c-2.8,3.5 -5.7,6.5 -5.7,10.9
++            C42.6,69.3 47.7,74 54,74
++            c6.3,0 11.4,-4.7 11.4,-11
++            c0,-4.4 -2.9,-7.4 -5.7,-10.9
++            C56.3,47.9 54,42 54,42 Z" />
++
++    <!-- Самая горячая точка. -->
++    <path
++        android:fillColor="#FFE68A"
++        android:pathData="M54,57
++            c0,0 -1.2,3 -2.9,5.1
++            c-1.4,1.8 -2.9,3.3 -2.9,5.5
++            C48.2,70.9 50.8,73 54,73
++            c3.2,0 5.8,-2.1 5.8,-5.4
++            c0,-2.2 -1.5,-3.7 -2.9,-5.5
++            C55.2,60 54,57 54,57 Z" />
++</vector>
+diff --git a/apps/multiplatform/android/src/main/res/mipmap-anydpi-v26/icon.xml b/apps/multiplatform/android/src/main/res/mipmap-anydpi-v26/icon.xml
+index c41948f..8813417 100644
+--- a/apps/multiplatform/android/src/main/res/mipmap-anydpi-v26/icon.xml
++++ b/apps/multiplatform/android/src/main/res/mipmap-anydpi-v26/icon.xml
+@@ -1,5 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
++<!-- Иконка Hearth (patches/0009). Foreground — векторный костёр, фон — свой цвет. -->
+ <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+-    <background android:drawable="@color/icon_background"/>
+-    <foreground android:drawable="@mipmap/icon_foreground"/>
+-</adaptive-icon>
+\ No newline at end of file
++    <background android:drawable="@color/hearth_icon_background"/>
++    <foreground android:drawable="@drawable/hearth_icon_foreground"/>
++</adaptive-icon>
+diff --git a/apps/multiplatform/android/src/main/res/mipmap-anydpi-v26/icon_round.xml b/apps/multiplatform/android/src/main/res/mipmap-anydpi-v26/icon_round.xml
+index c41948f..8813417 100644
+--- a/apps/multiplatform/android/src/main/res/mipmap-anydpi-v26/icon_round.xml
++++ b/apps/multiplatform/android/src/main/res/mipmap-anydpi-v26/icon_round.xml
+@@ -1,5 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
++<!-- Иконка Hearth (patches/0009). Foreground — векторный костёр, фон — свой цвет. -->
+ <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+-    <background android:drawable="@color/icon_background"/>
+-    <foreground android:drawable="@mipmap/icon_foreground"/>
+-</adaptive-icon>
+\ No newline at end of file
++    <background android:drawable="@color/hearth_icon_background"/>
++    <foreground android:drawable="@drawable/hearth_icon_foreground"/>
++</adaptive-icon>
+diff --git a/apps/multiplatform/android/src/main/res/values/hearth_icon.xml b/apps/multiplatform/android/src/main/res/values/hearth_icon.xml
+new file mode 100644
+index 0000000..4050c66
+--- /dev/null
++++ b/apps/multiplatform/android/src/main/res/values/hearth_icon.xml
+@@ -0,0 +1,13 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  Фон адаптивной иконки Hearth.
++
++  Свой цвет, а не правка upstream'ового @color/icon_background: тот же ресурс
++  используют альтернативные иконки SimpleX (icon_dark_blue), и менять его — значит
++  трогать то, о чём нас не просили.
++
++  Тёмный тёплый: костёр читается на тёмном, на белом он выглядит вырезанным из бумаги.
++-->
++<resources>
++    <color name="hearth_icon_background">#1A1109</color>
++</resources>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/cs/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/cs/strings.xml
+index 5160d28..7046771 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/cs/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/cs/strings.xml
+@@ -82,7 +82,7 @@
+     <string name="v4_3_irreversible_message_deletion_desc">Vaše kontakty mohou povolit úplné mazání zpráv.</string>
+     <string name="v4_4_disappearing_messages">Mizící zprávy</string>
+     <string name="v4_4_verify_connection_security_desc">Porovnejte bezpečnostní kódy se svými kontakty.</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="thousand_abbreviation">k</string>
+     <string name="connect_via_contact_link">Připojit přes kontaktní adresu?</string>
+     <string name="connect_via_invitation_link">Připojit přes jednorázovou pozvánku?</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/de/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/de/strings.xml
+index 9774107..ccf3299 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/de/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/de/strings.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="thousand_abbreviation">k</string>
+     <!-- Connect via Link - MainActivity.kt -->
+     <string name="connect_via_contact_link">Über den Kontaktadressen-Link verbinden?</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/el/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/el/strings.xml
+index 390913c..f0a43ec 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/el/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/el/strings.xml
+@@ -37,7 +37,7 @@
+     <string name="allow_direct_messages">Να επιτρέπεται η αποστολή άμεσων μηνυμάτων στα μέλη.</string>
+     <string name="allow_to_send_disappearing">Επιτρέπεται η αποστολή μηνυμάτων που εξαφανίζονται.</string>
+     <string name="allow_to_send_voice">Επιτρέπεται η αποστολή φωνητικών μηνυμάτων.</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="accept">Αποδοχή</string>
+     <string name="accept_connection_request__question">Αποδοχή αιτήματος σύνδεσης;</string>
+     <string name="callstatus_accepted">αποδεκτή κλήση</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/es/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/es/strings.xml
+index 4e3ce8e..f2b018b 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/es/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/es/strings.xml
+@@ -911,7 +911,7 @@
+     <string name="you_joined_this_group">Te has unido a este grupo</string>
+     <string name="chat_preferences_yes">sí</string>
+     <string name="chat_preferences_you_allow">Permites</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="profile_will_be_sent_to_contact_sending_link">Tu perfil se enviará al contacto del que has recibido este enlace.</string>
+     <string name="you_will_join_group">Conectarás con todos los miembros del grupo.</string>
+     <string name="sender_you_pronoun">tu</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/fi/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/fi/strings.xml
+index f3c7a95..e03b40e 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/fi/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/fi/strings.xml
+@@ -1030,7 +1030,7 @@
+     <string name="group_info_member_you">sinä: %1$s</string>
+     <string name="you_wont_lose_your_contacts_if_delete_address">Et menetä kontaktejasi, jos poistat osoitteesi myöhemmin.</string>
+     <string name="onboarding_notifications_mode_off">Kun sovellus on käynnissä</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="profile_will_be_sent_to_contact_sending_link">Profiilisi lähetetään kontaktille, jolta sait tämän linkin.</string>
+     <string name="you_will_join_group">Liityt ryhmään, johon tämä linkki viittaa, ja muodostat yhteyden sen ryhmän jäseniin.</string>
+     <string name="connected_to_server_to_receive_messages_from_contact">Olet yhteydessä palvelimeen, jota käytetään vastaanottamaan viestejä tältä kontaktilta.</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/fr/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/fr/strings.xml
+index 845fe28..dd8050a 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/fr/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/fr/strings.xml
+@@ -2,7 +2,7 @@
+ <resources>
+     <string name="thousand_abbreviation">k</string>
+     <string name="connect_via_contact_link">Se connecter via l\'adresse du contact ?</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="profile_will_be_sent_to_contact_sending_link">Votre profil va être envoyé au contact qui vous a envoyé ce lien.</string>
+     <string name="you_will_join_group">Vous vous connecterez à tous les membres du groupe.</string>
+     <string name="connect_via_link_verb">Se connecter</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/it/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/it/strings.xml
+index 9fad882..552cef4 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/it/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/it/strings.xml
+@@ -9,7 +9,7 @@
+     <string name="images_limit_desc">Possono essere inviate solo 10 immagini alla volta</string>
+     <string name="image_will_be_received_when_contact_is_online">L\'immagine verrà ricevuta quando il tuo contatto sarà in linea, aspetta o controlla più tardi!</string>
+     <string name="waiting_for_image">In attesa dell\'immagine</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="thousand_abbreviation">k</string>
+     <string name="connect_via_invitation_link">Connettere via link una tantum?</string>
+     <string name="connect_via_group_link">Entrare nel gruppo?</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/iw/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/iw/strings.xml
+index 430acfa..6b160b1 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/iw/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/iw/strings.xml
+@@ -1084,7 +1084,7 @@
+     <string name="callstate_waiting_for_confirmation">ממתין לאישור…</string>
+     <string name="callstate_waiting_for_answer">ממתין למענה…</string>
+     <string name="we_do_not_store_contacts_or_messages_on_servers">איננו מאחסנים את אנשי הקשר או ההודעות שלך (לאחר המסירה) בשרתים.</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="sender_you_pronoun">אתם</string>
+     <string name="description_via_contact_address_link">באמצעות קישור לכתובת איש קשר</string>
+     <string name="description_via_group_link">באמצעות קישור לקבוצה</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/ja/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/ja/strings.xml
+index e61e4e4..5097590 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/ja/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/ja/strings.xml
+@@ -631,7 +631,7 @@
+     <string name="incognito_info_share">連絡相手にシークレットモードのプロフィールを共有すると、その連絡相手に招待されたグループでも同じプロフィールが使われます。</string>
+     <string name="theme">テーマ</string>
+     <string name="voice_messages">音声メッセージ</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="you_will_join_group">グループメンバー全員と接続する。</string>
+     <string name="connected_to_server_to_receive_messages_from_contact">この連絡先から受信するメッセージのサーバに既に接続してます。</string>
+     <string name="sending_files_not_yet_supported">ファイル送信機能がまだ実装されてません</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/ko/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/ko/strings.xml
+index ea87347..ecb47c9 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/ko/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/ko/strings.xml
+@@ -305,7 +305,7 @@
+     <string name="v4_5_multiple_chat_profiles_descr">다른 이름, 아바타 그리고 전송 격리.</string>
+     <string name="dont_show_again">다시 보지 않기</string>
+     <string name="connected_to_server_to_receive_messages_from_contact">이 대화 상대로부터의 메시지를 수신할 서버와 연결되었어요.</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="contact_developers">앱 업데이트 후 개발자에게 연락해 주세요.</string>
+     <string name="connection_error_auth_desc">대화 상대가 나갔거나 초대 링크가 이미 사용된 경우가 아니면 버그일 수 있어요. 이 경우 개발자에게 알려주세요. \n대화 상대에게 다른 초대 링크 만들도록 부탁하고 네트워크 연결이 안정적인지 확인하세요.</string>
+     <string name="auth_enable_simplex_lock">SimpleX 잠금 활성화</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/lt/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/lt/strings.xml
+index aceb11e..6fe9f46 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/lt/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/lt/strings.xml
+@@ -294,7 +294,7 @@
+     <string name="your_privacy">Jūsų privatumas</string>
+     <string name="settings_section_title_you">Jūs</string>
+     <string name="wrong_passphrase_title">Neteisinga slaptafrazė!</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="sender_you_pronoun">jūs</string>
+     <string name="description_via_group_link">per grupės nuorodą</string>
+     <string name="description_via_contact_address_link">per kontakto adreso nuorodą</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/nl/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/nl/strings.xml
+index 307ffc7..f3ed2ff 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/nl/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/nl/strings.xml
+@@ -809,7 +809,7 @@
+     <string name="v4_4_verify_connection_security">Controleer de verbindingsbeveiliging</string>
+     <string name="v4_4_french_interface_descr">Dank aan de gebruikers – draag bij via Weblate!</string>
+     <string name="v4_5_transport_isolation">Transport isolation</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="connected_to_server_to_receive_messages_from_contact">U bent verbonden met de server die wordt gebruikt om berichten van deze verbinding te ontvangen.</string>
+     <string name="profile_will_be_sent_to_contact_sending_link">Je profiel wordt verzonden naar het contact van wie je deze link hebt ontvangen.</string>
+     <string name="you_will_join_group">Je maakt verbinding met alle groepsleden.</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/pl/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/pl/strings.xml
+index 0cf1955..276a766 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/pl/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/pl/strings.xml
+@@ -28,7 +28,7 @@
+     <string name="trying_to_connect_to_server_to_receive_messages">Próba połączenia z serwerem, który służył do odbierania wiadomości z tego połączenia.</string>
+     <string name="error_connecting_to_server_to_receive_messages">Próbowanie połączenia z serwerem używanym do odbierania wiadomości od tego kontaktu (błąd: %1$s).</string>
+     <string name="unknown_message_format">nieznany format wiadomości</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="sender_you_pronoun">Ty</string>
+     <string name="connected_to_server_to_receive_messages_from_contact">Jesteś połączony z serwerem, który służył do odbierania wiadomości z tego połączenia.</string>
+     <string name="profile_will_be_sent_to_contact_sending_link">Twój profil zostanie wysłany do kontaktu, od którego otrzymałeś ten link.</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/pt-rBR/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/pt-rBR/strings.xml
+index cbf69db..719796d 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/pt-rBR/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/pt-rBR/strings.xml
+@@ -815,7 +815,7 @@
+     <string name="star_on_github">Estrela no GitHub</string>
+     <string name="alert_text_connection_pending_they_need_to_be_online_can_delete_and_retry">Seu contato precisa estar online para completar a conexão.
+ \nVocê pode cancelar esta conexão e remover o contato (e tentar mais tarde com um novo link).</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="only_group_owners_can_enable_voice">Somente o proprietários de grupo podem ativar mensagens de voz</string>
+     <string name="description_you_shared_one_time_link">você compartilhou um link de uso único</string>
+     <string name="you_will_be_connected_when_your_connection_request_is_accepted">Você será conectado quando sua solicitação de conexão for aceita, aguarde ou verifique mais tarde!</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/pt/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/pt/strings.xml
+index 08285db..c6ecdc4 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/pt/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/pt/strings.xml
+@@ -267,7 +267,7 @@
+     <string name="error_changing_role">Erro ao alterar função</string>
+     <string name="chat_preferences_contact_allows">O contacto permite</string>
+     <string name="chat_preferences">Preferências de conversa</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="thousand_abbreviation">mil</string>
+     <string name="connect_via_contact_link">Conectar através do endereço de contacto?</string>
+     <string name="connect_via_invitation_link">Conectar via link de convite?</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/ru/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/ru/strings.xml
+index dae2a49..3b8fd07 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/ru/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/ru/strings.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="thousand_abbreviation">т</string>
+     <!-- Connect via Link - MainActivity.kt -->
+     <string name="connect_via_contact_link">Соединиться через адрес?</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/th/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/th/strings.xml
+index c7313e7..9067164 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/th/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/th/strings.xml
+@@ -1043,7 +1043,7 @@
+     <string name="incognito_random_profile">โปรไฟล์แบบสุ่มของคุณ</string>
+     <string name="theme">ธีม</string>
+     <string name="error_connecting_to_server_to_receive_messages">กำลังพยายามเชื่อมต่อกับเซิร์ฟเวอร์ที่ใช้รับข้อความจากผู้ติดต่อนี้ (ข้อผิดพลาด: %1$s)</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="connected_to_server_to_receive_messages_from_contact">คุณเชื่อมต่อกับเซิร์ฟเวอร์ที่ใช้รับข้อความจากผู้ติดต่อนี้</string>
+     <string name="profile_will_be_sent_to_contact_sending_link">โปรไฟล์ของคุณจะถูกส่งไปยังผู้ติดต่อที่ส่งลิงก์นี้มาให้คุณ</string>
+     <string name="trying_to_connect_to_server_to_receive_messages">พยายามเชื่อมต่อกับเซิร์ฟเวอร์ที่ใช้รับข้อความจากผู้ติดต่อนี้</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/uk/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/uk/strings.xml
+index 9a59fec..254249c 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/uk/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/uk/strings.xml
+@@ -111,7 +111,7 @@
+     <string name="available_in_v51">"
+ \nДоступно в версії 5.1"</string>
+     <string name="calls_prohibited_with_this_contact">Аудіо/відео дзвінки заборонені.</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="both_you_and_your_contact_can_make_calls">Як ви, так і ваш контакт можуть здійснювати дзвінки.</string>
+     <string name="thousand_abbreviation">тис.</string>
+     <string name="connect_via_contact_link">Підключитися через адресу контакту?</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/zh-rCN/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/zh-rCN/strings.xml
+index 9dea7a5..58962d3 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/zh-rCN/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/zh-rCN/strings.xml
+@@ -887,7 +887,7 @@
+     <string name="you_can_share_group_link_anybody_will_be_able_to_connect">你可以共享链接或二维码——任何人都可以加入该群。如果你稍后将其删除，你不会失去该群的成员。</string>
+     <string name="conn_level_desc_indirect">间接（%1$s）</string>
+     <string name="you_can_also_connect_by_clicking_the_link"><![CDATA[你也可以通过点击链接进行连接。 如果它在浏览器中打开，请单击<b>在移动应用程序中打开</b>按钮。]]></string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="you_will_join_group">你将连接到所有群成员。</string>
+     <string name="description_via_group_link">通过群链接</string>
+     <string name="description_via_one_time_link">通过一次性链接</string>
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/zh-rTW/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/zh-rTW/strings.xml
+index c6cf22f..5814042 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/zh-rTW/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/zh-rTW/strings.xml
+@@ -227,7 +227,7 @@
+     <string name="v4_5_reduced_battery_usage_descr">更多改進即將推出！</string>
+     <string name="v4_5_italian_interface">意大利語言界面</string>
+     <string name="v4_5_italian_interface_descr">感謝用戶 - 使用 Weblate 的翻譯貢獻！</string>
+-    <string name="app_name">SimpleX</string>
++    <string name="app_name">Hearth</string>
+     <string name="thousand_abbreviation">k</string>
+     <string name="connect_via_contact_link">透過聯絡人地址連接？</string>
+     <string name="connect_via_invitation_link">透過一次性連結連接？</string>

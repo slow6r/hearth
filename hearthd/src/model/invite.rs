@@ -135,8 +135,9 @@ impl InviteRegistry {
         let invite = Invite {
             // 8 байт: идентификатор не секрет, его называют вслух при отзыве.
             id: store::random_hex(8),
-            // 32 байта — столько же, сколько у токена устройства.
-            token: store::random_hex(32),
+            // Код доступа: его человек получает лично и печатает руками, поэтому
+            // не случайные байты, а формат из `model::code` (12 знаков, 60 бит).
+            token: crate::model::code::generate(),
             created: now,
             expires: (ttl_days > 0).then(|| now + Duration::days(ttl_days)),
             max_uses,
@@ -150,14 +151,23 @@ impl InviteRegistry {
         Ok(invite)
     }
 
-    /// Найти пригодное приглашение по токену.
+    /// Найти пригодное приглашение по предъявленному коду.
     ///
     /// Сравнение в постоянное время и по ВСЕМ приглашениям, без раннего выхода:
-    /// иначе время ответа рассказывало бы, есть ли такой токен и в какой он позиции.
+    /// иначе время ответа рассказывало бы, есть ли такой код и в какой он позиции.
+    ///
+    /// Сравнений на каждое приглашение два, и оба выполняются всегда (`|`, а не `||`).
+    /// Так вышло не из любви к симметрии: в реестре одновременно живут коды, которые
+    /// человек печатает как умеет, и старые шестнадцатеричные токены из вшитых сборок.
+    /// Первые надо приводить к каноническому виду, вторые — нет.
     pub fn find_usable(&self, token: &str, now: DateTime<Utc>) -> Option<&Invite> {
+        let typed = token.trim();
+        let canonical = crate::model::code::normalize(typed);
         let mut found: Option<&Invite> = None;
         for invite in &self.invites {
-            if crate::deviceapi::ct_eq(&invite.token, token) && invite.is_usable_at(now) {
+            let matches = crate::deviceapi::ct_eq(&invite.token, typed)
+                | crate::deviceapi::ct_eq(&invite.token, &canonical);
+            if matches && invite.is_usable_at(now) {
                 found = Some(invite);
             }
         }
@@ -220,9 +230,52 @@ mod tests {
         let mut reg = registry(&dir);
         let invite = reg.create(1, 7, None).unwrap();
         let mut wrong = invite.token.clone();
-        wrong.pop();
-        wrong.push('0');
+        let last = wrong.pop().unwrap();
+        wrong.push(if last == '0' { '1' } else { '0' });
         assert!(reg.find_usable(&wrong, Utc::now()).is_none());
+    }
+
+    #[test]
+    fn an_issued_token_is_an_access_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = registry(&dir);
+        let invite = reg.create(5, 0, None).unwrap();
+        assert!(
+            crate::model::code::is_code(&invite.token),
+            "выписан не код: {}",
+            invite.token
+        );
+    }
+
+    #[test]
+    fn a_code_is_accepted_the_way_a_person_types_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = registry(&dir);
+        let invite = reg.create(5, 0, None).unwrap();
+        let now = Utc::now();
+        for typed in [
+            crate::model::code::format_groups(&invite.token),
+            invite.token.to_lowercase(),
+            format!("  {}  ", crate::model::code::format_groups(&invite.token)),
+        ] {
+            assert_eq!(
+                reg.find_usable(&typed, now).map(|i| i.id.clone()),
+                Some(invite.id.clone()),
+                "ввод: {typed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_old_hex_token_still_works() {
+        // Вшитые сборки предъявляют шестнадцатеричный токен. Пока они в руках у людей,
+        // реестр обязан принимать оба вида.
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = registry(&dir);
+        let mut invite = reg.create(0, 0, None).unwrap();
+        invite.token = store::random_hex(32);
+        reg.invites[0] = invite.clone();
+        assert!(reg.find_usable(&invite.token, Utc::now()).is_some());
     }
 
     #[test]

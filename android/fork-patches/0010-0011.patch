@@ -1,0 +1,1118 @@
+From 1f8f59e3a57234df84cf77eec1969249dab3d6e5 Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Thu, 10 Sep 2026 11:49:24 +0300
+Subject: [PATCH 10/24] =?UTF-8?q?0011:=20=D0=BE=D0=B1=D0=BD=D0=BE=D0=B2?=
+ =?UTF-8?q?=D0=BB=D0=B5=D0=BD=D0=B8=D0=B5=20=D1=81=20=D0=B4=D0=BE=D0=BC?=
+ =?UTF-8?q?=D0=B0=D1=88=D0=BD=D0=B5=D0=B3=D0=BE=20=D1=83=D0=B7=D0=BB=D0=B0?=
+ =?UTF-8?q?=20=D0=B8=20=D1=81=D0=B0=D0=BC=D0=BE=D0=B7=D0=B0=D0=B2=D0=B5?=
+ =?UTF-8?q?=D0=B4=D0=B5=D0=BD=D0=B8=D0=B5=20=D1=83=D1=81=D1=82=D1=80=D0=BE?=
+ =?UTF-8?q?=D0=B9=D1=81=D1=82=D0=B2?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Описание патча — hearth/android/patches/0011-self-update.md.
+
+В чужих файлах четыре точки: разрешения REQUEST_INSTALL_PACKAGES и
+FOREGROUND_SERVICE_DATA_SYNC плюс HearthUpdateService в AndroidManifest, пункт
+«Домашний узел» в SettingsView, пять hearth-префов в SimpleXAPI, своя нумерация
+в gradle.properties (7.0.1-h2 / 373).
+
+Остальное — overlay в chat/hearth: транспорт до узла с докачкой по Range и
+сверкой sha256, foreground-сервис загрузки, экран настроек, пиннинг CA узла.
+---
+ .../android/src/main/AndroidManifest.xml      |  16 ++
+ .../android/src/main/res/raw/hearth_ca.pem    |  11 +
+ .../xml/hearth_network_security_config.xml    |  30 ++-
+ .../chat/hearth/HearthSettingsView.android.kt | 171 ++++++++++++++
+ .../chat/hearth/HearthUpdate.android.kt       | 185 +++++++++++++++
+ .../hearth/HearthUpdateService.android.kt     | 212 ++++++++++++++++++
+ .../kotlin/chat/hearth/HearthApplier.kt       |   8 +
+ .../kotlin/chat/hearth/HearthBundle.kt        |  22 ++
+ .../kotlin/chat/hearth/HearthOnboarding.kt    |   9 +
+ .../kotlin/chat/hearth/HearthSettings.kt      |  14 ++
+ .../kotlin/chat/hearth/HearthUpdate.kt        | 149 ++++++++++++
+ .../chat/simplex/common/model/SimpleXAPI.kt   |   9 +
+ .../common/views/usersettings/SettingsView.kt |  13 ++
+ .../kotlin/chat/hearth/HearthBundleTest.kt    |  19 ++
+ .../chat/hearth/HearthSettings.desktop.kt     |  14 ++
+ apps/multiplatform/gradle.properties          |   6 +-
+ 16 files changed, 881 insertions(+), 7 deletions(-)
+ create mode 100644 apps/multiplatform/android/src/main/res/raw/hearth_ca.pem
+ create mode 100644 apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt
+ create mode 100644 apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdate.android.kt
+ create mode 100644 apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdateService.android.kt
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthSettings.kt
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthUpdate.kt
+ create mode 100644 apps/multiplatform/common/src/desktopMain/kotlin/chat/hearth/HearthSettings.desktop.kt
+
+diff --git a/apps/multiplatform/android/src/main/AndroidManifest.xml b/apps/multiplatform/android/src/main/AndroidManifest.xml
+index b534bcd..fcca9f9 100644
+--- a/apps/multiplatform/android/src/main/AndroidManifest.xml
++++ b/apps/multiplatform/android/src/main/AndroidManifest.xml
+@@ -10,6 +10,15 @@
+   <!-- hearth (patches/0005): этих разрешений форк не просит никогда. Upstream их тоже
+        не просит, но манифест собирается слиянием с манифестами библиотек, и tools:node
+        не даст вернуть их незаметно при добавлении зависимости (ТЗ §8.3, A5). -->
++  <!-- hearth (ADR 0010): установка обновления, скачанного с СВОЕГО узла.
++       Это заметное разрешение — право ставить произвольные APK, — и patches/0005
++       разрешения наоборот вычищает. Размен назван в ADR: без него обновление не
++       доедет до того, кто в отъезде, а именно он дольше всех остаётся с дырой. -->
++  <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
++  <!-- Загрузка идёт в foreground-сервисе: с Android 14 такому сервису обязателен
++       объявленный тип, иначе система его не запустит. -->
++  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
++
+   <uses-permission android:name="com.google.android.c2dm.permission.RECEIVE" tools:node="remove" />
+   <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" tools:node="remove" />
+   <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" tools:node="remove" />
+@@ -161,6 +170,13 @@
+         android:autoRemoveFromRecents="true"
+         android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation"/>
+ 
++    <!-- hearth: фоновая загрузка обновления. exported=false — снаружи его дёргать
++         незачем, запускает только само приложение. -->
++    <service
++        android:name="chat.hearth.HearthUpdateService"
++        android:exported="false"
++        android:foregroundServiceType="dataSync" />
++
+     <provider
+         android:name="androidx.core.content.FileProvider"
+         android:authorities="${provider_authorities}"
+diff --git a/apps/multiplatform/android/src/main/res/raw/hearth_ca.pem b/apps/multiplatform/android/src/main/res/raw/hearth_ca.pem
+new file mode 100644
+index 0000000..e4be48c
+--- /dev/null
++++ b/apps/multiplatform/android/src/main/res/raw/hearth_ca.pem
+@@ -0,0 +1,11 @@
++-----BEGIN CERTIFICATE-----
++MIIBnjCCAUOgAwIBAgIUTvASciYKvbRm7NaXqXd3Z0YIE4QwCgYIKoZIzj0EAwIw
++KzEYMBYGA1UEAwwPaGVhcnRoIGFkbWluIENBMQ8wDQYDVQQKDAZoZWFydGgwHhcN
++MjYwOTA5MDAwMDAwWhcNMzYwOTA2MDAwMDAwWjArMRgwFgYDVQQDDA9oZWFydGgg
++YWRtaW4gQ0ExDzANBgNVBAoMBmhlYXJ0aDBZMBMGByqGSM49AgEGCCqGSM49AwEH
++A0IABH7CJcsVTN64lsoiuyOiFQ0VL7IWFZjEE8V58rgiwUGnkWJzqEwjGWBwUObi
++ng4wmGU63O/+NC/Uyh4dglFt4RujRTBDMA4GA1UdDwEB/wQEAwIBhjAdBgNVHQ4E
++FgQULI6d9ljTxdSOjT98mNaqipTv6fEwEgYDVR0TAQH/BAgwBgEB/wIBADAKBggq
++hkjOPQQDAgNJADBGAiEA+r2lqB4dCHO9r+wP11i9cDDmKX8LOEwHKmIebjY39xMC
++IQDmNCleDF/4ebrmGfP5uMVCQXlSG3RGf7Hka3RwPuI/iw==
++-----END CERTIFICATE-----
+diff --git a/apps/multiplatform/android/src/main/res/xml/hearth_network_security_config.xml b/apps/multiplatform/android/src/main/res/xml/hearth_network_security_config.xml
+index 33802e8..390b215 100644
+--- a/apps/multiplatform/android/src/main/res/xml/hearth_network_security_config.xml
++++ b/apps/multiplatform/android/src/main/res/xml/hearth_network_security_config.xml
+@@ -1,11 +1,23 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <!--
+-  Network security config for the hearth fork.
++  Network security config для форка hearth.
+ 
+-  The SimpleX core does its own TLS with the relay CA pinned inside the smp:// address,
+-  so this file is not what protects the messenger traffic. It is here to make the
+-  *absence* of anything else explicit: no cleartext anywhere, and no trust in
+-  user-installed CAs, so a corporate/MDM root cannot be used to inspect the app.
++  Трафик мессенджера защищает не этот файл: ядро SimpleX делает свой TLS с отпечатком
++  CA релея, зашитым в адрес `smp://`. Здесь описано всё остальное.
++
++  base-config фиксирует ОТСУТСТВИЕ лишнего: никакого открытого текста и никакого
++  доверия к CA, установленным пользователем, — чтобы корневой сертификат из MDM или
++  корпоративного профиля нельзя было использовать для просмотра трафика приложения.
++
++  domain-config — для device API узла (ADR 0010). Он пинует НАШ CA и только его:
++  публичные удостоверяющие центры для этого хоста не годятся вовсе.
++
++  Почему свой CA, а не Let's Encrypt:
++    * не нужен certbot, который однажды молча не продлится и оставит семью без
++      обновлений ровно тогда, когда обновление нужнее всего;
++    * имя узла не попадёт в публичные Certificate Transparency логи;
++    * это ровно та же модель, что у самого мессенджера: доверяем отпечатку, который
++      принесли лично, а не чужому списку доверенных центров.
+ -->
+ <network-security-config>
+     <base-config cleartextTrafficPermitted="false">
+@@ -13,4 +25,12 @@
+             <certificates src="system" />
+         </trust-anchors>
+     </base-config>
++
++    <domain-config cleartextTrafficPermitted="false">
++        <!-- Заменить на свой node.host при развёртывании другого узла. -->
++        <domain includeSubdomains="false">relay.myhearth.ru</domain>
++        <trust-anchors>
++            <certificates src="@raw/hearth_ca" />
++        </trust-anchors>
++    </domain-config>
+ </network-security-config>
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt
+new file mode 100644
+index 0000000..dcacfab
+--- /dev/null
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt
+@@ -0,0 +1,171 @@
++package chat.hearth
++
++import androidx.compose.foundation.layout.*
++import androidx.compose.foundation.rememberScrollState
++import androidx.compose.foundation.verticalScroll
++import androidx.compose.material.MaterialTheme
++import androidx.compose.material.OutlinedTextField
++import androidx.compose.material.Text
++import androidx.compose.runtime.*
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.text.style.TextAlign
++import chat.simplex.common.model.ChatController
++import chat.simplex.common.ui.theme.DEFAULT_PADDING
++import chat.simplex.common.platform.ColumnWithScrollBar
++import chat.simplex.common.views.helpers.AppBarTitle
++// Секции настроек upstream объявлены БЕЗ package — в корневом пакете (Section.kt),
++// и импортируются именно так. Выглядит странно, но это факт пинованного тега, и
++// повторять его дешевле, чем переносить чужой файл в пакет и получать конфликт при
++// каждом ребейзе.
++import SectionDividerSpaced
++import SectionItemView
++import SectionTextFooter
++import SectionView
++import chat.simplex.common.views.newchat.QRCode
++import kotlinx.coroutines.launch
++
++@Composable
++actual fun HearthNodeSettingsView() {
++  val context = LocalContext.current
++  val scope = rememberCoroutineScope()
++  val status = remember { mutableStateOf<String?>(null) }
++  val busy = remember { mutableStateOf(false) }
++  val inviteName = remember { mutableStateOf("") }
++  val inviteBundle = remember { mutableStateOf<String?>(null) }
++
++  val host = ChatController.appPrefs.hearthUpdateHost.get()
++  val deviceId = ChatController.appPrefs.hearthDeviceId.get()
++
++  ColumnWithScrollBar {
++    AppBarTitle("Домашний узел")
++
++    SectionView("ЭТО УСТРОЙСТВО") {
++      SectionTextFooter(
++        "Заведено как: ${deviceId ?: "не настроено"}\n" +
++          "Узел: ${host ?: "не настроен — отсканируйте QR настроек"}"
++      )
++    }
++    SectionDividerSpaced()
++
++    // --- обновление ---------------------------------------------------------------
++    SectionView("ОБНОВЛЕНИЕ") {
++      SectionItemView(click = {
++        if (busy.value) return@SectionItemView
++        busy.value = true
++        status.value = "спрашиваем узел…"
++        scope.launch {
++          val transport = HearthAndroidUpdateTransport.fromPrefs(context)
++          if (transport == null) {
++            status.value = "узел не настроен: сначала отсканируйте QR настроек"
++            busy.value = false
++            return@launch
++          }
++          val installed = installedVersionCode(context)
++          when (val r = HearthUpdateChecker(transport, installed).check()) {
++            is HearthUpdateCheck.UpToDate ->
++              status.value = "установлена последняя версия ($installed)"
++            is HearthUpdateCheck.Failed ->
++              status.value = "не вышло: ${r.reason}"
++            is HearthUpdateCheck.Available -> {
++              status.value =
++                "есть версия ${r.manifest.versionName}. Загрузка идёт в фоне — " +
++                  "приложение можно свернуть, прогресс виден в шторке."
++              HearthUpdateService.start(context, r.manifest)
++            }
++          }
++          busy.value = false
++        }
++      }) {
++        Text("Проверить обновление", color = MaterialTheme.colors.primary)
++      }
++    }
++    SectionTextFooter(
++      "Обновление приходит с вашего узла, не из магазина приложений. Скачивание идёт " +
++        "в фоне и переживает сворачивание; установку Android всегда показывает своим " +
++        "диалогом — обойти это приложение не может."
++    )
++    SectionDividerSpaced()
++
++    // --- приглашение --------------------------------------------------------------
++    SectionView("НОВОЕ УСТРОЙСТВО") {
++      OutlinedTextField(
++        value = inviteName.value,
++        onValueChange = { inviteName.value = it },
++        label = { Text("Имя, например «Брат — Redmi»") },
++        singleLine = true,
++        modifier = Modifier.fillMaxWidth().padding(horizontal = DEFAULT_PADDING),
++      )
++      SectionItemView(click = {
++        val name = inviteName.value.trim()
++        if (busy.value || name.isEmpty()) return@SectionItemView
++        busy.value = true
++        status.value = "просим узел завести устройство…"
++        scope.launch {
++          val transport = HearthAndroidUpdateTransport.fromPrefs(context)
++          if (transport == null) {
++            status.value = "узел не настроен"
++            busy.value = false
++            return@launch
++          }
++          transport.enroll(name)
++            .onSuccess {
++              inviteBundle.value = it
++              status.value = "готово: покажите QR новому телефону"
++            }
++            .onFailure { status.value = "не вышло: ${it.message}" }
++          busy.value = false
++        }
++      }) {
++        Text("Пригласить устройство", color = MaterialTheme.colors.primary)
++      }
++    }
++    SectionTextFooter(
++      "Узел заведёт отдельную запись со своим ключом, поэтому потерянный телефон " +
++        "можно будет отозвать, не трогая остальные."
++    )
++
++    val bundle = inviteBundle.value
++    if (bundle != null) {
++      Spacer(Modifier.height(DEFAULT_PADDING))
++      QRCode(connReq = bundle, withLogo = false)
++      Text(
++        "QR содержит пароли релеев. Показывайте лично, не пересылайте и не сохраняйте " +
++          "в галерею.",
++        style = MaterialTheme.typography.body2,
++        color = MaterialTheme.colors.error,
++        textAlign = TextAlign.Center,
++        modifier = Modifier.fillMaxWidth().padding(horizontal = DEFAULT_PADDING),
++      )
++    }
++
++    val text = status.value
++    if (text != null) {
++      Spacer(Modifier.height(DEFAULT_PADDING))
++      Text(
++        text,
++        style = MaterialTheme.typography.body2,
++        textAlign = TextAlign.Center,
++        modifier = Modifier.fillMaxWidth().padding(horizontal = DEFAULT_PADDING),
++      )
++    }
++    Spacer(Modifier.height(DEFAULT_PADDING * 2))
++  }
++}
++
++/**
++ * versionCode установленной сборки.
++ *
++ * Именно code, а не versionName: строку человек пишет руками и может ошибиться, а
++ * code монотонен по требованию Android — на нём и строится сравнение «новее ли».
++ */
++private fun installedVersionCode(context: android.content.Context): Int = runCatching {
++  val info = context.packageManager.getPackageInfo(context.packageName, 0)
++  if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
++    info.longVersionCode.toInt()
++  } else {
++    @Suppress("DEPRECATION")
++    info.versionCode
++  }
++}.getOrDefault(0)
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdate.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdate.android.kt
+new file mode 100644
+index 0000000..c84fdcf
+--- /dev/null
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdate.android.kt
+@@ -0,0 +1,185 @@
++package chat.hearth
++
++import android.content.Context
++import chat.simplex.common.model.ChatController
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import java.io.File
++import java.net.HttpURLConnection
++import java.net.URL
++import java.security.MessageDigest
++
++/**
++ * Транспорт обновлений поверх `HttpURLConnection`.
++ *
++ * Никакого HTTP-клиента в зависимостях: ТЗ §8.3 запрещает добавлять SDK, а
++ * `HttpURLConnection` есть в самой платформе. Того, что он умеет, здесь достаточно.
++ */
++class HearthAndroidUpdateTransport(
++  private val context: Context,
++  /** Хост узла — тот же, что в адресе релея. Берётся из bundle, а не из манифеста. */
++  private val nodeHost: String,
++  private val port: Int = DEFAULT_PORT,
++  /** Токен устройства из bundle. Без него эндпоинт не отдаёт ничего. */
++  private val token: String,
++) : HearthUpdateTransport {
++
++  override suspend fun fetchManifest(): Result<String> = withContext(Dispatchers.IO) {
++    runCatching {
++      // `use` здесь не годится: HttpURLConnection не Closeable, у него disconnect().
++      val conn = open("$BASE/manifest.json")
++      try {
++        val code = conn.responseCode
++        if (code != 200) throw IllegalStateException("узел ответил $code")
++        // Манифест — маленький документ. Ограничение стоит, чтобы подменённый или
++        // сломанный эндпоинт не заставил телефон читать поток без конца.
++        conn.inputStream.use { it.readBoundedText(MANIFEST_LIMIT_BYTES) }
++      } finally {
++        conn.disconnect()
++      }
++    }
++  }
++
++  override suspend fun download(
++    file: String,
++    expectedSha256: String,
++    onProgress: (Long, Long) -> Unit,
++  ): HearthDownloadResult = withContext(Dispatchers.IO) {
++    // filesDir, а не cacheDir: систему никто не просил чистить кэш посреди загрузки
++    // 248-мегабайтного файла, но она вправе. Плюс FileProvider уже покрывает filesDir
++    // (`file_paths.xml`, `my_files`), значит намерение установки заработает без правок.
++    val dir = File(context.filesDir, "hearth-update").apply { mkdirs() }
++    val target = File(dir, "hearth-update.apk")
++    runCatching {
++      // Докачка: если файл уже частично лежит, просим остаток через Range. Обновление
++      // весит сотни мегабайт, а телефон в дороге теряет сеть постоянно.
++      val already = if (target.exists()) target.length() else 0L
++      val conn = open("$BASE/$file")
++      try {
++        if (already > 0) conn.setRequestProperty("Range", "bytes=$already-")
++        val code = conn.responseCode
++        val resuming = code == 206
++        // 416 означает «этот кусок уже за концом файла» — почти всегда потому, что
++        // недокачанный остаток от ПРЕДЫДУЩЕЙ, более старой версии длиннее новой.
++        // Начинаем с нуля, а не сдаёмся.
++        if (code == 416) {
++          target.delete()
++          throw IllegalStateException("остаток от прошлой версии не подошёл, начните заново")
++        }
++        if (code != 200 && code != 206) throw IllegalStateException("узел ответил $code")
++        if (already > 0 && !resuming) target.delete()
++
++        val total = conn.contentLengthLong.let {
++          if (it > 0) it + (if (resuming) already else 0) else -1L
++        }
++        var done = if (resuming) already else 0L
++
++        conn.inputStream.use { input ->
++          java.io.FileOutputStream(target, resuming).use { out ->
++            val buf = ByteArray(64 * 1024)
++            while (true) {
++              val n = input.read(buf)
++              if (n < 0) break
++              out.write(buf, 0, n)
++              done += n
++              onProgress(done, total)
++            }
++            // Принудительный сброс на диск: иначе внезапная перезагрузка телефона
++            // оставит файл, который выглядит целым, а хеш не сойдётся.
++            out.fd.sync()
++          }
++        }
++      } finally {
++        conn.disconnect()
++      }
++
++      // Проверка целостности. Подмену APK по дороге поймал бы и сам Android при
++      // установке — обновление обязано быть подписано тем же ключом, иначе установка
++      // отклоняется. Но битую докачку он не поймает, а хеш поймает.
++      val actual = target.sha256Hex()
++      if (!actual.equals(expectedSha256, ignoreCase = true)) {
++        target.delete()
++        throw IllegalStateException("sha256 не совпал: ожидали $expectedSha256, получили $actual")
++      }
++      HearthDownloadResult.Ready(target.absolutePath) as HearthDownloadResult
++    }.getOrElse { e ->
++      HearthDownloadResult.Failed(e.message ?: "загрузка не удалась")
++    }
++  }
++
++  override suspend fun enroll(name: String): Result<String> = withContext(Dispatchers.IO) {
++    runCatching {
++      val conn = open("/enroll")
++      try {
++        conn.requestMethod = "POST"
++        conn.doOutput = true
++        conn.setRequestProperty("Content-Type", "application/json")
++        // Имя экранируем через сериализатор, а не склейкой строк: имя вводит человек,
++        // и кавычка в нём не должна ломать документ.
++        val body = kotlinx.serialization.json.Json.encodeToString(
++          kotlinx.serialization.json.JsonObject.serializer(),
++          kotlinx.serialization.json.JsonObject(
++            mapOf("name" to kotlinx.serialization.json.JsonPrimitive(name))
++          ),
++        )
++        conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
++        val code = conn.responseCode
++        if (code == 409) throw IllegalStateException("узел отказал: лимит устройств или такое имя уже есть")
++        if (code != 200) throw IllegalStateException("узел ответил $code")
++        conn.inputStream.use { it.readBoundedText(BUNDLE_LIMIT_BYTES) }
++      } finally {
++        conn.disconnect()
++      }
++    }
++  }
++
++  private fun open(path: String): HttpURLConnection =
++    (URL("https://$nodeHost:$port$path").openConnection() as HttpURLConnection).apply {
++      // Токен заголовком, а не в URL: URL оседает в логах прокси и в истории.
++      setRequestProperty("X-Hearth-Device-Token", token)
++      connectTimeout = 15_000
++      readTimeout = 60_000
++      instanceFollowRedirects = false
++    }
++
++  companion object {
++    const val DEFAULT_PORT = 7444
++    private const val BASE = "/updates"
++    private const val MANIFEST_LIMIT_BYTES = 64 * 1024
++    private const val BUNDLE_LIMIT_BYTES = 64 * 1024
++
++    /** Транспорт, настроенный по тому, что записал импорт bundle. */
++    fun fromPrefs(context: Context): HearthAndroidUpdateTransport? {
++      val host = ChatController.appPrefs.hearthUpdateHost.get()?.ifBlank { null } ?: return null
++      val token = ChatController.appPrefs.hearthUpdateToken.get()?.ifBlank { null } ?: return null
++      // Порт тоже из bundle: узел может быть проброшен снаружи не на 7444.
++      val port = ChatController.appPrefs.hearthUpdatePort.get()?.toIntOrNull() ?: DEFAULT_PORT
++      return HearthAndroidUpdateTransport(context, host, port, token)
++    }
++  }
++}
++
++private fun java.io.InputStream.readBoundedText(limit: Int): String {
++  val out = java.io.ByteArrayOutputStream()
++  val buf = ByteArray(8 * 1024)
++  while (out.size() < limit) {
++    val n = read(buf)
++    if (n < 0) break
++    out.write(buf, 0, n)
++  }
++  if (out.size() >= limit) throw IllegalStateException("манифест длиннее $limit байт")
++  return out.toString(Charsets.UTF_8.name())
++}
++
++private fun File.sha256Hex(): String {
++  val digest = MessageDigest.getInstance("SHA-256")
++  inputStream().use { input ->
++    val buf = ByteArray(64 * 1024)
++    while (true) {
++      val n = input.read(buf)
++      if (n < 0) break
++      digest.update(buf, 0, n)
++    }
++  }
++  return digest.digest().joinToString("") { "%02x".format(it) }
++}
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdateService.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdateService.android.kt
+new file mode 100644
+index 0000000..466f70a
+--- /dev/null
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdateService.android.kt
+@@ -0,0 +1,212 @@
++package chat.hearth
++
++import android.app.Notification
++import android.app.NotificationChannel
++import android.app.NotificationManager
++import android.app.PendingIntent
++import android.app.Service
++import android.content.Context
++import android.content.Intent
++import android.os.Build
++import android.os.IBinder
++import androidx.core.app.NotificationCompat
++import androidx.core.content.FileProvider
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.cancel
++import kotlinx.coroutines.launch
++import java.io.File
++
++/**
++ * Фоновая загрузка обновления.
++ *
++ * # Почему сервис, а не просто корутина
++ *
++ * Требование было прямым: «загрузка продолжается, даже если приложение свернуть».
++ * Обычная корутина в Activity умирает вместе с ней, а работа в фоне без видимого
++ * уведомления Android убивает сам — начиная с Android 8 это не разрешено.
++ * Foreground-сервис с уведомлением о прогрессе — единственный способ, который система
++ * не прерывает.
++ *
++ * # Чего сервис НЕ делает и не может
++ *
++ * Не устанавливает APK молча. Android показывает системный диалог «Установить?»
++ * обязательно, и в этот момент приложение перезапускается. Обойти это может только
++ * device-owner или системное приложение, то есть телефон под корпоративным
++ * управлением. Поэтому сценарий такой: скачалось в фоне → уведомление «готово» →
++ * человек нажимает один раз.
++ *
++ * Подмену APK по дороге ловит сам Android: обновление обязано быть подписано тем же
++ * ключом, иначе установка отклоняется. Хеш из манифеста проверяется здесь ради другого —
++ * битой докачки, которую подпись не заметит, пока не станет поздно.
++ */
++class HearthUpdateService : Service() {
++
++  private val scope = CoroutineScope(Dispatchers.IO + Job())
++  private var job: Job? = null
++
++  override fun onBind(intent: Intent?): IBinder? = null
++
++  override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
++    if (intent?.action == ACTION_CANCEL) {
++      job?.cancel()
++      stopSelf()
++      return START_NOT_STICKY
++    }
++
++    val file = intent?.getStringExtra(EXTRA_FILE)
++    val sha256 = intent?.getStringExtra(EXTRA_SHA256)
++    val version = intent?.getStringExtra(EXTRA_VERSION) ?: "?"
++    if (file == null || sha256 == null) {
++      stopSelf()
++      return START_NOT_STICKY
++    }
++
++    createChannel()
++    startForeground(NOTIFICATION_ID, progressNotification(version, 0, -1))
++
++    // Один запуск за раз: две параллельные загрузки одного файла подрались бы за него.
++    if (job?.isActive == true) return START_NOT_STICKY
++
++    job = scope.launch {
++      val transport = HearthAndroidUpdateTransport.fromPrefs(applicationContext)
++      if (transport == null) {
++        notify(doneNotification(NO_NODE, null))
++        stopSelf()
++        return@launch
++      }
++
++      var lastShown = -1
++      val result = transport.download(file, sha256) { done, total ->
++        // Уведомление перерисовывается только когда меняется целый процент: иначе
++        // на быстрой сети шторка обновляется сотни раз в секунду и телефон тормозит.
++        val pct = if (total > 0) ((done * 100) / total).toInt() else -1
++        if (pct != lastShown) {
++          lastShown = pct
++          notify(progressNotification(version, pct, total))
++        }
++      }
++
++      when (result) {
++        is HearthDownloadResult.Ready -> notify(doneNotification(readyText(version), result.path))
++        is HearthDownloadResult.Failed -> notify(doneNotification(failedText(result.reason), null))
++      }
++      stopForeground(STOP_FOREGROUND_DETACH)
++      stopSelf()
++    }
++    return START_REDELIVER_INTENT
++  }
++
++  override fun onDestroy() {
++    scope.cancel()
++    super.onDestroy()
++  }
++
++  // --- уведомления ---------------------------------------------------------------
++
++  private fun createChannel() {
++    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
++    val mgr = getSystemService(NotificationManager::class.java)
++    if (mgr.getNotificationChannel(CHANNEL) != null) return
++    mgr.createNotificationChannel(
++      NotificationChannel(CHANNEL, "Обновление Hearth", NotificationManager.IMPORTANCE_LOW).apply {
++        description = "Загрузка новой версии приложения с домашнего узла"
++        setShowBadge(false)
++      }
++    )
++  }
++
++  private fun base(): NotificationCompat.Builder =
++    NotificationCompat.Builder(this, CHANNEL)
++      .setSmallIcon(android.R.drawable.stat_sys_download)
++      .setOnlyAlertOnce(true)
++      .setOngoing(false)
++
++  private fun progressNotification(version: String, pct: Int, total: Long): Notification {
++    val cancel = PendingIntent.getService(
++      this,
++      0,
++      Intent(this, HearthUpdateService::class.java).setAction(ACTION_CANCEL),
++      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
++    )
++    return base()
++      .setContentTitle("Загрузка Hearth $version")
++      .setContentText(
++        if (total > 0) "${pct}% из ${total / 1024 / 1024} МБ" else "соединяемся с узлом…"
++      )
++      .setProgress(100, pct.coerceAtLeast(0), pct < 0)
++      .setOngoing(true)
++      .addAction(0, "Отменить", cancel)
++      .build()
++  }
++
++  private fun doneNotification(text: String, path: String?): Notification {
++    val b = base()
++      .setSmallIcon(android.R.drawable.stat_sys_download_done)
++      .setContentTitle("Hearth")
++      .setContentText(text)
++      .setStyle(NotificationCompat.BigTextStyle().bigText(text))
++      .setAutoCancel(true)
++    if (path != null) {
++      b.setContentIntent(
++        PendingIntent.getActivity(
++          this,
++          1,
++          installIntent(this, File(path)),
++          PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
++        )
++      )
++    }
++    return b.build()
++  }
++
++  private fun notify(n: Notification) {
++    getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, n)
++  }
++
++  private fun readyText(version: String) =
++    "Версия $version скачана. Нажмите, чтобы установить — Android покажет свой диалог, " +
++      "приложение при этом перезапустится."
++
++  private fun failedText(reason: String) = "Обновление не скачалось: $reason"
++
++  companion object {
++    private const val CHANNEL = "hearth_update"
++    private const val NOTIFICATION_ID = 4201
++    private const val ACTION_CANCEL = "chat.hearth.CANCEL_UPDATE"
++    private const val EXTRA_FILE = "file"
++    private const val EXTRA_SHA256 = "sha256"
++    private const val EXTRA_VERSION = "version"
++    private const val NO_NODE =
++      "Узел не настроен: сначала отсканируйте QR настроек узла."
++
++    /** Запустить загрузку. Сервис сам покажет прогресс и переживёт сворачивание. */
++    fun start(context: Context, manifest: HearthUpdateManifest) {
++      val intent = Intent(context, HearthUpdateService::class.java)
++        .putExtra(EXTRA_FILE, manifest.file)
++        .putExtra(EXTRA_SHA256, manifest.sha256)
++        .putExtra(EXTRA_VERSION, manifest.versionName)
++      androidx.core.content.ContextCompat.startForegroundService(context, intent)
++    }
++
++    /**
++     * Намерение установки.
++     *
++     * Через FileProvider: с Android 7 передавать `file://` другому приложению нельзя,
++     * система бросает FileUriExposedException. Authority — тот же, что объявлен в
++     * манифесте (`${provider_authorities}`).
++     */
++    fun installIntent(context: Context, apk: File): Intent {
++      val uri = FileProvider.getUriForFile(
++        context,
++        "${context.packageName}.provider",
++        apk,
++      )
++      return Intent(Intent.ACTION_VIEW)
++        .setDataAndType(uri, "application/vnd.android.package-archive")
++        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
++        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++    }
++  }
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthApplier.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthApplier.kt
+index 2f4623e..9999047 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthApplier.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthApplier.kt
+@@ -118,4 +118,12 @@ class HearthCoreApplier : HearthBundleApplier {
+     ChatController.appPrefs.hearthDeviceId.set(deviceId)
+     ChatController.appPrefs.hearthEnrolledAt.set(issued)
+   }
++
++  override suspend fun rememberNode(node: HearthNodeApi?) {
++    // Пишем даже null: bundle, выданный узлом без device API, должен СТИРАТЬ старые
++    // координаты, а не оставлять устройство стучаться туда, куда его больше не звали.
++    ChatController.appPrefs.hearthUpdateHost.set(node?.host)
++    ChatController.appPrefs.hearthUpdateToken.set(node?.token)
++    ChatController.appPrefs.hearthUpdatePort.set(node?.port?.toString())
++  }
+ }
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthBundle.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthBundle.kt
+index b27ffef..372d35c 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthBundle.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthBundle.kt
+@@ -29,6 +29,13 @@ data class HearthBundle(
+   val net: HearthNetPrefs,
+   val issued: String,
+   val device: String,
++  /**
++   * Device API узла: откуда брать обновления и свежие TURN-креды.
++   *
++   * `null` — узел без device API. Такое устройство живёт как раньше, но его звонки
++   * сломаются при следующей ротации TURN-секрета, и bundle придётся выдать заново.
++   */
++  val node: HearthNodeApi? = null,
+ ) {
+   companion object {
+     const val SUPPORTED_VERSION = 1
+@@ -75,6 +82,21 @@ data class HearthBundle(
+   fun host(): String? = smp.firstOrNull()?.let { hostOf(it) }
+ }
+ 
++/**
++ * Адрес device API и токен ЭТОГО устройства.
++ *
++ * Хост берётся отсюда — из bundle, который человек отсканировал лично, — и больше
++ * ниоткуда. В частности, не из документов, которые сам этот API потом отдаёт:
++ * подменённый манифест обновления иначе увёл бы загрузку на чужой сервер.
++ */
++@Serializable
++data class HearthNodeApi(
++  val host: String,
++  val port: Int,
++  /** Секрет устройства. Уходит заголовком, не в URL: URL оседает в логах. */
++  val token: String,
++)
++
+ @Serializable
+ data class HearthNetPrefs(
+   @SerialName("privateRouting") val privateRouting: String,
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
+index f155141..2bed9ee 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
+@@ -36,6 +36,14 @@ interface HearthBundleApplier {
+ 
+   /** Persist which device id this install was enrolled as, for support and revocation. */
+   suspend fun rememberDevice(deviceId: String, issued: String)
++
++  /**
++   * Запомнить device API узла: обновления и свежие TURN-креды.
++   *
++   * `null` — узел без device API. Тогда устройство работает как раньше, но его звонки
++   * сломаются при следующей ротации TURN-секрета (см. ADR 0010).
++   */
++  suspend fun rememberNode(node: HearthNodeApi?)
+ }
+ 
+ /**
+@@ -56,6 +64,7 @@ class HearthOnboardingImporter(private val applier: HearthBundleApplier) {
+       applier.setServers(servers)
+       applier.applyNetworkDefaults(bundle.net)
+       applier.rememberDevice(bundle.device, bundle.issued)
++      applier.rememberNode(bundle.node)
+       HearthImportResult.Applied(servers, bundle.device) as HearthImportResult
+     }.getOrElse { error ->
+       HearthImportResult.Rejected(error.message ?: "could not apply the bundle")
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthSettings.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthSettings.kt
+new file mode 100644
+index 0000000..70836cb
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthSettings.kt
+@@ -0,0 +1,14 @@
++package chat.hearth
++
++import androidx.compose.runtime.Composable
++
++/**
++ * Экран «Домашний узел»: обновление и приглашение нового устройства (ADR 0010).
++ *
++ * `expect`, потому что вызывается из общего кода настроек, а реализован может быть
++ * только платформенно: фоновая загрузка, установка APK и `packageManager` — всё это
++ * Android. На десктопе пункт есть, но пустой: обновлять там нечего, десктопная сборка
++ * этого форка не выпускается.
++ */
++@Composable
++expect fun HearthNodeSettingsView()
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthUpdate.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthUpdate.kt
+new file mode 100644
+index 0000000..78cb71b
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthUpdate.kt
+@@ -0,0 +1,149 @@
++package chat.hearth
++
++import kotlinx.serialization.Serializable
++import kotlinx.serialization.json.Json
++
++/**
++ * Обновление приложения со СВОЕГО узла.
++ *
++ * # Почему это не противоречит patches/0010-no-updates.md
++ *
++ * 0010 выключает проверку обновлений upstream, и причина там названа точно:
++ * «проверка обновлений — исходящее соединение К ТРЕТЬЕЙ СТОРОНЕ, то есть ровно то,
++ * чего в контуре быть не должно, плюс она раскрывает факт использования сборки».
++ *
++ * Узел семьи третьей стороной не является. Телефон и так держит с ним постоянное
++ * соединение — это режим доставки сообщений. Поэтому запрос обновления не добавляет
++ * наблюдателю ни одного нового факта: он и так видит, что устройство говорит с узлом.
++ *
++ * Что этот модуль всё-таки стоит, и это надо знать:
++ *
++ *  - приложению нужно разрешение `REQUEST_INSTALL_PACKAGES` — право ставить
++ *    произвольные APK. patches/0005 разрешения наоборот вычищает, так что это размен,
++ *    а не мелочь;
++ *  - на узле появляется публично доступный HTTP-эндпоинт, которого раньше не было
++ *    (ADR 0007 сводил публичную поверхность к релеям и TURN).
++ *
++ * Взамен выполняется требование ТЗ §1.4: security-релиз должен попасть в контур за
++ * ≤ 7 дней. Раздача «приходите домой и обновляйтесь по LAN» этого не даёт тому, кто
++ * уехал, а именно он и остаётся с дырой.
++ *
++ * # Чего Android не позволит
++ *
++ * Установить APK без нажатия человека нельзя — системный диалог обязателен для всех,
++ * кроме device-owner и системных приложений. Скачивание идёт в фоне и переживает
++ * сворачивание; установка всегда требует одного касания.
++ */
++@Serializable
++data class HearthUpdateManifest(
++  /** Версия формата самого манифеста, а не приложения. */
++  val v: Int,
++  val versionName: String,
++  val versionCode: Int,
++  /** sha256 файла APK в нижнем регистре hex. */
++  val sha256: String,
++  /** Путь к APK относительно того же эндпоинта. Абсолютные URL запрещены — см. validate. */
++  val file: String,
++  val notes: String = "",
++) {
++  companion object {
++    const val SUPPORTED_VERSION = 1
++
++    private val json = Json {
++      ignoreUnknownKeys = true
++      isLenient = false
++    }
++
++    fun parse(payload: String): Result<HearthUpdateManifest> = runCatching {
++      val manifest = json.decodeFromString(serializer(), payload)
++      manifest.validate().getOrThrow()
++      manifest
++    }
++  }
++
++  fun validate(): Result<Unit> = runCatching {
++    require(v == SUPPORTED_VERSION) { "неизвестная версия манифеста обновления: $v" }
++    require(versionCode > 0) { "versionCode должен быть положительным" }
++    require(versionName.isNotBlank()) { "пустой versionName" }
++    require(SHA256.matches(sha256)) { "sha256 должен быть 64 hex-символами" }
++
++    // Имя файла, а не URL. Манифест приходит с узла, но подставлять из него
++    // произвольный адрес нельзя: подменённый манифест увёл бы загрузку на чужой
++    // сервер. Адрес узла клиент знает сам — из bundle, а не из этого документа.
++    require(file.isNotBlank()) { "пустое имя файла" }
++    require(!file.contains("://")) { "в манифесте должно быть имя файла, а не URL" }
++    require(!file.contains("..") && !file.startsWith("/")) { "недопустимое имя файла: $file" }
++    require(file.endsWith(".apk")) { "ожидается .apk" }
++  }
++
++  /**
++   * Новее ли это того, что установлено.
++   *
++   * Сравнение по `versionCode`, а не по строке версии: строку человек пишет руками, а
++   * versionCode монотонен по требованию Android. Строго больше — равное не предлагаем.
++   */
++  fun isNewerThan(installedVersionCode: Int): Boolean = versionCode > installedVersionCode
++}
++
++private val SHA256 = Regex("^[0-9a-f]{64}$")
++
++/** Чем закончилась проверка обновления. */
++sealed interface HearthUpdateCheck {
++  data object UpToDate : HearthUpdateCheck
++  data class Available(val manifest: HearthUpdateManifest) : HearthUpdateCheck
++  data class Failed(val reason: String) : HearthUpdateCheck
++}
++
++/** Чем закончилась загрузка. */
++sealed interface HearthDownloadResult {
++  /** Файл скачан и его sha256 совпал с манифестом. Ставить — отдельное действие человека. */
++  data class Ready(val path: String) : HearthDownloadResult
++  data class Failed(val reason: String) : HearthDownloadResult
++}
++
++/**
++ * Транспорт до узла. Реализация платформенная: на Android это HttpURLConnection,
++ * никаких новых зависимостей (ТЗ §8.3 запрещает добавлять SDK).
++ */
++interface HearthUpdateTransport {
++  /** GET манифеста. Токен устройства уходит заголовком, не в URL: URL попадает в логи. */
++  suspend fun fetchManifest(): Result<String>
++
++  /**
++   * Скачать файл, сообщая прогресс. Реализация обязана быть докачиваемой и жить в
++   * foreground-сервисе: пользователь свернёт приложение, и загрузка не должна умирать.
++   */
++  suspend fun download(file: String, expectedSha256: String, onProgress: (Long, Long) -> Unit): HearthDownloadResult
++
++  /**
++   * Попросить узел завести НОВОЕ устройство и вернуть для него bundle.
++   *
++   * Это и есть самостоятельное заведение телефонов. Оно не раздаёт чужой секрет:
++   * узел заводит отдельную запись со СВОИМ токеном, поэтому потерянный телефон
++   * отзывается поштучно. Секретность от этого не меняется — пароль релея и так лежит
++   * на каждом настроенном устройстве, внутри адреса `smp://`. Меняется учёт.
++   */
++  suspend fun enroll(name: String): Result<String>
++}
++
++/**
++ * Проверка обновления. Чистая оркестрация, без платформенных типов — тестируется на JVM.
++ */
++class HearthUpdateChecker(
++  private val transport: HearthUpdateTransport,
++  private val installedVersionCode: Int,
++) {
++  suspend fun check(): HearthUpdateCheck {
++    val payload = transport.fetchManifest().getOrElse { e ->
++      return HearthUpdateCheck.Failed(e.message ?: "узел недоступен")
++    }
++    val manifest = HearthUpdateManifest.parse(payload).getOrElse { e ->
++      return HearthUpdateCheck.Failed(e.message ?: "манифест не разобран")
++    }
++    return if (manifest.isNewerThan(installedVersionCode)) {
++      HearthUpdateCheck.Available(manifest)
++    } else {
++      HearthUpdateCheck.UpToDate
++    }
++  }
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+index 74940cc..74912dc 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+@@ -148,6 +148,12 @@ class AppPreferences {
+   // Не секрет — секреты лежат в адресах серверов.
+   val hearthDeviceId = mkStrPreference(SHARED_PREFS_HEARTH_DEVICE_ID, null)
+   val hearthEnrolledAt = mkStrPreference(SHARED_PREFS_HEARTH_ENROLLED_AT, null)
++  // hearth: координаты device API узла — обновления и свежие TURN-креды (ADR 0010).
++  // Приходят с bundle и больше ниоткуда: подменённый ответ самого API не должен уметь
++  // переписать адрес, по которому к нему же и ходят.
++  val hearthUpdateHost = mkStrPreference(SHARED_PREFS_HEARTH_UPDATE_HOST, null)
++  val hearthUpdatePort = mkStrPreference(SHARED_PREFS_HEARTH_UPDATE_PORT, null)
++  val hearthUpdateToken = mkStrPreference(SHARED_PREFS_HEARTH_UPDATE_TOKEN, null)
+   val chatArchiveTime = mkDatePreference(SHARED_PREFS_CHAT_ARCHIVE_TIME, null)
+   val chatLastStart = mkDatePreference(SHARED_PREFS_CHAT_LAST_START, null)
+   val chatStopped = mkBoolPreference(SHARED_PREFS_CHAT_STOPPED, false)
+@@ -428,6 +434,9 @@ class AppPreferences {
+     private const val SHARED_PREFS_CHAT_ARCHIVE_NAME = "ChatArchiveName"
+     private const val SHARED_PREFS_HEARTH_DEVICE_ID = "HearthDeviceId"
+     private const val SHARED_PREFS_HEARTH_ENROLLED_AT = "HearthEnrolledAt"
++    private const val SHARED_PREFS_HEARTH_UPDATE_HOST = "HearthUpdateHost"
++    private const val SHARED_PREFS_HEARTH_UPDATE_PORT = "HearthUpdatePort"
++    private const val SHARED_PREFS_HEARTH_UPDATE_TOKEN = "HearthUpdateToken"
+     private const val SHARED_PREFS_CHAT_ARCHIVE_TIME = "ChatArchiveTime"
+     private const val SHARED_PREFS_APP_LANGUAGE = "AppLanguage"
+     private const val SHARED_PREFS_APP_UPDATE_CHANNEL = "AppUpdateChannel"
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt
+index bf4f127..458446e 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt
+@@ -148,6 +148,19 @@ fun HelpAndSupportView(
+ 
+     SectionView(stringResource(MR.strings.settings_section_title_contact)) {
+       if (!chatModel.desktopNoUserNoRemote) {
++        // hearth (ADR 0010): обновление с домашнего узла и приглашение нового
++        // устройства. Оба действия иначе требуют человека у терминала с админским
++        // сертификатом — для семьи из двадцати человек это узкое место.
++        if (appPlatform.isAndroid) {
++          SettingsActionItem(
++            painterResource(MR.images.ic_download),
++            "Домашний узел",
++            { ModalManager.start.showModal { chat.hearth.HearthNodeSettingsView() } },
++            textColor = MaterialTheme.colors.primary,
++            disabled = stopped,
++          )
++        }
++
+         // hearth: пункт ведёт в публичную сеть SimpleX через smp6.hearth.invalid.
+         // Операторы выключены, значит кнопка молча не сработает, а её адрес попадает
+         // в dex и валит проверку A5 (ТЗ §1.2). Скрыт, код оставлен на месте.
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthBundleTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthBundleTest.kt
+index 51212dd..4298bfc 100644
+--- a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthBundleTest.kt
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthBundleTest.kt
+@@ -119,10 +119,24 @@ class HearthBundleTest {
+     assertEquals(0, applier.serversCalls, "a bad bundle must not reach the SimpleX core")
+   }
+ 
++  @Test
++  fun bundleWithoutNodeSectionStillImportsAndClearsCoordinates() = kotlinx.coroutines.runBlocking {
++    // Узел без device API — валидный случай (ADR 0010). Импорт обязан пройти, а
++    // координаты обязаны быть перезаписаны в null: устройство не должно продолжать
++    // стучаться туда, куда его больше не звали.
++    val applier = RecordingApplier()
++    val result = HearthOnboardingImporter(applier).import(valid)
++    assertTrue(result is HearthImportResult.Applied)
++    assertEquals(1, applier.nodeCalls, "rememberNode должен вызываться всегда, даже с null")
++    assertEquals(null, applier.node)
++  }
++
+   private class RecordingApplier : HearthBundleApplier {
+     var serversCalls = 0
+     var defaultsCalls = 0
+     var deviceId: String? = null
++    var node: HearthNodeApi? = null
++    var nodeCalls = 0
+ 
+     override suspend fun setServers(servers: HearthServers) {
+       serversCalls++
+@@ -135,5 +149,10 @@ class HearthBundleTest {
+     override suspend fun rememberDevice(deviceId: String, issued: String) {
+       this.deviceId = deviceId
+     }
++
++    override suspend fun rememberNode(node: HearthNodeApi?) {
++      this.node = node
++      nodeCalls++
++    }
+   }
+ }
+diff --git a/apps/multiplatform/common/src/desktopMain/kotlin/chat/hearth/HearthSettings.desktop.kt b/apps/multiplatform/common/src/desktopMain/kotlin/chat/hearth/HearthSettings.desktop.kt
+new file mode 100644
+index 0000000..24b3dbd
+--- /dev/null
++++ b/apps/multiplatform/common/src/desktopMain/kotlin/chat/hearth/HearthSettings.desktop.kt
+@@ -0,0 +1,14 @@
++package chat.hearth
++
++import androidx.compose.runtime.Composable
++
++/**
++ * На десктопе пусто.
++ *
++ * Обновление ставится через системный установщик пакетов, а не приложением, и
++ * десктопная сборка этого форка не выпускается вовсе. Пустая реализация нужна только
++ * чтобы общий код компилировался под все цели — удалять `expect` ради этого дороже.
++ */
++@Composable
++actual fun HearthNodeSettingsView() {
++}
+diff --git a/apps/multiplatform/gradle.properties b/apps/multiplatform/gradle.properties
+index 61ea0f7..6f67a2b 100644
+--- a/apps/multiplatform/gradle.properties
++++ b/apps/multiplatform/gradle.properties
+@@ -24,8 +24,10 @@ android.nonTransitiveRClass=true
+ kotlin.mpp.androidSourceSetLayoutVersion=2
+ kotlin.jvm.target=11
+ 
+-android.version_name=7.0.1
+-android.version_code=372
++# hearth: своя нумерация поверх тега upstream. versionCode обязан расти
++# монотонно — по нему приложение решает, новее ли сборка на узле.
++android.version_name=7.0.1-h2
++android.version_code=373
+ 
+ desktop.version_name=7.0.1
+ desktop.version_code=157

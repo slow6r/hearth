@@ -1,0 +1,76 @@
+From 8fd96b827ca7585c28b06464a594089df5fa718a Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Thu, 10 Sep 2026 09:53:08 +0300
+Subject: [PATCH 07/24] =?UTF-8?q?0009:=20=D0=B1=D1=80=D0=B5=D0=BD=D0=B4?=
+ =?UTF-8?q?=D0=B8=D0=BD=D0=B3=20=D0=B8=20applicationId?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+applicationId = ru.myhearth.chat, чтобы форк ставился РЯДОМ со стоковым
+SimpleX и не конфликтовал с ним при обновлениях. Provider authority тоже
+свой — иначе два приложения не встанут на одно устройство.
+
+namespace НЕ меняем: это пакет генерируемого R и всей кодовой базы, смена
+дала бы многотысячный дифф при нулевой пользе (ТЗ §8.5).
+
+Открытый вопрос ТЗ §15.5 закрыт: идентификатор нейтральный, без привязки
+к юрлицу. Менять после раскатки нельзя — переустановка на всех телефонах
+с потерей базы.
+---
+ apps/multiplatform/android/build.gradle.kts      | 16 +++++++++++++---
+ .../src/commonMain/resources/MR/base/strings.xml |  2 +-
+ 2 files changed, 14 insertions(+), 4 deletions(-)
+
+diff --git a/apps/multiplatform/android/build.gradle.kts b/apps/multiplatform/android/build.gradle.kts
+index 419fef9..94794db 100644
+--- a/apps/multiplatform/android/build.gradle.kts
++++ b/apps/multiplatform/android/build.gradle.kts
+@@ -12,7 +12,15 @@ android {
+     compileSdk = 35
+ 
+     defaultConfig {
+-        applicationId = "chat.simplex.app"
++        // hearth (patches/0009-branding.md): свой applicationId, чтобы форк ставился
++        // РЯДОМ со стоковым SimpleX и не конфликтовал с ним при обновлениях.
++        //
++        // Решается один раз и навсегда (ТЗ §15.5): смена applicationId после первой
++        // раскатки = переустановка на всех телефонах с потерей базы. Нейтральный, без
++        // привязки к юрлицу, совпадает с доменом узла.
++        applicationId = "ru.myhearth.chat"
++        // namespace НЕ меняем: это пакет генерируемого класса R и всей кодовой базы,
++        // его смена — многотысячный дифф и дорогой ребейз при нулевой пользе.
+         namespace = "chat.simplex.app"
+         minSdk = 26
+         targetSdk = 35
+@@ -31,7 +39,9 @@ android {
+             }
+         }
+         manifestPlaceholders["app_name"] = "@string/app_name"
+-        manifestPlaceholders["provider_authorities"] = "chat.simplex.app.provider"
++        // Authority провайдера обязан быть уникальным на устройстве: со стоковым
++        // SimpleX иначе не встанет рядом.
++        manifestPlaceholders["provider_authorities"] = "ru.myhearth.chat.provider"
+         manifestPlaceholders["extract_native_libs"] = rootProject.extra["compression.level"] as Int != 0
+     }
+ 
+@@ -56,7 +66,7 @@ android {
+             isDebuggable = rootProject.extra["enable_debuggable"] as Boolean
+             manifestPlaceholders["app_name"] = rootProject.extra["app.name"] as String
+             // Provider can"t be the same for different apps on the same device
+-            manifestPlaceholders["provider_authorities"] = "chat.simplex.app${rootProject.extra["application_id.suffix"]}.provider"
++            manifestPlaceholders["provider_authorities"] = "ru.myhearth.chat${rootProject.extra["application_id.suffix"]}.provider"
+         }
+         release {
+             isMinifyEnabled = false
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/base/strings.xml b/apps/multiplatform/common/src/commonMain/resources/MR/base/strings.xml
+index 739467b..a8cb707 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/MR/base/strings.xml
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/base/strings.xml
+@@ -1,5 +1,5 @@
+ <resources>
+-  <string name="app_name">SimpleX</string>
++  <string name="app_name">Hearth</string>
+ 
+   <string name="thousand_abbreviation">k</string>
+ 

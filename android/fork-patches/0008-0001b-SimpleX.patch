@@ -1,0 +1,196 @@
+From bc906c4f594fc7e317a6179f101ffb781c827a29 Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Thu, 10 Sep 2026 10:00:16 +0300
+Subject: [PATCH 08/24] =?UTF-8?q?0001b:=20=D1=83=D0=B1=D1=80=D0=B0=D1=82?=
+ =?UTF-8?q?=D1=8C=20=D0=B0=D0=B4=D1=80=D0=B5=D1=81=D0=B0=20=D0=BF=D1=83?=
+ =?UTF-8?q?=D0=B1=D0=BB=D0=B8=D1=87=D0=BD=D0=BE=D0=B9=20=D1=81=D0=B5=D1=82?=
+ =?UTF-8?q?=D0=B8=20SimpleX=20=D0=B8=D0=B7=20=D1=81=D0=B1=D0=BE=D1=80?=
+ =?UTF-8?q?=D0=BA=D0=B8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Поймано проверкой A5 (scripts/verify-apk.sh): в dex оставался
+smp8.simplex.im. Адреса сидели в трёх ролях:
+
+  * данные для превью Compose — безвредны, но в APK попадают;
+  * кнопка «написать основателю» в настройках — живая кнопка, которая
+    в этом контуре молча не сработает: операторы выключены;
+  * промо-ссылки на экране «Что нового» и краудфандинг.
+
+Кнопка скрыта выключателем в HearthPresets, код на месте. Остальные 13
+адресов заменены на .invalid — зарезервированный домен, который не
+резолвится никогда (ТЗ §1.2, §8.2).
+
+verify-apk.sh теперь проходит целиком.
+---
+ .../commonMain/kotlin/chat/hearth/HearthPresets.kt   | 10 ++++++++++
+ .../kotlin/chat/simplex/common/model/SimpleXAPI.kt   | 12 ++++++------
+ .../views/newchat/ContactConnectionInfoView.kt       |  2 +-
+ .../chat/simplex/common/views/newchat/QRCode.kt      |  2 +-
+ .../simplex/common/views/onboarding/WhatsNewView.kt  |  6 +++---
+ .../common/views/usersettings/SettingsView.kt        |  9 +++++++--
+ 6 files changed, 28 insertions(+), 13 deletions(-)
+
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthPresets.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthPresets.kt
+index f45ada5..9d8413f 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthPresets.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthPresets.kt
+@@ -36,6 +36,16 @@ object HearthPresets {
+    */
+   const val SHOW_SCREEN_PROTECTION_TOGGLE = false
+ 
++  /**
++   * Показывать ли пункты, ведущие в публичную сеть SimpleX («написать основателю»,
++   * краудфандинг и подобное).
++   *
++   * Нет. Операторы выключены, публичные релеи недостижимы, поэтому такая кнопка —
++   * это кнопка, которая молча не сработает. Плюс её адрес — адрес публичной сети,
++   * зашитый в APK, что запрещает ТЗ §1.2 и ловит A5.
++   */
++  const val SHOW_UPSTREAM_LINKS = false
++
+   /** ТЗ §8.2 п.5: private message routing is on by default and not weakened. */
+   const val PRIVATE_ROUTING_DEFAULT = "always"
+ 
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+index 1802390..74940cc 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+@@ -4589,7 +4589,7 @@ data class ServerOperator(
+       operatorTag = OperatorTag.SimpleX,
+       tradeName = "SimpleX Chat",
+       legalName = "SimpleX Chat Ltd",
+-      serverDomains = listOf("simplex.im"),
++      serverDomains = listOf("hearth.invalid"),
+       conditionsAcceptance = ConditionsAcceptance.Accepted(acceptedAt = null, autoAccepted = false),
+       enabled = true,
+       smpRoles = ServerRoles(storage = true, proxy = true, names = true),
+@@ -4849,7 +4849,7 @@ data class UserServer(
+       preset = UserServer(
+         remoteHostId = null,
+         serverId = 1,
+-        server = "smp://abcd@smp8.simplex.im",
++        server = "smp://abcd@smp8.hearth.invalid",
+         preset = true,
+         tested = true,
+         enabled = true,
+@@ -4858,7 +4858,7 @@ data class UserServer(
+       custom = UserServer(
+         remoteHostId = null,
+         serverId = 2,
+-        server = "smp://abcd@smp9.simplex.im",
++        server = "smp://abcd@smp9.hearth.invalid",
+         preset = false,
+         tested = false,
+         enabled = false,
+@@ -4867,7 +4867,7 @@ data class UserServer(
+       untested = UserServer(
+         remoteHostId = null,
+         serverId = 3,
+-        server = "smp://abcd@smp10.simplex.im",
++        server = "smp://abcd@smp10.hearth.invalid",
+         preset = false,
+         tested = null,
+         enabled = true,
+@@ -4876,7 +4876,7 @@ data class UserServer(
+       xftpPreset = UserServer(
+         remoteHostId = null,
+         serverId = 4,
+-        server = "xftp://abcd@xftp8.simplex.im",
++        server = "xftp://abcd@xftp8.hearth.invalid",
+         preset = true,
+         tested = true,
+         enabled = true,
+@@ -5005,7 +5005,7 @@ data class ServerAddress(
+     )
+     val sampleData = ServerAddress(
+       serverProtocol = ServerProtocol.SMP,
+-      hostnames = listOf("smp.simplex.im", "1234.onion"),
++      hostnames = listOf("smp.hearth.invalid", "1234.onion"),
+       port = "",
+       keyHash = "LcJUMfVhwD8yxjAiSaDzzGF3-kLG4Uh0Fl_ZIjrRwjI=",
+       basicAuth = "server_password"
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/ContactConnectionInfoView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/ContactConnectionInfoView.kt
+index f1bd732..5649856 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/ContactConnectionInfoView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/ContactConnectionInfoView.kt
+@@ -208,7 +208,7 @@ private fun PreviewContactConnectionInfoView() {
+   SimpleXTheme {
+     ContactConnectionInfoLayout(
+       chatModel = ChatModel,
+-      connLink = CreatedConnLink("https://simplex.chat/contact#/?v=1&smp=smp%3A%2F%2FPQUV2eL0t7OStZOoAsPEV2QYWt4-xilbakvGUGOItUo%3D%40smp6.simplex.im%2FK1rslx-m5bpXVIdMZg9NLUZ_8JBm8xTt%23MCowBQYDK2VuAyEALDeVe-sG8mRY22LsXlPgiwTNs9dbiLrNuA7f3ZMAJ2w%3D", null),
++      connLink = CreatedConnLink("https://simplex.chat/contact#/?v=1&smp=smp%3A%2F%2FPQUV2eL0t7OStZOoAsPEV2QYWt4-xilbakvGUGOItUo%3D%40smp6.hearth.invalid%2FK1rslx-m5bpXVIdMZg9NLUZ_8JBm8xTt%23MCowBQYDK2VuAyEALDeVe-sG8mRY22LsXlPgiwTNs9dbiLrNuA7f3ZMAJ2w%3D", null),
+       showShortLink = remember { mutableStateOf(true) },
+       contactConnection = PendingContactConnection.getSampleData(),
+       focusAlias = false,
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/QRCode.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/QRCode.kt
+index 74c9a55..1289607 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/QRCode.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/QRCode.kt
+@@ -127,6 +127,6 @@ expect fun ImageBitmap.replaceColor(from: Int, to: Int): ImageBitmap
+ @Composable
+ fun PreviewQRCode() {
+   SimpleXTheme {
+-    QRCode(connReq = "https://simplex.chat/contact#/?v=1&smp=smp%3A%2F%2FPQUV2eL0t7OStZOoAsPEV2QYWt4-xilbakvGUGOItUo%3D%40smp6.simplex.im%2FK1rslx-m5bpXVIdMZg9NLUZ_8JBm8xTt%23MCowBQYDK2VuAyEALDeVe-sG8mRY22LsXlPgiwTNs9dbiLrNuA7f3ZMAJ2w%3D")
++    QRCode(connReq = "https://simplex.chat/contact#/?v=1&smp=smp%3A%2F%2FPQUV2eL0t7OStZOoAsPEV2QYWt4-xilbakvGUGOItUo%3D%40smp6.hearth.invalid%2FK1rslx-m5bpXVIdMZg9NLUZ_8JBm8xTt%23MCowBQYDK2VuAyEALDeVe-sG8mRY22LsXlPgiwTNs9dbiLrNuA7f3ZMAJ2w%3D")
+   }
+ }
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/onboarding/WhatsNewView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/onboarding/WhatsNewView.kt
+index 8e54fb4..edbc371 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/onboarding/WhatsNewView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/onboarding/WhatsNewView.kt
+@@ -538,7 +538,7 @@ private val versionDescriptions: List<VersionDescription> = listOf(
+         icon = MR.images.ic_search,
+         titleId = MR.strings.v5_3_discover_join_groups,
+         descrId = MR.strings.v5_3_discover_join_groups_descr,
+-        link = "simplex:/contact#/?v=1-4&smp=smp%3A%2F%2Fu2dS9sG8nMNURyZwqASV4yROM28Er0luVTx5X1CsMrU%3D%40smp4.simplex.im%2FeXSPwqTkKyDO3px4fLf1wx3MvPdjdLW3%23%2F%3Fv%3D1-2%26dh%3DMCowBQYDK2VuAyEAaiv6MkMH44L2TcYrt_CsX3ZvM11WgbMEUn0hkIKTOho%253D%26srv%3Do5vmywmrnaxalvz6wi3zicyftgio6psuvyniis6gco6bp6ekl4cqj4id.onion"
++        link = "simplex:/contact#/?v=1-4&smp=smp%3A%2F%2Fu2dS9sG8nMNURyZwqASV4yROM28Er0luVTx5X1CsMrU%3D%40smp4.hearth.invalid%2FeXSPwqTkKyDO3px4fLf1wx3MvPdjdLW3%23%2F%3Fv%3D1-2%26dh%3DMCowBQYDK2VuAyEAaiv6MkMH44L2TcYrt_CsX3ZvM11WgbMEUn0hkIKTOho%253D%26srv%3Do5vmywmrnaxalvz6wi3zicyftgio6psuvyniis6gco6bp6ekl4cqj4id.onion"
+       ),
+       VersionFeature.FeatureDescription(
+         icon = MR.images.ic_theater_comedy,
+@@ -601,7 +601,7 @@ private val versionDescriptions: List<VersionDescription> = listOf(
+         icon = MR.images.ic_forum,
+         titleId = MR.strings.v5_5_join_group_conversation,
+         descrId = MR.strings.v5_5_join_group_conversation_descr,
+-        link = "simplex:/contact#/?v=1-4&smp=smp%3A%2F%2Fu2dS9sG8nMNURyZwqASV4yROM28Er0luVTx5X1CsMrU%3D%40smp4.simplex.im%2FeXSPwqTkKyDO3px4fLf1wx3MvPdjdLW3%23%2F%3Fv%3D1-2%26dh%3DMCowBQYDK2VuAyEAaiv6MkMH44L2TcYrt_CsX3ZvM11WgbMEUn0hkIKTOho%253D%26srv%3Do5vmywmrnaxalvz6wi3zicyftgio6psuvyniis6gco6bp6ekl4cqj4id.onion"
++        link = "simplex:/contact#/?v=1-4&smp=smp%3A%2F%2Fu2dS9sG8nMNURyZwqASV4yROM28Er0luVTx5X1CsMrU%3D%40smp4.hearth.invalid%2FeXSPwqTkKyDO3px4fLf1wx3MvPdjdLW3%23%2F%3Fv%3D1-2%26dh%3DMCowBQYDK2VuAyEAaiv6MkMH44L2TcYrt_CsX3ZvM11WgbMEUn0hkIKTOho%253D%26srv%3Do5vmywmrnaxalvz6wi3zicyftgio6psuvyniis6gco6bp6ekl4cqj4id.onion"
+       ),
+       VersionFeature.FeatureDescription(
+         icon = MR.images.ic_battery_3_bar,
+@@ -987,7 +987,7 @@ fun shouldShowWhatsNew(m: ChatModel): Boolean {
+ 
+ private const val WEFUNDER_URL = "https://wefunder.com/simplex.chat"
+ 
+-private const val CROWDFUNDING_CONTACT_URI = "simplex:/a#JxGcOA1_QhlmVFzYYabloMbvMZk5Y9d9iS3ITDnhzYo?h=smp11.simplex.im"
++private const val CROWDFUNDING_CONTACT_URI = "simplex:/a#JxGcOA1_QhlmVFzYYabloMbvMZk5Y9d9iS3ITDnhzYo?h=smp11.hearth.invalid"
+ 
+ // the center modal takes the remaining width of the window, so the image is limited to its design width
+ private val MAX_CROWDFUNDING_IMAGE_WIDTH = DEFAULT_MIN_CENTER_MODAL_WIDTH
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt
+index 8c134cb..bf4f127 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt
+@@ -71,7 +71,7 @@ fun SettingsView(chatModel: ChatModel, setPerformLA: (Boolean) -> Unit, close: (
+ }
+ 
+ val simplexTeamUri =
+-  "simplex:/a#lrdvu2d8A1GumSmoKb2krQmtKhWXq-tyGpHuM7aMwsw?h=smp6.simplex.im"
++  "simplex:/a#lrdvu2d8A1GumSmoKb2krQmtKhWXq-tyGpHuM7aMwsw?h=smp6.hearth.invalid"
+ 
+ @Composable
+ fun SettingsLayout(
+@@ -148,7 +148,12 @@ fun HelpAndSupportView(
+ 
+     SectionView(stringResource(MR.strings.settings_section_title_contact)) {
+       if (!chatModel.desktopNoUserNoRemote) {
+-        SettingsActionItem(painterResource(MR.images.ic_tag), stringResource(MR.strings.chat_with_the_founder), { uriHandler.openVerifiedSimplexUri(simplexTeamUri) }, textColor = MaterialTheme.colors.primary, disabled = stopped)
++        // hearth: пункт ведёт в публичную сеть SimpleX через smp6.hearth.invalid.
++        // Операторы выключены, значит кнопка молча не сработает, а её адрес попадает
++        // в dex и валит проверку A5 (ТЗ §1.2). Скрыт, код оставлен на месте.
++        if (chat.hearth.HearthPresets.SHOW_UPSTREAM_LINKS) {
++          SettingsActionItem(painterResource(MR.images.ic_tag), stringResource(MR.strings.chat_with_the_founder), { uriHandler.openVerifiedSimplexUri(simplexTeamUri) }, textColor = MaterialTheme.colors.primary, disabled = stopped)
++        }
+       }
+       SettingsActionItem(painterResource(MR.images.ic_mail), stringResource(MR.strings.send_us_an_email), { uriHandler.openUriCatching("mailto:chat@simplex.chat") }, textColor = MaterialTheme.colors.primary)
+     }

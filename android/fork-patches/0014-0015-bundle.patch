@@ -1,0 +1,356 @@
+From de015b75710be37f0b05a13703f57d98807726f2 Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Thu, 10 Sep 2026 15:07:41 +0300
+Subject: [PATCH 14/24] =?UTF-8?q?0015:=20bundle=20=D0=BF=D1=80=D0=B8=D0=BC?=
+ =?UTF-8?q?=D0=B5=D0=BD=D1=8F=D0=B5=D1=82=D1=81=D1=8F=20=D0=BF=D0=BE=D1=81?=
+ =?UTF-8?q?=D0=BB=D0=B5=20=D1=81=D0=BE=D0=B7=D0=B4=D0=B0=D0=BD=D0=B8=D1=8F?=
+ =?UTF-8?q?=20=D0=BF=D1=80=D0=BE=D1=84=D0=B8=D0=BB=D1=8F,=20=D0=B0=20?=
+ =?UTF-8?q?=D0=BD=D0=B5=20=D0=B4=D0=BE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../chat/hearth/HearthInvite.android.kt       |  5 +-
+ .../kotlin/chat/hearth/HearthImportView.kt    |  3 +-
+ .../kotlin/chat/hearth/HearthInvite.kt        | 11 ++-
+ .../kotlin/chat/hearth/HearthOnboarding.kt    | 49 ++++++++++++++
+ .../chat/simplex/common/model/SimpleXAPI.kt   |  8 +++
+ .../chat/simplex/common/platform/Core.kt      |  3 +
+ .../chat/simplex/common/views/WelcomeView.kt  | 17 ++++-
+ .../kotlin/chat/hearth/HearthInviteTest.kt    | 67 +++++++++----------
+ apps/multiplatform/gradle.properties          |  4 +-
+ 9 files changed, 120 insertions(+), 47 deletions(-)
+
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthInvite.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthInvite.android.kt
+index 90c04c2..8bb529c 100644
+--- a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthInvite.android.kt
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthInvite.android.kt
+@@ -117,9 +117,6 @@ class HearthAndroidClaimTransport : HearthClaimTransport {
+ actual suspend fun hearthAutoSetUp(): HearthClaimResult {
+   val context = chat.simplex.common.platform.androidAppContext
+   val invite = HearthInviteSource.baked(context)
+-  val enroller = HearthSelfEnroller(
+-    HearthAndroidClaimTransport(),
+-    HearthOnboardingImporter(HearthCoreApplier()),
+-  )
++  val enroller = HearthSelfEnroller(HearthAndroidClaimTransport())
+   return enroller.setUp(invite, HearthInviteSource.deviceName())
+ }
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt
+index 98bd4c5..10a63bb 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt
+@@ -36,7 +36,6 @@ import chat.simplex.common.views.onboarding.OnboardingStage
+  */
+ @Composable
+ fun HearthImportView() {
+-  val importer = remember { HearthOnboardingImporter(HearthCoreApplier()) }
+   val error = remember { mutableStateOf<String?>(null) }
+   val busy = remember { mutableStateOf(false) }
+   val showScanner = remember { mutableStateOf(true) }
+@@ -102,7 +101,7 @@ fun HearthImportView() {
+       busy.value = true
+       error.value = null
+ 
+-      when (val result = importer.import(payload)) {
++      when (val result = hearthAcceptBundle(payload)) {
+         is HearthImportResult.Applied -> {
+           showScanner.value = false
+           // Дальше — обычный онбординг upstream, без единой правки.
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthInvite.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthInvite.kt
+index d8cc1be..a35ee36 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthInvite.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthInvite.kt
+@@ -87,7 +87,12 @@ interface HearthClaimTransport {
+  */
+ class HearthSelfEnroller(
+   private val transport: HearthClaimTransport,
+-  private val importer: HearthOnboardingImporter,
++  /**
++   * Что делать с полученным bundle. По умолчанию — проверить и отложить до появления
++   * профиля ([hearthAcceptBundle]): применить его прямо здесь нельзя, ядру нужен
++   * пользователь, а его на этом экране ещё нет.
++   */
++  private val accept: suspend (String) -> HearthImportResult = ::hearthAcceptBundle,
+ ) {
+   suspend fun setUp(invite: HearthBakedInvite?, deviceName: String): HearthClaimResult {
+     if (invite == null) return HearthClaimResult.NoInvite
+@@ -95,10 +100,10 @@ class HearthSelfEnroller(
+     val payload = transport.claim(invite, deviceName).getOrElse { e ->
+       return HearthClaimResult.Failed(e.message ?: "узел недоступен")
+     }
+-    // Bundle с узла проходит ровно ту же валидацию, что и отсканированный. Источник
++    // Bundle с узла проходит ровно ту же проверку, что и отсканированный. Источник
+     // доверенный, но проверка стоит один вызов, а ловит подменённый ответ и
+     // рассинхрон версий формата.
+-    return when (val result = importer.import(payload)) {
++    return when (val result = accept(payload)) {
+       is HearthImportResult.Applied -> HearthClaimResult.Applied(result.device)
+       is HearthImportResult.Rejected -> HearthClaimResult.Failed(result.reason)
+     }
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
+index 4dc87a4..fcf8870 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
+@@ -1,5 +1,7 @@
+ package chat.hearth
+ 
++import chat.simplex.common.model.ChatController
++
+ /**
+  * Onboarding step 0 — "Отсканируй QR настройки узла" (ТЗ §8.2 п.7).
+  *
+@@ -91,3 +93,50 @@ object HearthOnboardingText {
+       "Если сообщения не идут — проверьте, что узел включён."
+   const val APPLIED = "Узел настроен. Дальше — обычная настройка профиля."
+ }
++
++/**
++ * Принять bundle: проверить и отложить до появления профиля.
++ *
++ * # Почему не применить сразу
++ *
++ * Экран узла идёт ПЕРВЫМ, раньше стокового онбординга — так и задумано: телефон должен
++ * знать свой узел до того, как что-либо создаст. Но записать серверы в ядро в этот
++ * момент нельзя: `apiSetUserServers` требует `userId`, а пользователя ещё нет —
++ * `currentUserId()` бросает «no current user». То есть применение неизбежно позже
++ * приёма.
++ *
++ * Так что здесь bundle проверяется (подменённый или протухший QR должен быть отвергнут
++ * на месте, пока человек стоит перед кодом) и откладывается. Применяет его
++ * [hearthApplyPendingBundle] в первый момент, когда профиль появился.
++ */
++suspend fun hearthAcceptBundle(payload: String): HearthImportResult {
++  val bundle = HearthBundle.parse(payload).getOrElse { error ->
++    return HearthImportResult.Rejected(error.message ?: "bundle is not valid")
++  }
++  return runCatching {
++    ChatController.appPrefs.hearthPendingBundle.set(payload)
++    HearthImportResult.Applied(HearthPresets.serversFrom(bundle), bundle.device) as HearthImportResult
++  }.getOrElse { error ->
++    HearthImportResult.Rejected(error.message ?: "не удалось сохранить настройки узла")
++  }
++}
++
++/**
++ * Применить отложенный bundle. Вызывается сразу после того, как профиль создан и ядро
++ * запущено, — и ещё раз при каждом старте, если применить не удалось.
++ *
++ * `true`, если применять было нечего или применилось. `false` — bundle есть, но лёг
++ * неудачно: тогда человека возвращают на экран узла, а значение остаётся ждать.
++ */
++suspend fun hearthApplyPendingBundle(): Boolean {
++  val payload = ChatController.appPrefs.hearthPendingBundle.get()?.ifBlank { null } ?: return true
++  return when (HearthOnboardingImporter(HearthCoreApplier()).import(payload)) {
++    is HearthImportResult.Applied -> {
++      // Стираем сразу: в bundle пароли релеев, и держать его в настройках дольше
++      // необходимого незачем — адреса уже записаны в серверы ядра.
++      ChatController.appPrefs.hearthPendingBundle.set(null)
++      true
++    }
++    is HearthImportResult.Rejected -> false
++  }
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+index 74912dc..e091eab 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+@@ -154,6 +154,13 @@ class AppPreferences {
+   val hearthUpdateHost = mkStrPreference(SHARED_PREFS_HEARTH_UPDATE_HOST, null)
+   val hearthUpdatePort = mkStrPreference(SHARED_PREFS_HEARTH_UPDATE_PORT, null)
+   val hearthUpdateToken = mkStrPreference(SHARED_PREFS_HEARTH_UPDATE_TOKEN, null)
++  // hearth: bundle, принятый ДО создания профиля, ждёт здесь.
++  //
++  // Экран узла идёт первым — раньше стокового онбординга, — а записать серверы в ядро
++  // можно только когда есть пользователь: apiSetUserServers требует userId. Поэтому
++  // bundle сначала проверяется и откладывается, а применяется в первый момент, когда
++  // профиль появился. Значение стирается сразу после применения.
++  val hearthPendingBundle = mkStrPreference(SHARED_PREFS_HEARTH_PENDING_BUNDLE, null)
+   val chatArchiveTime = mkDatePreference(SHARED_PREFS_CHAT_ARCHIVE_TIME, null)
+   val chatLastStart = mkDatePreference(SHARED_PREFS_CHAT_LAST_START, null)
+   val chatStopped = mkBoolPreference(SHARED_PREFS_CHAT_STOPPED, false)
+@@ -437,6 +444,7 @@ class AppPreferences {
+     private const val SHARED_PREFS_HEARTH_UPDATE_HOST = "HearthUpdateHost"
+     private const val SHARED_PREFS_HEARTH_UPDATE_PORT = "HearthUpdatePort"
+     private const val SHARED_PREFS_HEARTH_UPDATE_TOKEN = "HearthUpdateToken"
++    private const val SHARED_PREFS_HEARTH_PENDING_BUNDLE = "HearthPendingBundle"
+     private const val SHARED_PREFS_CHAT_ARCHIVE_TIME = "ChatArchiveTime"
+     private const val SHARED_PREFS_APP_LANGUAGE = "AppLanguage"
+     private const val SHARED_PREFS_APP_UPDATE_CHANNEL = "AppUpdateChannel"
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
+index 21b9de1..a854d09 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
+@@ -173,6 +173,9 @@ suspend fun initChatController(useKey: String? = null, confirmMigrations: Migrat
+       }
+       chatController.startChat(user)
+       platform.androidChatInitializedAndStarted()
++      // hearth (ADR 0011): если bundle приняли, но применить не успели — приложение
++      // закрыли между экраном узла и созданием профиля, — доводим дело здесь.
++      chat.hearth.hearthApplyPendingBundle()
+       // hearth (ADR 0010): креды TURN — подпись с датой, они протухают по календарю.
+       // Обновляем их здесь, а не по кнопке в настройках: тот экран человек может не
+       // открыть ни разу за год, а звонки должны работать всё это время. Операция
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/WelcomeView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/WelcomeView.kt
+index 843bace..50ab9f3 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/WelcomeView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/WelcomeView.kt
+@@ -359,8 +359,23 @@ fun createProfileInNoProfileSetup(displayName: String, image: String? = null, cl
+     if (!chatModel.connectedToRemote()) {
+       chatModel.localUserCreated.value = true
+     }
+-    controller.appPrefs.onboardingStage.set(OnboardingStage.Step3_ChooseServerOperators)
++    // hearth (ADR 0011): здесь впервые появляется пользователь, а значит впервые можно
++    // записать серверы — apiSetUserServers требует userId. Bundle, принятый на экране
++    // узла, до этого момента лежал отложенным.
+     controller.startChat(user)
++    val nodeReady = chat.hearth.hearthApplyPendingBundle()
++    controller.appPrefs.onboardingStage.set(
++      if (nodeReady) {
++        // Экран выбора операторов пропускаем: операторов у нас нет, серверы уже
++        // записаны из bundle, и предложить там можно только публичную сеть SimpleX —
++        // ровно то, чего в контуре быть не должно (ТЗ §1.2).
++        OnboardingStage.Step4_NetworkCommitments
++      } else {
++        // Bundle не лёг. Возвращаем на экран узла: он остаётся отложенным и будет
++        // применён при следующей попытке.
++        OnboardingStage.Step0_HearthImport
++      }
++    )
+     controller.switchUIRemoteHost(null)
+     close()
+   }
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthInviteTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthInviteTest.kt
+index 30e5419..8b4b108 100644
+--- a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthInviteTest.kt
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthInviteTest.kt
+@@ -70,35 +70,41 @@ class HearthInviteTest {
+ 
+   @Test
+   fun withoutAnInviteItIsAnOrdinaryQrBuild() = runBlocking {
+-    val enroller = HearthSelfEnroller(
++    val enroller = enroller(
+       transport = { _, _ -> error("транспорт не должен вызываться") },
+-      importer = HearthOnboardingImporter(RecordingApplier()),
++      accept = { error("принимать нечего") },
+     )
+     assertEquals(HearthClaimResult.NoInvite, enroller.setUp(null, "Pixel"))
+   }
+ 
+   @Test
+-  fun aClaimedBundleIsApplied() = runBlocking {
+-    val applier = RecordingApplier()
+-    val enroller = HearthSelfEnroller(
++  fun aClaimedBundleIsAccepted() = runBlocking {
++    // Применение отложено до появления профиля: на этом экране пользователя ещё нет,
++    // и apiSetUserServers отказал бы. Здесь проверяется, что bundle принят и передан
++    // дальше целиком.
++    val accepted = mutableListOf<String>()
++    val enroller = enroller(
+       transport = { _, name ->
+         assertEquals("Xiaomi 22101316G", name)
+         Result.success(bundle)
+       },
+-      importer = HearthOnboardingImporter(applier),
++      accept = { payload ->
++        accepted += payload
++        val parsed = HearthBundle.parse(payload).getOrThrow()
++        HearthImportResult.Applied(HearthPresets.serversFrom(parsed), parsed.device)
++      },
+     )
+     val invite = HearthBakedInvite.parse(valid).getOrThrow()
+     val result = enroller.setUp(invite, "Xiaomi 22101316G")
+     assertEquals(HearthClaimResult.Applied("xiaomi-22101316g"), result)
+-    assertEquals(1, applier.servers)
+-    assertEquals("xiaomi-22101316g", applier.device)
++    assertEquals(listOf(bundle), accepted)
+   }
+ 
+   @Test
+   fun aDeadInviteFallsBackToTheScannerWithAReason() = runBlocking {
+-    val enroller = HearthSelfEnroller(
++    val enroller = enroller(
+       transport = { _, _ -> Result.failure(IllegalStateException("приглашение больше не действует")) },
+-      importer = HearthOnboardingImporter(RecordingApplier()),
++      accept = { error("принимать нечего") },
+     )
+     val invite = HearthBakedInvite.parse(valid).getOrThrow()
+     val result = enroller.setUp(invite, "Pixel")
+@@ -107,45 +113,36 @@ class HearthInviteTest {
+   }
+ 
+   @Test
+-  fun aBundleThatFailsValidationDoesNotConfigureAnything() = runBlocking {
+-    val applier = RecordingApplier()
+-    val enroller = HearthSelfEnroller(
++  fun aBundleThatFailsValidationIsNotStashed() = runBlocking {
++    var stashed = 0
++    val enroller = enroller(
+       // Узел доверенный, но ответ всё равно проверяется: подменённый или разъехавшийся
+       // по версии формата документ не должен молча настроить телефон.
+       transport = { _, _ -> Result.success("""{"v":99}""") },
+-      importer = HearthOnboardingImporter(applier),
++      accept = { payload ->
++        HearthBundle.parse(payload).fold(
++          onSuccess = {
++            stashed++
++            HearthImportResult.Applied(HearthPresets.serversFrom(it), it.device)
++          },
++          onFailure = { HearthImportResult.Rejected(it.message ?: "плохой bundle") },
++        )
++      },
+     )
+     val invite = HearthBakedInvite.parse(valid).getOrThrow()
+     assertTrue(enroller.setUp(invite, "Pixel") is HearthClaimResult.Failed)
+-    assertEquals(0, applier.servers)
++    assertEquals(0, stashed)
+   }
+ }
+ 
+ /** Транспорт из лямбды — чтобы каждый тест не заводил свой класс. */
+-private fun HearthSelfEnroller(
++private fun enroller(
+   transport: suspend (HearthBakedInvite, String) -> Result<String>,
+-  importer: HearthOnboardingImporter,
++  accept: suspend (String) -> HearthImportResult,
+ ) = HearthSelfEnroller(
+   object : HearthClaimTransport {
+     override suspend fun claim(invite: HearthBakedInvite, deviceName: String) =
+       transport(invite, deviceName)
+   },
+-  importer,
++  accept,
+ )
+-
+-private class RecordingApplier : HearthBundleApplier {
+-  var servers = 0
+-  var device: String? = null
+-
+-  override suspend fun setServers(servers: HearthServers) {
+-    this.servers++
+-  }
+-
+-  override suspend fun applyNetworkDefaults(prefs: HearthNetPrefs) = Unit
+-
+-  override suspend fun rememberDevice(deviceId: String, issued: String) {
+-    device = deviceId
+-  }
+-
+-  override suspend fun rememberNode(node: HearthNodeApi?) = Unit
+-}
+diff --git a/apps/multiplatform/gradle.properties b/apps/multiplatform/gradle.properties
+index dacd916..6a969f4 100644
+--- a/apps/multiplatform/gradle.properties
++++ b/apps/multiplatform/gradle.properties
+@@ -26,8 +26,8 @@ kotlin.jvm.target=11
+ 
+ # hearth: своя нумерация поверх тега upstream. versionCode обязан расти
+ # монотонно — по нему приложение решает, новее ли сборка на узле.
+-android.version_name=7.0.1-h4
+-android.version_code=375
++android.version_name=7.0.1-h5
++android.version_code=376
+ 
+ desktop.version_name=7.0.1
+ desktop.version_code=157

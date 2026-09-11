@@ -1,0 +1,342 @@
+From e054f84b71076faf4a93c0ff73a4d7185ff6d800 Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Thu, 10 Sep 2026 13:56:18 +0300
+Subject: [PATCH 13/24] =?UTF-8?q?0014:=20=D0=B1=D0=B5=D1=81=D1=81=D1=80?=
+ =?UTF-8?q?=D0=BE=D1=87=D0=BD=D0=BE=D0=B5=20=D0=BF=D1=80=D0=B8=D0=B3=D0=BB?=
+ =?UTF-8?q?=D0=B0=D1=88=D0=B5=D0=BD=D0=B8=D0=B5,=20=D0=BE=D0=B1=D0=BD?=
+ =?UTF-8?q?=D0=BE=D0=B2=D0=BB=D0=B5=D0=BD=D0=B8=D0=B5=20ICE=20=D0=BF=D1=80?=
+ =?UTF-8?q?=D0=B8=20=D0=B7=D0=B0=D0=BF=D1=83=D1=81=D0=BA=D0=B5,=20=C2=AB?=
+ =?UTF-8?q?=D1=83=D0=B7=D0=B5=D0=BB=C2=BB=20=D0=B2=D0=BC=D0=B5=D1=81=D1=82?=
+ =?UTF-8?q?=D0=BE=20=C2=AB=D0=B4=D0=BE=D0=BC=D0=B0=D1=88=D0=BD=D0=B5=D0=B3?=
+ =?UTF-8?q?=D0=BE=C2=BB?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../chat/hearth/HearthSettingsView.android.kt |   2 +-
+ .../kotlin/chat/hearth/HearthTurn.android.kt  |  38 +++++++
+ .../chat/hearth/HearthUpdate.android.kt       |  20 ++++
+ .../kotlin/chat/hearth/HearthImportView.kt    |   2 +-
+ .../kotlin/chat/hearth/HearthInvite.kt        |   2 +-
+ .../kotlin/chat/hearth/HearthOnboarding.kt    |   4 +-
+ .../kotlin/chat/hearth/HearthTurn.kt          | 105 ++++++++++++++++++
+ .../chat/simplex/common/platform/Core.kt      |   5 +
+ .../common/views/usersettings/SettingsView.kt |   4 +-
+ .../kotlin/chat/hearth/HearthTurn.desktop.kt  |   8 ++
+ apps/multiplatform/gradle.properties          |   4 +-
+ 11 files changed, 185 insertions(+), 9 deletions(-)
+ create mode 100644 apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthTurn.android.kt
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthTurn.kt
+ create mode 100644 apps/multiplatform/common/src/desktopMain/kotlin/chat/hearth/HearthTurn.desktop.kt
+
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt
+index dcacfab..4cd7dc0 100644
+--- a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt
+@@ -39,7 +39,7 @@ actual fun HearthNodeSettingsView() {
+   val deviceId = ChatController.appPrefs.hearthDeviceId.get()
+ 
+   ColumnWithScrollBar {
+-    AppBarTitle("Домашний узел")
++    AppBarTitle("Узел")
+ 
+     SectionView("ЭТО УСТРОЙСТВО") {
+       SectionTextFooter(
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthTurn.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthTurn.android.kt
+new file mode 100644
+index 0000000..8920e65
+--- /dev/null
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthTurn.android.kt
+@@ -0,0 +1,38 @@
++package chat.hearth
++
++import chat.simplex.common.model.ChatController
++import chat.simplex.common.platform.Log
++
++/**
++ * Android-реализация обновления ICE.
++ *
++ * Транспорт — тот же [HearthAndroidUpdateTransport], что ходит за обновлениями: адрес
++ * узла и токен устройства у него уже есть, второй такой класс был бы копией.
++ */
++private class AndroidTurnTransport(
++  private val transport: HearthAndroidUpdateTransport,
++) : HearthTurnTransport {
++  override suspend fun turnCredentials(): Result<String> = transport.turnCredentials()
++}
++
++private object PrefsIceSink : HearthIceSink {
++  override suspend fun setIceServers(ice: List<String>) {
++    // Тот же формат, что пишет импорт bundle: строки через перевод строки.
++    ChatController.appPrefs.webrtcIceServers.set(ice.joinToString(separator = "\n"))
++  }
++}
++
++actual suspend fun hearthRefreshIceServers() {
++  val context = chat.simplex.common.platform.androidAppContext
++  val transport = HearthAndroidUpdateTransport.fromPrefs(context)
++  val refresher = HearthTurnRefresher(transport?.let(::AndroidTurnTransport), PrefsIceSink)
++  when (val result = refresher.refresh()) {
++    is HearthTurnRefresh.Updated ->
++      Log.d("hearth", "ICE обновлены с узла: ${result.count} записей")
++    is HearthTurnRefresh.NotConfigured -> Unit
++    is HearthTurnRefresh.Failed ->
++      // Не показываем человеку: старые креды могут быть ещё живы, а узел мог быть
++      // недоступен ровно в момент запуска. Следующий запуск попробует снова.
++      Log.w("hearth", "ICE не обновлены: ${result.reason}")
++  }
++}
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdate.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdate.android.kt
+index c84fdcf..41b28e9 100644
+--- a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdate.android.kt
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdate.android.kt
+@@ -133,6 +133,26 @@ class HearthAndroidUpdateTransport(
+     }
+   }
+ 
++  /**
++   * Свежие креды TURN.
++   *
++   * Не часть [HearthUpdateTransport]: обновлениям это не нужно, а звонкам нужно на
++   * каждом запуске. Живёт здесь только потому, что адрес узла и токен уже настроены.
++   */
++  suspend fun turnCredentials(): Result<String> = withContext(Dispatchers.IO) {
++    runCatching {
++      val conn = open("/turn-credentials")
++      try {
++        val code = conn.responseCode
++        if (code == 404) throw IllegalStateException("на узле выключен TURN")
++        if (code != 200) throw IllegalStateException("узел ответил $code")
++        conn.inputStream.use { it.readBoundedText(MANIFEST_LIMIT_BYTES) }
++      } finally {
++        conn.disconnect()
++      }
++    }
++  }
++
+   private fun open(path: String): HttpURLConnection =
+     (URL("https://$nodeHost:$port$path").openConnection() as HttpURLConnection).apply {
+       // Токен заголовком, а не в URL: URL оседает в логах прокси и в истории.
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt
+index dccc0c2..98bd4c5 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt
+@@ -17,7 +17,7 @@ import chat.simplex.common.views.newchat.QRCodeScanner
+ import chat.simplex.common.views.onboarding.OnboardingStage
+ 
+ /**
+- * Onboarding step 0 — настройка домашнего узла (patches/0003, patches/0013).
++ * Onboarding step 0 — настройка домашнего узла (patches/0003, ADR 0011).
+  *
+  * Единственный экран, который форк добавляет. Он идёт ПЕРЕД стоковым онбордингом и,
+  * применив bundle, отдаёт управление upstream нетронутым — именно это делает ребейз
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthInvite.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthInvite.kt
+index 9dbc122..d8cc1be 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthInvite.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthInvite.kt
+@@ -4,7 +4,7 @@ import kotlinx.serialization.Serializable
+ import kotlinx.serialization.json.Json
+ 
+ /**
+- * Приглашение, вшитое в сборку (patches/0013, ADR 0010).
++ * Приглашение, вшитое в сборку (ADR 0011).
+  *
+  * # Зачем
+  *
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
+index ef753ab..4dc87a4 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
+@@ -77,13 +77,13 @@ class HearthOnboardingImporter(private val applier: HearthBundleApplier) {
+  * whole of the fork's user-facing text in one file.
+  */
+ object HearthOnboardingText {
+-  const val TITLE = "Настройка домашнего узла"
++  const val TITLE = "Настройка узла"
+   const val BODY =
+     "Отсканируйте QR-код, который показал администратор узла.\n\n" +
+       "Код содержит пароли релеев — показывайте его лично, " +
+       "не пересылайте и не сохраняйте в галерею."
+   const val AUTO_BODY =
+-    "Подключаемся к домашнему узлу. Это занимает несколько секунд " +
++    "Подключаемся к узлу. Это занимает несколько секунд " +
+       "и делается один раз."
+   const val SCAN_BUTTON = "Сканировать QR"
+   const val NETWORK_HINT =
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthTurn.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthTurn.kt
+new file mode 100644
+index 0000000..191d5cf
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthTurn.kt
+@@ -0,0 +1,105 @@
++package chat.hearth
++
++import kotlinx.serialization.Serializable
++import kotlinx.serialization.json.Json
++
++/**
++ * Свежие ICE-серверы с узла (ADR 0010).
++ *
++ * # Зачем это обязательно, а не «на всякий случай»
++ *
++ * Креды TURN — не пароль, а подпись с датой: coturn проверяет HMAC от строки со
++ * временем истечения. Значит они **протухают по календарю**, и через
++ * `turn.credential_ttl_secs` (на узле — 30 дней) перестают приниматься.
++ *
++ * Отказ при этом самый неприятный из возможных: сообщения продолжают ходить, потому
++ * что им TURN не нужен, а звонки — как повезёт. Там, где оба собеседника пробиваются
++ * напрямую, звонок идёт; там, где нужен ретранслятор, — тишина в трубке. Со стороны
++ * это выглядит как «иногда работает», и искать причину будут в чём угодно, кроме
++ * даты.
++ *
++ * Поэтому обновление кредов — не действие человека и не кнопка в настройках, а часть
++ * запуска приложения.
++ *
++ * # Почему не увеличить срок
++ *
++ * Увеличенный срок отодвигает поломку, а не убирает её, и одновременно удлиняет окно,
++ * в котором утёкшие креды остаются годными. С автообновлением всё наоборот: срок
++ * можно **сократить**, и это одновременно надёжнее и строже.
++ */
++@Serializable
++data class HearthTurnCredentials(
++  val username: String,
++  val credential: String,
++  /** Строки ICE в том же виде, что в bundle: `stun:host:port`, `turn:user:cred@host:port`. */
++  val ice: List<String>,
++  val expires: String = "",
++) {
++  companion object {
++    private val json = Json {
++      ignoreUnknownKeys = true
++      isLenient = false
++    }
++
++    fun parse(payload: String): Result<HearthTurnCredentials> = runCatching {
++      val creds = json.decodeFromString(serializer(), payload)
++      require(creds.ice.isNotEmpty()) { "узел вернул пустой список ICE" }
++      // Пустой список записать в настройки хуже, чем не трогать их вовсе: старые
++      // креды хотя бы могут быть ещё живы, а пустой ICE — гарантированная тишина.
++      require(creds.ice.none { it.contains("\n") }) { "в строке ICE перевод строки" }
++      creds
++    }
++  }
++}
++
++/** Транспорт до узла за свежими кредами. Предъявляет токен УЖЕ заведённого устройства. */
++interface HearthTurnTransport {
++  suspend fun turnCredentials(): Result<String>
++}
++
++/** Куда положить обновлённый список. Платформенная запись в настройки клиента. */
++interface HearthIceSink {
++  suspend fun setIceServers(ice: List<String>)
++}
++
++/** Чем закончилось обновление — для лога, не для экрана. */
++sealed interface HearthTurnRefresh {
++  data class Updated(val count: Int) : HearthTurnRefresh
++  /** Узел не настроен: устройство ещё не заведено, обновлять нечего. */
++  data object NotConfigured : HearthTurnRefresh
++  data class Failed(val reason: String) : HearthTurnRefresh
++}
++
++/**
++ * Обновить ICE-серверы.
++ *
++ * Тихая операция: человеку она не показывается ни успехом, ни неудачей. Неудача не
++ * повод для тревоги — узел мог быть недоступен ровно в момент запуска, а старые креды
++ * ещё живы. Настройки при неудаче не трогаем.
++ */
++class HearthTurnRefresher(
++  private val transport: HearthTurnTransport?,
++  private val sink: HearthIceSink,
++) {
++  suspend fun refresh(): HearthTurnRefresh {
++    val transport = transport ?: return HearthTurnRefresh.NotConfigured
++    val payload = transport.turnCredentials().getOrElse { e ->
++      return HearthTurnRefresh.Failed(e.message ?: "узел недоступен")
++    }
++    val creds = HearthTurnCredentials.parse(payload).getOrElse { e ->
++      return HearthTurnRefresh.Failed(e.message ?: "ответ узла не разобран")
++    }
++    return runCatching {
++      sink.setIceServers(creds.ice)
++      HearthTurnRefresh.Updated(creds.ice.size) as HearthTurnRefresh
++    }.getOrElse { e -> HearthTurnRefresh.Failed(e.message ?: "не удалось записать настройки") }
++  }
++}
++
++/**
++ * Обновить ICE при запуске приложения.
++ *
++ * Вызывается из точки старта чата, а не из экрана: экран настроек человек может не
++ * открыть ни разу за год, а звонки должны работать всё это время.
++ */
++expect suspend fun hearthRefreshIceServers()
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
+index 7c139fb..21b9de1 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
+@@ -173,6 +173,11 @@ suspend fun initChatController(useKey: String? = null, confirmMigrations: Migrat
+       }
+       chatController.startChat(user)
+       platform.androidChatInitializedAndStarted()
++      // hearth (ADR 0010): креды TURN — подпись с датой, они протухают по календарю.
++      // Обновляем их здесь, а не по кнопке в настройках: тот экран человек может не
++      // открыть ни разу за год, а звонки должны работать всё это время. Операция
++      // тихая — неудача ничего не ломает, старые креды могут быть ещё живы.
++      chat.hearth.hearthRefreshIceServers()
+     } else {
+       chatController.getUserChatData(null)
+       chatModel.localUserCreated.value = currentUser.value != null
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt
+index 458446e..ea898d7 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt
+@@ -148,13 +148,13 @@ fun HelpAndSupportView(
+ 
+     SectionView(stringResource(MR.strings.settings_section_title_contact)) {
+       if (!chatModel.desktopNoUserNoRemote) {
+-        // hearth (ADR 0010): обновление с домашнего узла и приглашение нового
++        // hearth (ADR 0010): обновление с узла и приглашение нового
+         // устройства. Оба действия иначе требуют человека у терминала с админским
+         // сертификатом — для семьи из двадцати человек это узкое место.
+         if (appPlatform.isAndroid) {
+           SettingsActionItem(
+             painterResource(MR.images.ic_download),
+-            "Домашний узел",
++            "Узел",
+             { ModalManager.start.showModal { chat.hearth.HearthNodeSettingsView() } },
+             textColor = MaterialTheme.colors.primary,
+             disabled = stopped,
+diff --git a/apps/multiplatform/common/src/desktopMain/kotlin/chat/hearth/HearthTurn.desktop.kt b/apps/multiplatform/common/src/desktopMain/kotlin/chat/hearth/HearthTurn.desktop.kt
+new file mode 100644
+index 0000000..a216ced
+--- /dev/null
++++ b/apps/multiplatform/common/src/desktopMain/kotlin/chat/hearth/HearthTurn.desktop.kt
+@@ -0,0 +1,8 @@
++package chat.hearth
++
++/**
++ * На desktop устройство заводится по QR и device API там не настроен, поэтому
++ * обновлять нечего. Когда настольные сборки начнут раздаваться так же, как
++ * Android-сборки, это станет копией androidMain.
++ */
++actual suspend fun hearthRefreshIceServers() = Unit
+diff --git a/apps/multiplatform/gradle.properties b/apps/multiplatform/gradle.properties
+index 0142323..dacd916 100644
+--- a/apps/multiplatform/gradle.properties
++++ b/apps/multiplatform/gradle.properties
+@@ -26,8 +26,8 @@ kotlin.jvm.target=11
+ 
+ # hearth: своя нумерация поверх тега upstream. versionCode обязан расти
+ # монотонно — по нему приложение решает, новее ли сборка на узле.
+-android.version_name=7.0.1-h3
+-android.version_code=374
++android.version_name=7.0.1-h4
++android.version_code=375
+ 
+ desktop.version_name=7.0.1
+ desktop.version_code=157

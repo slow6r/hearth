@@ -1,0 +1,48 @@
+From 8768801b53e3cb39a38d5545392f92e22d48b06f Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Thu, 10 Sep 2026 09:41:00 +0300
+Subject: [PATCH 04/24] =?UTF-8?q?0004:=20ICE=20=D1=82=D0=BE=D0=BB=D1=8C?=
+ =?UTF-8?q?=D0=BA=D0=BE=20=D1=81=D0=B2=D0=BE=D0=B8,=20=D0=B1=D0=B5=D0=B7?=
+ =?UTF-8?q?=20=D0=BE=D1=82=D0=BA=D0=B0=D1=82=D0=B0=20=D0=BD=D0=B0=20=D0=BF?=
+ =?UTF-8?q?=D1=83=D0=B1=D0=BB=D0=B8=D1=87=D0=BD=D1=8B=D0=B5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+assets/www/call.js жёстко задавал stun.simplex.im и turn.simplex.im С
+КРЕДЕНШЕЛАМИ как defaultIceServers, и getCallConfig подставлял их, когда
+свои ICE не заданы. Звонок с пустой конфигурацией молча уходил бы через
+сервер третьей стороны, раскрывая ей адрес участника.
+
+Список опустошён: без ICE из bundle звонок обязан честно не состояться.
+---
+ .../src/commonMain/resources/assets/www/call.js  | 16 ++++++++++------
+ 1 file changed, 10 insertions(+), 6 deletions(-)
+
+diff --git a/apps/multiplatform/common/src/commonMain/resources/assets/www/call.js b/apps/multiplatform/common/src/commonMain/resources/assets/www/call.js
+index 7ab8d6f..8f4fe9c 100644
+--- a/apps/multiplatform/common/src/commonMain/resources/assets/www/call.js
++++ b/apps/multiplatform/common/src/commonMain/resources/assets/www/call.js
+@@ -65,12 +65,16 @@ const allowSendScreenAudio = false;
+ let afterCallInitializedCandidates = [];
+ const stopTrackOnAndroid = false;
+ const processCommand = (function () {
+-    const defaultIceServers = [
+-        { urls: ["stuns:stun.simplex.im:443"] },
+-        { urls: ["stun:stun.simplex.im:443"] },
+-        //{urls: ["turns:turn.simplex.im:443?transport=udp"], username: "private2", credential: "Hxuq2QxUjnhj96Zq2r4HjqHRj"},
+-        { urls: ["turns:turn.simplex.im:443?transport=tcp"], username: "private2", credential: "Hxuq2QxUjnhj96Zq2r4HjqHRj" },
+-    ];
++    // hearth (patches/0004-ice-servers.md): пусто, и это не забывчивость.
++    //
++    // Здесь у upstream стояли stun.simplex.im и turn.simplex.im с креденшелами.
++    // `getCallConfig` берёт их, когда свои ICE не заданы, — то есть звонок с пустой
++    // конфигурацией молча уходил бы через сервер третьей стороны, раскрывая ей
++    // реальный адрес участника. Ровно то, ради чего разворачивался свой coturn.
++    //
++    // Fallback'а быть не должно: если ICE не пришли с bundle, звонок обязан честно не
++    // состояться. Неработающий звонок чинится за минуту; утечка адреса не чинится.
++    const defaultIceServers = [];
+     function getCallConfig(encodedInsertableStreams, iceServers, relay) {
+         return {
+             peerConnectionConfig: {

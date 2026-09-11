@@ -82,6 +82,39 @@ for host in "smp1.simplex.im" "smp8.simplex.im" "xftp1.simplex.im" "ntf1.simplex
 done
 
 echo
+echo "== ADR 0012: в сборке адрес узла и НИ ОДНОГО секрета"
+# Ресурс ищется ПО ИМЕНИ, а не по пути в архиве: в релизе aapt2 укорачивает пути
+# (res/raw/hearth_node.json становится res/o_.json), и проверка по пути врёт про
+# исправную сборку. Приложение ищет тем же способом — через имя ресурса.
+if command -v aapt2 >/dev/null; then
+    RES_TABLE="$(aapt2 dump resources "$APK" 2>/dev/null || true)"
+    NODE_PATH="$(grep -A1 'raw/hearth_node$' <<<"$RES_TABLE" | grep -oE 'res/[^ ]+' | head -1)"
+    if [[ -n "$NODE_PATH" ]]; then
+        NODE_RES="$(unzip -p "$APK" "$NODE_PATH" 2>/dev/null || true)"
+        pass "адрес узла вшит ($NODE_PATH): $(tr -d '
+' <<<"$NODE_RES")"
+    else
+        NODE_RES=""
+        fail "нет ресурса raw/hearth_node — вместо ввода кода покажется сканер QR"
+    fi
+    # Токен приглашения раньше ехал внутри APK, и файл сам по себе впускал в контур.
+    # Теперь секрет приносит человек. Проверка стоит здесь, чтобы старый порядок не
+    # вернулся молча — например, если кто-то воскресит bake-invite.sh из истории.
+    if grep -qE '"token"[[:space:]]*:' <<<"$NODE_RES"; then
+        fail "в адресе узла есть токен — секрету в сборке не место (ADR 0012)"
+    else
+        pass "токена в сборке нет"
+    fi
+    if grep -q 'raw/hearth_invite' <<<"$RES_TABLE"; then
+        fail "остался ресурс raw/hearth_invite — это вшитый секрет (ADR 0012)"
+    else
+        pass "старого приглашения в сборке нет"
+    fi
+else
+    fail "aapt2 недоступен — вшитый адрес узла не проверен"
+fi
+
+echo
 echo "== Подпись (ТЗ §8.4: ключ офлайновый, подпись — ручной шаг)"
 if command -v apksigner >/dev/null; then
     if apksigner verify --print-certs "$APK" >/tmp/hearth-signer.txt 2>&1; then

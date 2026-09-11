@@ -3,26 +3,25 @@ package chat.hearth
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * Контракт вшитого приглашения и первого запуска.
+ * Контракт вшитого адреса узла и первого запуска по коду доступа (ADR 0012).
  *
- * Гоняется на JVM без эмулятора: сборка, раздаваемая семье, обязана либо завестись
- * сама, либо честно упасть в сканер, и узнавать об этом надо здесь, а не по звонку
- * «у меня ничего не работает».
+ * Гоняется на JVM без эмулятора: сборка, которую раздают людям, обязана либо завести
+ * себя по коду, либо честно объяснить отказ, и узнавать об этом надо здесь, а не по
+ * звонку «у меня ничего не работает».
  */
 class HearthInviteTest {
 
-  private val token = "a".repeat(64)
-
   private val valid = """
-    {"host":"relay.example.org","port":7444,"token":"$token"}
+    {"host":"relay.example.org","port":7444}
   """.trimIndent()
 
   private val bundle = """
     {"v":1,
-     "smp":["smp://fp1:pass1@relay.example.org:5223"],
+     "smp":["smp://fp1:pass1@relay.example.org:8443"],
      "xftp":["xftp://fp2:pass2@relay.example.org:5443"],
      "ice":["stun:relay.example.org:3478"],
      "net":{"privateRouting":"always","presetsEnabled":false,"ntfMode":"instant"},
@@ -30,119 +29,123 @@ class HearthInviteTest {
      "device":"xiaomi-22101316g"}
   """.trimIndent()
 
+  private val code = "H7K4P9QXM3TV"
+
   @Test
   fun parsesWhatTheBakeScriptWrites() {
-    val invite = HearthBakedInvite.parse(valid).getOrThrow()
-    assertEquals("relay.example.org", invite.host)
-    assertEquals(7444, invite.port)
-    assertEquals(token, invite.token)
+    val node = HearthBakedNode.parse(valid).getOrThrow()
+    assertEquals("relay.example.org", node.host)
+    assertEquals(7444, node.port)
   }
 
   @Test
-  fun portDefaultsToTheDeviceApiPort() {
-    val invite = HearthBakedInvite.parse("""{"host":"h.example","token":"$token"}""").getOrThrow()
-    assertEquals(HearthBakedInvite.DEFAULT_PORT, invite.port)
+  fun portDefaultsToDeviceApi() {
+    val node = HearthBakedNode.parse("""{"host":"h.example"}""").getOrThrow()
+    assertEquals(HearthBakedNode.DEFAULT_PORT, node.port)
   }
 
   @Test
   fun refusesAUrlInsteadOfAHost() {
-    // Подставлять адрес из файла нельзя даже когда файл свой: однажды он окажется
-    // не своим, и «host» вида https://чужое/ увёл бы заведение на чужой узел.
-    assertTrue(
-      HearthBakedInvite.parse("""{"host":"https://evil.example/","token":"$token"}""").isFailure
-    )
-  }
-
-  @Test
-  fun refusesAShortOrNonHexToken() {
-    assertTrue(HearthBakedInvite.parse("""{"host":"h.example","token":"abc"}""").isFailure)
-    assertTrue(
-      HearthBakedInvite.parse("""{"host":"h.example","token":"${"Z".repeat(64)}"}""").isFailure
-    )
+    // Подставлять из файла произвольный адрес нельзя даже когда файл свой.
+    assertTrue(HearthBakedNode.parse("""{"host":"https://evil.example/"}""").isFailure)
   }
 
   @Test
   fun refusesAnImpossiblePort() {
-    assertTrue(
-      HearthBakedInvite.parse("""{"host":"h.example","port":0,"token":"$token"}""").isFailure
-    )
+    assertTrue(HearthBakedNode.parse("""{"host":"h.example","port":0}""").isFailure)
+    assertTrue(HearthBakedNode.parse("""{"host":"h.example","port":70000}""").isFailure)
   }
 
   @Test
-  fun withoutAnInviteItIsAnOrdinaryQrBuild() = runBlocking {
-    val enroller = enroller(
-      transport = { _, _ -> error("транспорт не должен вызываться") },
-      accept = { error("принимать нечего") },
-    )
-    assertEquals(HearthClaimResult.NoInvite, enroller.setUp(null, "Pixel"))
+  fun aBuildWithoutANodeAsksForQr() = runBlocking {
+    val enroller = enroller(transport = { _, _, _ -> error("сети быть не должно") })
+    assertEquals(HearthClaimResult.NoNode, enroller.enrol(null, code, "Pixel"))
   }
 
   @Test
-  fun aClaimedBundleIsAccepted() = runBlocking {
-    // Применение отложено до появления профиля: на этом экране пользователя ещё нет,
-    // и apiSetUserServers отказал бы. Здесь проверяется, что bundle принят и передан
-    // дальше целиком.
-    val accepted = mutableListOf<String>()
-    val enroller = enroller(
-      transport = { _, name ->
-        assertEquals("Xiaomi 22101316G", name)
-        Result.success(bundle)
-      },
-      accept = { payload ->
-        accepted += payload
-        val parsed = HearthBundle.parse(payload).getOrThrow()
-        HearthImportResult.Applied(HearthPresets.serversFrom(parsed), parsed.device)
-      },
-    )
-    val invite = HearthBakedInvite.parse(valid).getOrThrow()
-    val result = enroller.setUp(invite, "Xiaomi 22101316G")
-    assertEquals(HearthClaimResult.Applied("xiaomi-22101316g"), result)
-    assertEquals(listOf(bundle), accepted)
+  fun anIncompleteCodeNeverReachesTheNode() = runBlocking {
+    var called = false
+    val enroller = enroller(transport = { _, _, _ -> called = true; Result.success(bundle) })
+    val node = HearthBakedNode.parse(valid).getOrThrow()
+
+    val result = enroller.enrol(node, "H7K4-P9QX", "Pixel")
+
+    assertEquals(HearthClaimResult.Failed(HearthOnboardingText.CODE_INCOMPLETE), result)
+    assertTrue(!called, "неполный код не должен тратить попытку у узла")
   }
 
   @Test
-  fun aDeadInviteFallsBackToTheScannerWithAReason() = runBlocking {
+  fun theCodeIsNormalizedBeforeItIsSent() = runBlocking {
+    var sent: String? = null
+    val enroller = enroller(transport = { _, sentCode, _ -> sent = sentCode; Result.success(bundle) })
+    val node = HearthBakedNode.parse(valid).getOrThrow()
+
+    enroller.enrol(node, " h7k4-p9qx-m3tv ", "Pixel")
+
+    // Узел хранит канонический вид, и сравнение у него посимвольное: то, что человек
+    // набрал с дефисами и в нижнем регистре, обязано доехать приведённым.
+    assertEquals(code, sent)
+  }
+
+  @Test
+  fun aSpentCodeIsReportedInWordsAPersonCanAct_on() = runBlocking {
     val enroller = enroller(
-      transport = { _, _ -> Result.failure(IllegalStateException("приглашение больше не действует")) },
-      accept = { error("принимать нечего") },
+      transport = { _, _, _ -> Result.failure(IllegalStateException(HearthOnboardingText.CODE_REFUSED)) }
     )
-    val invite = HearthBakedInvite.parse(valid).getOrThrow()
-    val result = enroller.setUp(invite, "Pixel")
+    val node = HearthBakedNode.parse(valid).getOrThrow()
+
+    val result = enroller.enrol(node, code, "Pixel")
+
+    assertEquals(HearthClaimResult.Failed(HearthOnboardingText.CODE_REFUSED), result)
+  }
+
+  @Test
+  fun aNodeThatDoesNotAnswerIsNotADeadEnd() = runBlocking {
+    val enroller = enroller(transport = { _, _, _ -> Result.failure(IllegalStateException()) })
+    val node = HearthBakedNode.parse(valid).getOrThrow()
+
+    val result = enroller.enrol(node, code, "Pixel")
+
     assertTrue(result is HearthClaimResult.Failed)
-    assertEquals("приглашение больше не действует", (result as HearthClaimResult.Failed).reason)
+    assertNull((result as? HearthClaimResult.Applied)?.device)
   }
 
   @Test
-  fun aBundleThatFailsValidationIsNotStashed() = runBlocking {
-    var stashed = 0
-    val enroller = enroller(
-      // Узел доверенный, но ответ всё равно проверяется: подменённый или разъехавшийся
-      // по версии формата документ не должен молча настроить телефон.
-      transport = { _, _ -> Result.success("""{"v":99}""") },
-      accept = { payload ->
-        HearthBundle.parse(payload).fold(
-          onSuccess = {
-            stashed++
-            HearthImportResult.Applied(HearthPresets.serversFrom(it), it.device)
-          },
-          onFailure = { HearthImportResult.Rejected(it.message ?: "плохой bundle") },
-        )
-      },
-    )
-    val invite = HearthBakedInvite.parse(valid).getOrThrow()
-    assertTrue(enroller.setUp(invite, "Pixel") is HearthClaimResult.Failed)
-    assertEquals(0, stashed)
-  }
-}
+  fun aGoodCodeEnrolsTheDevice() = runBlocking {
+    val enroller = enroller(transport = { _, _, _ -> Result.success(bundle) })
+    val node = HearthBakedNode.parse(valid).getOrThrow()
 
-/** Транспорт из лямбды — чтобы каждый тест не заводил свой класс. */
-private fun enroller(
-  transport: suspend (HearthBakedInvite, String) -> Result<String>,
-  accept: suspend (String) -> HearthImportResult,
-) = HearthSelfEnroller(
-  object : HearthClaimTransport {
-    override suspend fun claim(invite: HearthBakedInvite, deviceName: String) =
-      transport(invite, deviceName)
-  },
-  accept,
-)
+    val result = enroller.enrol(node, code, "Pixel")
+
+    assertEquals(HearthClaimResult.Applied("xiaomi-22101316g"), result)
+  }
+
+  @Test
+  fun aBundleTheClientRefusesIsNotSilentlyAccepted() = runBlocking {
+    val enroller = enroller(
+      transport = { _, _, _ -> Result.success("""{"v":1}""") },
+      accept = { HearthImportResult.Rejected("bundle is not valid") },
+    )
+    val node = HearthBakedNode.parse(valid).getOrThrow()
+
+    val result = enroller.enrol(node, code, "Pixel")
+
+    assertEquals(HearthClaimResult.Failed("bundle is not valid"), result)
+  }
+
+  private fun enroller(
+    transport: suspend (HearthBakedNode, String, String) -> Result<String>,
+    accept: suspend (String) -> HearthImportResult = { payload ->
+      HearthBundle.parse(payload).fold(
+        onSuccess = { HearthImportResult.Applied(HearthPresets.serversFrom(it), it.device) },
+        onFailure = { HearthImportResult.Rejected(it.message ?: "bundle is not valid") },
+      )
+    },
+  ) = HearthCodeEnroller(
+    object : HearthClaimTransport {
+      override suspend fun claim(node: HearthBakedNode, code: String, deviceName: String) =
+        transport(node, code, deviceName)
+    },
+    accept,
+  )
+}

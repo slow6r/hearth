@@ -1,0 +1,77 @@
+From 7062f560d63a0d9938625632ddeade40348bd5b8 Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Thu, 10 Sep 2026 09:41:00 +0300
+Subject: [PATCH 06/24] =?UTF-8?q?0006:=20FLAG=5FSECURE=20=D0=B1=D0=B5?=
+ =?UTF-8?q?=D0=B7=20=D0=B2=D1=8B=D0=BA=D0=BB=D1=8E=D1=87=D0=B0=D1=82=D0=B5?=
+ =?UTF-8?q?=D0=BB=D1=8F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Ставится безусловно в MainActivity, переключатель убран из настроек.
+Настройка, которую можно выключить, рано или поздно будет выключена — и
+именно на том устройстве, которое потеряют (ТЗ §3.1, §8.2 п.6).
+---
+ .../java/chat/simplex/app/MainActivity.kt     | 16 +++++++-------
+ .../usersettings/PrivacySettings.android.kt   | 21 ++++++++++++-------
+ 2 files changed, 22 insertions(+), 15 deletions(-)
+
+diff --git a/apps/multiplatform/android/src/main/java/chat/simplex/app/MainActivity.kt b/apps/multiplatform/android/src/main/java/chat/simplex/app/MainActivity.kt
+index 7415b60..219d9dc 100644
+--- a/apps/multiplatform/android/src/main/java/chat/simplex/app/MainActivity.kt
++++ b/apps/multiplatform/android/src/main/java/chat/simplex/app/MainActivity.kt
+@@ -46,13 +46,15 @@ class MainActivity: FragmentActivity() {
+       processIntent(intent)
+       processExternalIntent(intent)
+     }
+-    if (ChatController.appPrefs.privacyProtectScreen.get()) {
+-      Log.d(TAG, "onCreate: set FLAG_SECURE")
+-      window.setFlags(
+-        WindowManager.LayoutParams.FLAG_SECURE,
+-        WindowManager.LayoutParams.FLAG_SECURE
+-      )
+-    }
++    // hearth (patches/0006-flag-secure.md): безусловно, без проверки настройки.
++    // Настройка, которую можно выключить, рано или поздно будет выключена — и именно
++    // на том устройстве, которое потеряют (ТЗ §3.1, §8.2 п.6). Побочный эффект принят
++    // осознанно: скриншоты и демонстрация экрана в приложении невозможны.
++    Log.d(TAG, "onCreate: set FLAG_SECURE")
++    window.setFlags(
++      WindowManager.LayoutParams.FLAG_SECURE,
++      WindowManager.LayoutParams.FLAG_SECURE
++    )
+     enableEdgeToEdge()
+     setContent {
+       AppScreen()
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/simplex/common/views/usersettings/PrivacySettings.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/simplex/common/views/usersettings/PrivacySettings.android.kt
+index 3c1771c..1e80bd0 100644
+--- a/apps/multiplatform/common/src/androidMain/kotlin/chat/simplex/common/views/usersettings/PrivacySettings.android.kt
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/simplex/common/views/usersettings/PrivacySettings.android.kt
+@@ -18,14 +18,19 @@ actual fun PrivacyDeviceSection(
+   SectionView(stringResource(MR.strings.settings_section_title_device)) {
+     ChatLockItem(showSettingsModal, setPerformLA)
+     val context = LocalContext.current
+-    SettingsPreferenceItem(painterResource(MR.images.ic_visibility_off), stringResource(MR.strings.protect_app_screen), ChatModel.controller.appPrefs.privacyProtectScreen) { on ->
+-      if (on) {
+-        (context as? FragmentActivity)?.window?.setFlags(
+-          WindowManager.LayoutParams.FLAG_SECURE,
+-          WindowManager.LayoutParams.FLAG_SECURE
+-        )
+-      } else {
+-        (context as? FragmentActivity)?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
++    // hearth (patches/0006): переключатель убран, а код настройки оставлен на месте.
++    // FLAG_SECURE теперь ставится безусловно в MainActivity; удалять этот блок нельзя —
++    // удалённый файл конфликтует при каждом ребейзе, недостижимый код не конфликтует.
++    if (chat.hearth.HearthPresets.SHOW_SCREEN_PROTECTION_TOGGLE) {
++      SettingsPreferenceItem(painterResource(MR.images.ic_visibility_off), stringResource(MR.strings.protect_app_screen), ChatModel.controller.appPrefs.privacyProtectScreen) { on ->
++        if (on) {
++          (context as? FragmentActivity)?.window?.setFlags(
++            WindowManager.LayoutParams.FLAG_SECURE,
++            WindowManager.LayoutParams.FLAG_SECURE
++          )
++        } else {
++          (context as? FragmentActivity)?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
++        }
+       }
+     }
+   }

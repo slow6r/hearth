@@ -1,0 +1,103 @@
+From a6b98d6e5112e4e90fe30c25cbce6b594327b6cd Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Thu, 10 Sep 2026 09:41:00 +0300
+Subject: [PATCH 03/24] =?UTF-8?q?0003:=20=D0=BE=D0=BD=D0=B1=D0=BE=D1=80?=
+ =?UTF-8?q?=D0=B4=D0=B8=D0=BD=D0=B3=20=D0=BD=D0=B0=D1=87=D0=B8=D0=BD=D0=B0?=
+ =?UTF-8?q?=D0=B5=D1=82=D1=81=D1=8F=20=D1=81=20=D0=B8=D0=BC=D0=BF=D0=BE?=
+ =?UTF-8?q?=D1=80=D1=82=D0=B0=20bundle=20=D0=BF=D0=BE=20QR?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Новая стадия Step0_HearthImport перед стоковым онбордингом. Сканер взят
+upstream'овский: своя камера — новая зависимость и новое разрешение ради
+экрана, который используется один раз за жизнь устройства (ТЗ §8.2 п.7).
+
+Поглощает 0001. Константы с пресетами в v7.0.1 не существует: список
+операторов живёт в Haskell-ядре и приходит через apiGetServerOperators.
+Править Haskell запрещает §8.3, поэтому applier переписывает конфигурацию
+через setUserServers — операторы в enabled=false, добавлена запись без
+оператора с нашими SMP и XFTP.
+
+Две настройки для device id добавлены в AppPreferences: по нему
+администратор понимает, какой bundle отзывать (ТЗ §10.4).
+---
+ .../src/commonMain/kotlin/chat/simplex/common/App.kt      | 1 +
+ .../kotlin/chat/simplex/common/model/SimpleXAPI.kt        | 8 ++++++++
+ .../kotlin/chat/simplex/common/platform/Core.kt           | 6 ++++--
+ .../simplex/common/views/onboarding/OnboardingView.kt     | 4 ++++
+ 4 files changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/App.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/App.kt
+index cb91c38..59041b1 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/App.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/App.kt
+@@ -187,6 +187,7 @@ fun MainScreen() {
+           ) { state ->
+             when (state) {
+               OnboardingStage.OnboardingComplete -> {}
++              OnboardingStage.Step0_HearthImport -> chat.hearth.HearthImportView()
+               OnboardingStage.Step1_SimpleXInfo -> SimpleXInfo(chatModel, onboarding = true)
+               OnboardingStage.Step2_CreateProfile -> CreateFirstProfile(chatModel) {}
+               OnboardingStage.LinkAMobile -> LinkAMobile()
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+index f9438fc..1802390 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+@@ -142,6 +142,12 @@ class AppPreferences {
+   val experimentalCalls = mkBoolPreference(SHARED_PREFS_EXPERIMENTAL_CALLS, false)
+   val showUnreadAndFavorites = mkBoolPreference(SHARED_PREFS_SHOW_UNREAD_AND_FAVORITES, false)
+   val chatArchiveName = mkStrPreference(SHARED_PREFS_CHAT_ARCHIVE_NAME, null)
++
++  // hearth: под каким device id это устройство заведено на узле и когда выдан bundle.
++  // Нужно для отзыва (ТЗ §10.4): администратор по нему понимает, какой bundle гасить.
++  // Не секрет — секреты лежат в адресах серверов.
++  val hearthDeviceId = mkStrPreference(SHARED_PREFS_HEARTH_DEVICE_ID, null)
++  val hearthEnrolledAt = mkStrPreference(SHARED_PREFS_HEARTH_ENROLLED_AT, null)
+   val chatArchiveTime = mkDatePreference(SHARED_PREFS_CHAT_ARCHIVE_TIME, null)
+   val chatLastStart = mkDatePreference(SHARED_PREFS_CHAT_LAST_START, null)
+   val chatStopped = mkBoolPreference(SHARED_PREFS_CHAT_STOPPED, false)
+@@ -420,6 +426,8 @@ class AppPreferences {
+     private const val SHARED_PREFS_EXPERIMENTAL_CALLS = "ExperimentalCalls"
+     private const val SHARED_PREFS_SHOW_UNREAD_AND_FAVORITES = "ShowUnreadAndFavorites"
+     private const val SHARED_PREFS_CHAT_ARCHIVE_NAME = "ChatArchiveName"
++    private const val SHARED_PREFS_HEARTH_DEVICE_ID = "HearthDeviceId"
++    private const val SHARED_PREFS_HEARTH_ENROLLED_AT = "HearthEnrolledAt"
+     private const val SHARED_PREFS_CHAT_ARCHIVE_TIME = "ChatArchiveTime"
+     private const val SHARED_PREFS_APP_LANGUAGE = "AppLanguage"
+     private const val SHARED_PREFS_APP_UPDATE_CHANNEL = "AppUpdateChannel"
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
+index 3805a8e..7c139fb 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
+@@ -153,11 +153,13 @@ suspend fun initChatController(useKey: String? = null, confirmMigrations: Migrat
+          * */
+         chatModel.localUserCreated.value = null
+         if (chatController.listRemoteHosts()?.isEmpty() == true) {
+-          chatController.appPrefs.onboardingStage.set(OnboardingStage.Step1_SimpleXInfo)
++          // hearth: чистая установка начинается с импорта bundle, а не с рассказа о SimpleX
++          chatController.appPrefs.onboardingStage.set(OnboardingStage.Step0_HearthImport)
+         }
+         chatController.startChatWithoutUser()
+       } else {
+-        chatController.appPrefs.onboardingStage.set(OnboardingStage.Step1_SimpleXInfo)
++        // hearth: то же для Android — сначала QR узла
++        chatController.appPrefs.onboardingStage.set(OnboardingStage.Step0_HearthImport)
+       }
+     } else if (startChat().await()) {
+       val savedOnboardingStage = appPreferences.onboardingStage.get()
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/onboarding/OnboardingView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/onboarding/OnboardingView.kt
+index 7af364b..72e452f 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/onboarding/OnboardingView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/onboarding/OnboardingView.kt
+@@ -1,6 +1,10 @@
+ package chat.simplex.common.views.onboarding
+ 
+ enum class OnboardingStage {
++  // hearth (patches/0003): импорт bundle по QR — ПЕРЕД стоковым онбордингом.
++  // Первой в enum намеренно: AnimatedContent в App.kt считает направление перехода
++  // по порядковому номеру, и переход отсюда к Step1 должен выглядеть движением вперёд.
++  Step0_HearthImport,
+   Step1_SimpleXInfo,
+   Step2_CreateProfile,
+   LinkAMobile,

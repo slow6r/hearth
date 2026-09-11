@@ -8,20 +8,20 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Чтение вшитого приглашения и заведение по нему.
+ * Чтение вшитого адреса узла и заведение по коду доступа (ADR 0012).
  *
- * Ресурс ищется ПО ИМЕНИ, а не через сгенерированный `R`. Причина простая: приглашение
+ * Ресурс ищется ПО ИМЕНИ, а не через сгенерированный `R`. Причина простая: адрес
  * кладётся в сборку скриптом раздачи и в репозитории его нет, поэтому ссылка на
- * `R.raw.hearth_invite` ломала бы компиляцию обычной сборки «по QR». Минификация в
+ * `R.raw.hearth_node` ломала бы компиляцию обычной сборки «по QR». Минификация в
  * релизе выключена (`isMinifyEnabled = false`), так что ресурс, на который нет ссылки
  * из кода, никто не вырежет.
  */
-object HearthInviteSource {
-  private const val RESOURCE_NAME = "hearth_invite"
+object HearthNodeSource {
+  private const val RESOURCE_NAME = "hearth_node"
   private const val LIMIT_BYTES = 4 * 1024
 
-  /** Приглашение из сборки, или `null` — если это обычная сборка «по QR». */
-  fun baked(context: Context): HearthBakedInvite? {
+  /** Адрес узла из сборки, или `null` — если это обычная сборка «по QR». */
+  fun baked(context: Context): HearthBakedNode? {
     val id = context.resources.getIdentifier(RESOURCE_NAME, "raw", context.packageName)
     if (id == 0) return null
     val payload = runCatching {
@@ -32,16 +32,17 @@ object HearthInviteSource {
         String(bytes, 0, read, Charsets.UTF_8)
       }
     }.getOrNull() ?: return null
-    // Битое приглашение — это обычная сборка «по QR», а не отказ работать: человек
-    // должен получить сканер, а не пустой экран.
-    return HearthBakedInvite.parse(payload).getOrNull()
+    // Битый адрес — это обычная сборка «по QR», а не отказ работать: человек должен
+    // получить сканер, а не пустой экран.
+    return HearthBakedNode.parse(payload).getOrNull()
   }
 
   /**
    * Как назвать устройство в реестре.
    *
-   * Модель телефона, а не имя человека: на этом экране человек ничего не вводит — в
-   * этом весь смысл. Различать одинаковые модели узел умеет сам, дописывая номер.
+   * Модель телефона, а не имя человека: на этом экране человек вводит код, и просить
+   * его придумать ещё и название — лишний шаг. Различать одинаковые модели узел умеет
+   * сам, дописывая номер.
    */
   fun deviceName(): String {
     val manufacturer = Build.MANUFACTURER.orEmpty().trim()
@@ -59,17 +60,18 @@ object HearthInviteSource {
 class HearthAndroidClaimTransport : HearthClaimTransport {
 
   override suspend fun claim(
-    invite: HearthBakedInvite,
+    node: HearthBakedNode,
+    code: String,
     deviceName: String,
   ): Result<String> = withContext(Dispatchers.IO) {
     runCatching {
-      val url = URL("https://${invite.host}:${invite.port}/claim")
+      val url = URL("https://${node.host}:${node.port}/claim")
       // `use` не годится: HttpURLConnection не Closeable, у него disconnect().
       val conn = (url.openConnection() as HttpURLConnection).apply {
         requestMethod = "POST"
         doOutput = true
-        // Токен заголовком, а не в URL: URL оседает в логах прокси и в истории.
-        setRequestProperty("X-Hearth-Invite-Token", invite.token)
+        // Код заголовком, а не в URL: URL оседает в логах прокси и в истории.
+        setRequestProperty("X-Hearth-Invite-Token", code)
         setRequestProperty("Content-Type", "application/json")
         connectTimeout = 15_000
         readTimeout = 30_000
@@ -83,13 +85,12 @@ class HearthAndroidClaimTransport : HearthClaimTransport {
           ),
         )
         conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-        when (val code = conn.responseCode) {
+        when (val responseCode = conn.responseCode) {
           200 -> conn.inputStream.use { readBounded(it) }
-          401 -> throw IllegalStateException(
-            "приглашение в этой сборке больше не действует — попросите новую или настройте по QR"
-          )
+          401 -> throw IllegalStateException(HearthOnboardingText.CODE_REFUSED)
+          429 -> throw IllegalStateException(HearthOnboardingText.CODE_THROTTLED)
           409 -> throw IllegalStateException("на узле кончились места для устройств")
-          else -> throw IllegalStateException("узел ответил $code")
+          else -> throw IllegalStateException("узел ответил $responseCode")
         }
       } finally {
         conn.disconnect()
@@ -114,9 +115,9 @@ class HearthAndroidClaimTransport : HearthClaimTransport {
   }
 }
 
-actual suspend fun hearthAutoSetUp(): HearthClaimResult {
-  val context = chat.simplex.common.platform.androidAppContext
-  val invite = HearthInviteSource.baked(context)
-  val enroller = HearthSelfEnroller(HearthAndroidClaimTransport())
-  return enroller.setUp(invite, HearthInviteSource.deviceName())
-}
+actual fun hearthBakedNode(): HearthBakedNode? =
+  HearthNodeSource.baked(chat.simplex.common.platform.androidAppContext)
+
+actual suspend fun hearthClaimWithCode(code: String): HearthClaimResult =
+  HearthCodeEnroller(HearthAndroidClaimTransport())
+    .enrol(hearthBakedNode(), code, HearthNodeSource.deviceName())

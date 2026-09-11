@@ -30,6 +30,9 @@ pub struct AppState {
     pub alerts: Arc<AlertSink>,
     pub devices: RwLock<DeviceRegistry>,
     pub invites: RwLock<crate::model::invite::InviteRegistry>,
+    /// Неудачные попытки предъявить код доступа, по адресам. Не `RwLock`: внутри
+    /// обычный `Mutex`, и держать его дольше одной вставки в таблицу негде.
+    pub claim_throttle: crate::deviceapi::throttle::ClaimThrottle,
     pub health: RwLock<HealthSnapshot>,
     pub egress: RwLock<EgressSnapshot>,
     pub integrity: RwLock<IntegritySnapshot>,
@@ -62,6 +65,7 @@ impl AppState {
             alerts,
             devices: RwLock::new(devices),
             invites: RwLock::new(invites),
+            claim_throttle: Default::default(),
             health: RwLock::new(HealthSnapshot::pending(&node, &address)),
             egress: RwLock::new(pending_egress()),
             integrity: RwLock::new(pending_integrity()),

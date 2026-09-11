@@ -1,0 +1,1173 @@
+From 74133cef88606c658cdb54e6357556affa8dd7cc Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Fri, 11 Sep 2026 22:40:39 +0300
+Subject: [PATCH 24/24] =?UTF-8?q?0025:=20=D0=B2=D1=85=D0=BE=D0=B4=20=D0=BF?=
+ =?UTF-8?q?=D0=BE=20=D0=BA=D0=BE=D0=B4=D1=83=20=D0=B4=D0=BE=D1=81=D1=82?=
+ =?UTF-8?q?=D1=83=D0=BF=D0=B0=20=D0=B2=D0=BC=D0=B5=D1=81=D1=82=D0=BE=20?=
+ =?UTF-8?q?=D0=B2=D1=88=D0=B8=D1=82=D0=BE=D0=B3=D0=BE=20=D0=BF=D1=80=D0=B8?=
+ =?UTF-8?q?=D0=B3=D0=BB=D0=B0=D1=88=D0=B5=D0=BD=D0=B8=D1=8F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Раньше секрет ехал внутри APK: токен приглашения лежал в res/raw, и файл сборки
+сам по себе впускал в контур — кто его достал, тот и завёлся. Теперь в сборке
+только адрес узла, а секрет приносит человек: код доступа, выданный лично.
+
+HearthAccessCode — разбор кода, зеркальный серверному model::code: 12 знаков
+алфавитом Крокфорда, нормализация регистра, дефисов и трёх привычных замен.
+Расхождение клиента с узлом означало бы отказ человеку с правильной бумажкой.
+
+HearthBakedNode заменил HearthBakedInvite: в ресурсах остаётся адрес узла без
+токена. Экран первого запуска спрашивает код; сканер QR остаётся запасным путём
+для сборок без вшитого адреса. Desktop получил свой транспорт: на Android
+сертификат узла подставляет network security config, на JVM такого механизма нет.
+
+Ресурсы hearth_node.json и hearth_ca.pem порождает bake-node.sh; они
+закоммичены, чтобы дерево воспроизводило собранный APK. Секретов в них нет.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rFCpGgTKkXuYYaCC7Zsew
+---
+ .../android/src/main/res/raw/hearth_node.json |   1 +
+ .../chat/hearth/HearthInvite.android.kt       |  55 +++---
+ .../kotlin/chat/hearth/HearthAccessCode.kt    |  54 ++++++
+ .../kotlin/chat/hearth/HearthImportView.kt    | 172 ++++++++++------
+ .../kotlin/chat/hearth/HearthInvite.kt        |  88 +++++----
+ .../kotlin/chat/hearth/HearthOnboarding.kt    |  23 +++
+ .../chat/hearth/HearthAccessCodeTest.kt       |  66 +++++++
+ .../kotlin/chat/hearth/HearthInviteTest.kt    | 183 +++++++++---------
+ .../chat/hearth/HearthInvite.desktop.kt       | 153 ++++++++++++++-
+ .../src/desktopMain/resources/hearth_ca.pem   |  11 ++
+ .../desktopMain/resources/hearth_node.json    |   1 +
+ apps/multiplatform/gradle.properties          |   4 +-
+ 12 files changed, 585 insertions(+), 226 deletions(-)
+ create mode 100644 apps/multiplatform/android/src/main/res/raw/hearth_node.json
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthAccessCode.kt
+ create mode 100644 apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthAccessCodeTest.kt
+ create mode 100644 apps/multiplatform/common/src/desktopMain/resources/hearth_ca.pem
+ create mode 100644 apps/multiplatform/common/src/desktopMain/resources/hearth_node.json
+
+diff --git a/apps/multiplatform/android/src/main/res/raw/hearth_node.json b/apps/multiplatform/android/src/main/res/raw/hearth_node.json
+new file mode 100644
+index 0000000..a7c83e3
+--- /dev/null
++++ b/apps/multiplatform/android/src/main/res/raw/hearth_node.json
+@@ -0,0 +1 @@
++{"host":"relay.myhearth.ru","port":7444}
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthInvite.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthInvite.android.kt
+index 8bb529c..e6aea2d 100644
+--- a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthInvite.android.kt
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthInvite.android.kt
+@@ -8,20 +8,20 @@ import java.net.HttpURLConnection
+ import java.net.URL
+ 
+ /**
+- * Чтение вшитого приглашения и заведение по нему.
++ * Чтение вшитого адреса узла и заведение по коду доступа (ADR 0012).
+  *
+- * Ресурс ищется ПО ИМЕНИ, а не через сгенерированный `R`. Причина простая: приглашение
++ * Ресурс ищется ПО ИМЕНИ, а не через сгенерированный `R`. Причина простая: адрес
+  * кладётся в сборку скриптом раздачи и в репозитории его нет, поэтому ссылка на
+- * `R.raw.hearth_invite` ломала бы компиляцию обычной сборки «по QR». Минификация в
++ * `R.raw.hearth_node` ломала бы компиляцию обычной сборки «по QR». Минификация в
+  * релизе выключена (`isMinifyEnabled = false`), так что ресурс, на который нет ссылки
+  * из кода, никто не вырежет.
+  */
+-object HearthInviteSource {
+-  private const val RESOURCE_NAME = "hearth_invite"
++object HearthNodeSource {
++  private const val RESOURCE_NAME = "hearth_node"
+   private const val LIMIT_BYTES = 4 * 1024
+ 
+-  /** Приглашение из сборки, или `null` — если это обычная сборка «по QR». */
+-  fun baked(context: Context): HearthBakedInvite? {
++  /** Адрес узла из сборки, или `null` — если это обычная сборка «по QR». */
++  fun baked(context: Context): HearthBakedNode? {
+     val id = context.resources.getIdentifier(RESOURCE_NAME, "raw", context.packageName)
+     if (id == 0) return null
+     val payload = runCatching {
+@@ -32,16 +32,17 @@ object HearthInviteSource {
+         String(bytes, 0, read, Charsets.UTF_8)
+       }
+     }.getOrNull() ?: return null
+-    // Битое приглашение — это обычная сборка «по QR», а не отказ работать: человек
+-    // должен получить сканер, а не пустой экран.
+-    return HearthBakedInvite.parse(payload).getOrNull()
++    // Битый адрес — это обычная сборка «по QR», а не отказ работать: человек должен
++    // получить сканер, а не пустой экран.
++    return HearthBakedNode.parse(payload).getOrNull()
+   }
+ 
+   /**
+    * Как назвать устройство в реестре.
+    *
+-   * Модель телефона, а не имя человека: на этом экране человек ничего не вводит — в
+-   * этом весь смысл. Различать одинаковые модели узел умеет сам, дописывая номер.
++   * Модель телефона, а не имя человека: на этом экране человек вводит код, и просить
++   * его придумать ещё и название — лишний шаг. Различать одинаковые модели узел умеет
++   * сам, дописывая номер.
+    */
+   fun deviceName(): String {
+     val manufacturer = Build.MANUFACTURER.orEmpty().trim()
+@@ -59,17 +60,18 @@ object HearthInviteSource {
+ class HearthAndroidClaimTransport : HearthClaimTransport {
+ 
+   override suspend fun claim(
+-    invite: HearthBakedInvite,
++    node: HearthBakedNode,
++    code: String,
+     deviceName: String,
+   ): Result<String> = withContext(Dispatchers.IO) {
+     runCatching {
+-      val url = URL("https://${invite.host}:${invite.port}/claim")
++      val url = URL("https://${node.host}:${node.port}/claim")
+       // `use` не годится: HttpURLConnection не Closeable, у него disconnect().
+       val conn = (url.openConnection() as HttpURLConnection).apply {
+         requestMethod = "POST"
+         doOutput = true
+-        // Токен заголовком, а не в URL: URL оседает в логах прокси и в истории.
+-        setRequestProperty("X-Hearth-Invite-Token", invite.token)
++        // Код заголовком, а не в URL: URL оседает в логах прокси и в истории.
++        setRequestProperty("X-Hearth-Invite-Token", code)
+         setRequestProperty("Content-Type", "application/json")
+         connectTimeout = 15_000
+         readTimeout = 30_000
+@@ -83,13 +85,12 @@ class HearthAndroidClaimTransport : HearthClaimTransport {
+           ),
+         )
+         conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+-        when (val code = conn.responseCode) {
++        when (val responseCode = conn.responseCode) {
+           200 -> conn.inputStream.use { readBounded(it) }
+-          401 -> throw IllegalStateException(
+-            "приглашение в этой сборке больше не действует — попросите новую или настройте по QR"
+-          )
++          401 -> throw IllegalStateException(HearthOnboardingText.CODE_REFUSED)
++          429 -> throw IllegalStateException(HearthOnboardingText.CODE_THROTTLED)
+           409 -> throw IllegalStateException("на узле кончились места для устройств")
+-          else -> throw IllegalStateException("узел ответил $code")
++          else -> throw IllegalStateException("узел ответил $responseCode")
+         }
+       } finally {
+         conn.disconnect()
+@@ -114,9 +115,9 @@ class HearthAndroidClaimTransport : HearthClaimTransport {
+   }
+ }
+ 
+-actual suspend fun hearthAutoSetUp(): HearthClaimResult {
+-  val context = chat.simplex.common.platform.androidAppContext
+-  val invite = HearthInviteSource.baked(context)
+-  val enroller = HearthSelfEnroller(HearthAndroidClaimTransport())
+-  return enroller.setUp(invite, HearthInviteSource.deviceName())
+-}
++actual fun hearthBakedNode(): HearthBakedNode? =
++  HearthNodeSource.baked(chat.simplex.common.platform.androidAppContext)
++
++actual suspend fun hearthClaimWithCode(code: String): HearthClaimResult =
++  HearthCodeEnroller(HearthAndroidClaimTransport())
++    .enrol(hearthBakedNode(), code, HearthNodeSource.deviceName())
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthAccessCode.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthAccessCode.kt
+new file mode 100644
+index 0000000..4b6397c
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthAccessCode.kt
+@@ -0,0 +1,54 @@
++package chat.hearth
++
++/**
++ * Код доступа — то, что человек получает лично и вводит руками (ADR 0012).
++ *
++ * Зеркало серверного `hearthd/src/model/code.rs`. Раскладка одна и та же, и это
++ * важнее, чем кажется: если клиент и узел разойдутся в том, что считать «тем же
++ * кодом», человек с правильной бумажкой получит отказ и позвонит не туда.
++ *
++ * Алфавит Крокфорда: 32 знака, без `I`, `L`, `O`, `U`. Ни одного, который путают на
++ * слух и на бумаге; `U` выкинут ещё и затем, чтобы код не сложился в непристойность.
++ *
++ * Ввод прощает человека — регистр любой, дефисы и пробелы не важны, а `O`, `I` и `L`
++ * читаются как `0` и `1`. Это делается здесь, а не только на узле: подсказать
++ * «проверьте код» до отправки дешевле, чем сходить в сеть и вернуться с отказом.
++ */
++object HearthAccessCode {
++  private const val ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
++
++  /** Знаков в коде. 12 × 5 бит = 60 бит. */
++  const val LENGTH = 12
++
++  private const val GROUP = 4
++
++  /** Привести введённое к тому виду, в каком код хранится на узле. */
++  fun normalize(input: String): String = buildString {
++    for (raw in input) {
++      val c = raw.uppercaseChar()
++      when {
++        // Человек видит «ноль» и печатает «О», видит «единицу» и печатает «I».
++        c == 'O' -> append('0')
++        c == 'I' || c == 'L' -> append('1')
++        ALPHABET.contains(c) -> append(c)
++        // Всё прочее — дефисы, пробелы, перевод строки из буфера обмена — выкидываем.
++      }
++    }
++  }
++
++  /** Похоже ли это на полный код: правильная длина и только знаки алфавита. */
++  fun isValid(canonical: String): Boolean =
++    canonical.length == LENGTH && canonical.all { ALPHABET.contains(it) }
++
++  /** Разбить на группы для показа: `H7K4-P9QX-M3TV`. */
++  fun formatGroups(canonical: String): String =
++    canonical.chunked(GROUP).joinToString("-")
++
++  /**
++   * Показать ровно то, что человек набрал, но группами — чтобы сверять с бумажкой.
++   *
++   * Обрезаем по длине кода: лишние знаки не молчат, а просто не появляются в поле,
++   * и человек видит это сразу.
++   */
++  fun formatAsTyped(input: String): String = formatGroups(normalize(input).take(LENGTH))
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt
+index 10a63bb..3c8d1ef 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt
+@@ -2,33 +2,39 @@ package chat.hearth
+ 
+ import androidx.compose.foundation.layout.*
+ import androidx.compose.foundation.rememberScrollState
++import androidx.compose.foundation.text.KeyboardOptions
+ import androidx.compose.foundation.verticalScroll
++import androidx.compose.material.Button
+ import androidx.compose.material.CircularProgressIndicator
+ import androidx.compose.material.MaterialTheme
++import androidx.compose.material.OutlinedTextField
+ import androidx.compose.material.Text
+ import androidx.compose.runtime.*
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.text.input.ImeAction
++import androidx.compose.ui.text.input.KeyboardCapitalization
+ import androidx.compose.ui.text.style.TextAlign
+ import androidx.compose.ui.unit.dp
+ import chat.simplex.common.model.ChatController
+ import chat.simplex.common.ui.theme.DEFAULT_PADDING
+ import chat.simplex.common.views.newchat.QRCodeScanner
+ import chat.simplex.common.views.onboarding.OnboardingStage
++import kotlinx.coroutines.launch
+ 
+ /**
+- * Onboarding step 0 — настройка домашнего узла (patches/0003, ADR 0011).
++ * Onboarding step 0 — вход по коду доступа (patches/0003, ADR 0011, ADR 0012).
+  *
+  * Единственный экран, который форк добавляет. Он идёт ПЕРЕД стоковым онбордингом и,
+  * применив bundle, отдаёт управление upstream нетронутым — именно это делает ребейз
+  * механическим (ТЗ §8.1, §8.5).
+  *
+- * Путей внутрь два, и первый обычно не виден человеку:
++ * Путей внутрь два:
+  *
+- *  1. **Вшитое приглашение.** Если сборка раздана семье, экран сам спрашивает узел,
+- *     заводится и уходит дальше. Человек видит полсекунды «настраиваем» — это и есть
+- *     «поставил и пользуйся», как в SimpleX.
+- *  2. **QR.** Обычная сборка, или приглашение кончилось. Тогда показывается сканер.
++ *  1. **Код доступа.** Обычный случай. В сборке вшит только адрес узла, а секрет
++ *     приносит человек — код, выданный лично. Без кода приложение не открывает
++ *     ничего, поэтому сам файл сборки можно передавать как угодно.
++ *  2. **QR.** Сборка без вшитого адреса узла. Тогда показывается сканер, как раньше.
+  *
+  * Сканер берётся upstream'овский. Своя камера означала бы новую зависимость, новое
+  * разрешение и новую поверхность атаки ради экрана, который в жизни устройства
+@@ -36,29 +42,13 @@ import chat.simplex.common.views.onboarding.OnboardingStage
+  */
+ @Composable
+ fun HearthImportView() {
++  // Адрес узла читается один раз: он вшит в сборку и за время экрана не изменится.
++  val node = remember { hearthBakedNode() }
+   val error = remember { mutableStateOf<String?>(null) }
+   val busy = remember { mutableStateOf(false) }
+   val showScanner = remember { mutableStateOf(true) }
+-  // Пока не знаем, есть ли приглашение, — не показываем ни сканер, ни объяснение про
+-  // QR: иначе человек со вшитым приглашением увидит вспышку камеры и текст, которые
+-  // через мгновение исчезнут.
+-  val autoSetUp = remember { mutableStateOf(true) }
+-
+-  LaunchedEffect(Unit) {
+-    when (val result = hearthAutoSetUp()) {
+-      is HearthClaimResult.Applied -> {
+-        // Дальше — обычный онбординг upstream, без единой правки.
+-        ChatController.appPrefs.onboardingStage.set(OnboardingStage.Step1_SimpleXInfo)
+-      }
+-      is HearthClaimResult.NoInvite -> autoSetUp.value = false
+-      is HearthClaimResult.Failed -> {
+-        // Приглашение было, но не сработало: сеть, просроченный токен, полный узел.
+-        // Человека не оставляем в тупике — показываем сканер и причину.
+-        error.value = result.reason
+-        autoSetUp.value = false
+-      }
+-    }
+-  }
++  val code = remember { mutableStateOf("") }
++  val scope = rememberCoroutineScope()
+ 
+   Column(
+     Modifier
+@@ -69,53 +59,115 @@ fun HearthImportView() {
+   ) {
+     Spacer(Modifier.height(DEFAULT_PADDING * 2))
+     Text(
+-      HearthOnboardingText.TITLE,
++      if (node == null) HearthOnboardingText.TITLE else HearthOnboardingText.CODE_TITLE,
+       style = MaterialTheme.typography.h1,
+       textAlign = TextAlign.Center,
+     )
+     Spacer(Modifier.height(DEFAULT_PADDING))
+ 
+-    if (autoSetUp.value) {
++    if (node != null) {
+       Text(
+-        HearthOnboardingText.AUTO_BODY,
++        HearthOnboardingText.CODE_BODY,
+         style = MaterialTheme.typography.body1,
+         textAlign = TextAlign.Center,
+       )
+-      Spacer(Modifier.height(DEFAULT_PADDING * 2))
+-      CircularProgressIndicator(Modifier.size(48.dp), color = MaterialTheme.colors.secondary)
+-      Spacer(Modifier.height(DEFAULT_PADDING * 2))
+-      return@Column
+-    }
+-
+-    Text(
+-      HearthOnboardingText.BODY,
+-      style = MaterialTheme.typography.body1,
+-      textAlign = TextAlign.Center,
+-    )
+-    Spacer(Modifier.height(DEFAULT_PADDING))
++      Spacer(Modifier.height(DEFAULT_PADDING))
+ 
+-    QRCodeScanner(showScanner) { payload ->
+-      // Повторные срабатывания сканера при уже идущем импорте игнорируем: applier
+-      // не идемпотентен, а камера отдаёт один и тот же код несколько раз подряд.
+-      if (busy.value) return@QRCodeScanner false
+-      busy.value = true
+-      error.value = null
++      OutlinedTextField(
++        // В поле всегда канонический код, разбитый по четыре: человек сверяет его с
++        // бумажкой, и группы для этого и нужны. Лишние знаки просто не появляются.
++        value = HearthAccessCode.formatGroups(code.value),
++        onValueChange = { typed ->
++          if (!busy.value) {
++            code.value = HearthAccessCode.normalize(typed).take(HearthAccessCode.LENGTH)
++            error.value = null
++          }
++        },
++        singleLine = true,
++        enabled = !busy.value,
++        keyboardOptions = KeyboardOptions(
++          capitalization = KeyboardCapitalization.Characters,
++          autoCorrect = false,
++          imeAction = ImeAction.Done,
++        ),
++        textStyle = MaterialTheme.typography.h3.copy(textAlign = TextAlign.Center),
++        modifier = Modifier.fillMaxWidth(),
++      )
++      Spacer(Modifier.height(DEFAULT_PADDING / 2))
++      Text(
++        HearthOnboardingText.CODE_HINT,
++        style = MaterialTheme.typography.body2,
++        textAlign = TextAlign.Center,
++      )
++      Spacer(Modifier.height(DEFAULT_PADDING))
+ 
+-      when (val result = hearthAcceptBundle(payload)) {
+-        is HearthImportResult.Applied -> {
+-          showScanner.value = false
+-          // Дальше — обычный онбординг upstream, без единой правки.
+-          ChatController.appPrefs.onboardingStage.set(OnboardingStage.Step1_SimpleXInfo)
+-          true
++      if (busy.value) {
++        Text(
++          HearthOnboardingText.CODE_WORKING,
++          style = MaterialTheme.typography.body1,
++          textAlign = TextAlign.Center,
++        )
++        Spacer(Modifier.height(DEFAULT_PADDING))
++        CircularProgressIndicator(Modifier.size(48.dp), color = MaterialTheme.colors.secondary)
++      } else {
++        Button(
++          onClick = {
++            busy.value = true
++            error.value = null
++            scope.launch {
++              when (val result = hearthClaimWithCode(code.value)) {
++                is HearthClaimResult.Applied -> {
++                  // Дальше — обычный онбординг upstream, без единой правки.
++                  ChatController.appPrefs.onboardingStage.set(OnboardingStage.Step1_SimpleXInfo)
++                }
++                // Адрес узла был, иначе мы бы сюда не попали; на всякий случай
++                // ведём себя как при отказе, а не падаем.
++                is HearthClaimResult.NoNode -> {
++                  error.value = HearthOnboardingText.CODE_REFUSED
++                  busy.value = false
++                }
++                is HearthClaimResult.Failed -> {
++                  error.value = result.reason
++                  busy.value = false
++                }
++              }
++            }
++          },
++          enabled = HearthAccessCode.isValid(code.value),
++        ) {
++          Text(HearthOnboardingText.CODE_BUTTON)
+         }
++      }
++    } else {
++      Text(
++        HearthOnboardingText.BODY,
++        style = MaterialTheme.typography.body1,
++        textAlign = TextAlign.Center,
++      )
++      Spacer(Modifier.height(DEFAULT_PADDING))
++
++      QRCodeScanner(showScanner) { payload ->
++        // Повторные срабатывания сканера при уже идущем импорте игнорируем: applier
++        // не идемпотентен, а камера отдаёт один и тот же код несколько раз подряд.
++        if (busy.value) return@QRCodeScanner false
++        busy.value = true
++        error.value = null
++
++        when (val result = hearthAcceptBundle(payload)) {
++          is HearthImportResult.Applied -> {
++            showScanner.value = false
++            ChatController.appPrefs.onboardingStage.set(OnboardingStage.Step1_SimpleXInfo)
++            true
++          }
+ 
+-        is HearthImportResult.Rejected -> {
+-          // Ошибку показываем на экране, а не всплывающим окном: человек стоит с
+-          // телефоном перед чужим QR, и текст должен остаться на виду, пока он
+-          // разбирается. Сканер оставляем включённым — можно сразу сканировать снова.
+-          error.value = result.reason
+-          busy.value = false
+-          false
++          is HearthImportResult.Rejected -> {
++            // Ошибку показываем на экране, а не всплывающим окном: человек стоит с
++            // телефоном перед чужим QR, и текст должен остаться на виду, пока он
++            // разбирается. Сканер оставляем включённым — можно сразу сканировать снова.
++            error.value = result.reason
++            busy.value = false
++            false
++          }
+         }
+       }
+     }
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthInvite.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthInvite.kt
+index a35ee36..fe924b6 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthInvite.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthInvite.kt
+@@ -4,33 +4,34 @@ import kotlinx.serialization.Serializable
+ import kotlinx.serialization.json.Json
+ 
+ /**
+- * Приглашение, вшитое в сборку (ADR 0011).
++ * Адрес узла, вшитый в сборку (ADR 0011, ADR 0012).
+  *
+- * # Зачем
++ * # Что здесь лежит и чего здесь нет
+  *
+- * Это единственное место, где мы отличались от SimpleX. Там серверы публичные и вшиты
+- * в приложение, поэтому человек ставит его и сразу пользуется. У нас серверы свои, и
+- * без приглашения каждый телефон требовал бы QR — то есть кого-то рядом.
++ * Только адрес узла. Ни паролей релеев, ни токена приглашения — ничего, что стоило бы
++ * прятать: адрес видно в любом соединении с релеем.
+  *
+- * С приглашением первый запуск идёт сам: приложение просит у узла bundle, получает
+- * СВОЮ запись в реестре и свой токен, экран сканера не показывается вовсе.
++ * Так было не всегда. Сначала в сборку клали токен приглашения, и первый запуск шёл
++ * сам — человек ставил APK и сразу пользовался, как в SimpleX. Платой был файл,
++ * который сам по себе впускал в контур: кто его достал, тот и завёлся.
+  *
+- * # Чего здесь НЕТ
++ * Теперь входной секрет приносит человек — код доступа, выданный лично. Это меняет
++ * свойства раздачи целиком:
+  *
+- * Паролей релеев. В сборке лежит только адрес узла и одноразовый токен, ограниченный
+- * сроком и числом использований. Поэтому исчерпанная сборка — обычный файл, из
+- * которого нечего достать, тогда как вшитый bundle был бы вечным ключом.
++ *  * APK можно передавать как угодно: без кода он ничего не открывает;
++ *  * отзывают не сборку, а код, и поимённо: `hearthctl invite revoke <id>`;
++ *  * видно, кто чем воспользовался: у каждого кода свой id и своё устройство.
+  *
+- * Пока приглашение живо, файл APK впускает в контур — это размен, названный в ADR
+- * 0010, и его ограничивают срок, счётчик и отзыв на узле.
++ * Цена — один экран при первом запуске. Это ровно тот шаг, которого нет в SimpleX, и
++ * он существует по той же причине, что и раньше: серверы у нас свои, и телефон надо
++ * на них навести.
+  */
+ @Serializable
+-data class HearthBakedInvite(
++data class HearthBakedNode(
+   /** Хост узла — тот же, что в адресе релея. */
+   val host: String,
++  /** Порт device API. */
+   val port: Int = DEFAULT_PORT,
+-  /** Токен приглашения, 64 hex-символа. */
+-  val token: String,
+ ) {
+   companion object {
+     const val DEFAULT_PORT = 7444
+@@ -40,13 +41,12 @@ data class HearthBakedInvite(
+       isLenient = false
+     }
+ 
+-    private val TOKEN = Regex("^[0-9a-f]{64}$")
+     private val HOST = Regex("^[A-Za-z0-9.-]{1,253}$")
+ 
+-    fun parse(payload: String): Result<HearthBakedInvite> = runCatching {
+-      val invite = json.decodeFromString(serializer(), payload)
+-      invite.validate().getOrThrow()
+-      invite
++    fun parse(payload: String): Result<HearthBakedNode> = runCatching {
++      val node = json.decodeFromString(serializer(), payload)
++      node.validate().getOrThrow()
++      node
+     }
+   }
+ 
+@@ -55,37 +55,36 @@ data class HearthBakedInvite(
+     // свой — однажды он окажется не своим.
+     require(HOST.matches(host)) { "недопустимый адрес узла" }
+     require(port in 1..65535) { "недопустимый порт: $port" }
+-    require(TOKEN.matches(token)) { "токен приглашения должен быть 64 hex-символами" }
+   }
+ }
+ 
+-/** Чем закончилась попытка завести себя по приглашению. */
++/** Чем закончилась попытка завестись по коду доступа. */
+ sealed interface HearthClaimResult {
+   /** Узел завёл устройство и отдал bundle. Дальше — обычный онбординг upstream. */
+   data class Applied(val device: String) : HearthClaimResult
+-  /** Приглашения в сборке нет — это не ошибка, а обычная сборка «по QR». */
+-  data object NoInvite : HearthClaimResult
+-  /** Узел не ответил или отказал. Человеку показываем сканер и причину. */
++  /** Адреса узла в сборке нет — это сборка «по QR», а не ошибка. */
++  data object NoNode : HearthClaimResult
++  /** Узел не ответил или отказал. Причину показываем человеку дословно. */
+   data class Failed(val reason: String) : HearthClaimResult
+ }
+ 
+ /**
+- * Транспорт до узла для заведения по приглашению.
++ * Транспорт до узла для заведения по коду.
+  *
+  * Отдельный от [HearthUpdateTransport] намеренно: тот предъявляет токен УЖЕ
+- * заведённого устройства, а здесь устройства ещё нет — предъявляется приглашение.
++ * заведённого устройства, а здесь устройства ещё нет — предъявляется код доступа.
+  */
+ interface HearthClaimTransport {
+-  /** `POST /claim`. Возвращает JSON bundle'а, как его отдаёт узел. */
+-  suspend fun claim(invite: HearthBakedInvite, deviceName: String): Result<String>
++  /** `POST /claim` с кодом в заголовке. Возвращает JSON bundle'а, как его отдаёт узел. */
++  suspend fun claim(node: HearthBakedNode, code: String, deviceName: String): Result<String>
+ }
+ 
+ /**
+- * Первый запуск: завести себя и применить bundle.
++ * Первый запуск: завести себя по коду и применить bundle.
+  *
+  * Чистая оркестрация без платформенных типов — тестируется на JVM.
+  */
+-class HearthSelfEnroller(
++class HearthCodeEnroller(
+   private val transport: HearthClaimTransport,
+   /**
+    * Что делать с полученным bundle. По умолчанию — проверить и отложить до появления
+@@ -94,10 +93,17 @@ class HearthSelfEnroller(
+    */
+   private val accept: suspend (String) -> HearthImportResult = ::hearthAcceptBundle,
+ ) {
+-  suspend fun setUp(invite: HearthBakedInvite?, deviceName: String): HearthClaimResult {
+-    if (invite == null) return HearthClaimResult.NoInvite
++  suspend fun enrol(node: HearthBakedNode?, code: String, deviceName: String): HearthClaimResult {
++    if (node == null) return HearthClaimResult.NoNode
+ 
+-    val payload = transport.claim(invite, deviceName).getOrElse { e ->
++    val canonical = HearthAccessCode.normalize(code)
++    // Неполный код заворачиваем здесь: сходить в сеть и вернуться с «неизвестный код»
++    // — это те же слова, но через три секунды и с потраченной попыткой у узла.
++    if (!HearthAccessCode.isValid(canonical)) {
++      return HearthClaimResult.Failed(HearthOnboardingText.CODE_INCOMPLETE)
++    }
++
++    val payload = transport.claim(node, canonical, deviceName).getOrElse { e ->
+       return HearthClaimResult.Failed(e.message ?: "узел недоступен")
+     }
+     // Bundle с узла проходит ровно ту же проверку, что и отсканированный. Источник
+@@ -110,10 +116,8 @@ class HearthSelfEnroller(
+   }
+ }
+ 
+-/**
+- * Попробовать завести себя по вшитому приглашению.
+- *
+- * Реализация платформенная: приглашение лежит в ресурсах Android-сборки, а на desktop
+- * его нет и быть не может — там настройка идёт по QR, как и раньше.
+- */
+-expect suspend fun hearthAutoSetUp(): HearthClaimResult
++/** Адрес узла из сборки, или `null` — если это сборка «по QR». */
++expect fun hearthBakedNode(): HearthBakedNode?
++
++/** Завести себя на вшитом узле по коду доступа, который ввёл человек. */
++expect suspend fun hearthClaimWithCode(code: String): HearthClaimResult
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
+index fcf8870..d8d9f13 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
+@@ -80,6 +80,29 @@ class HearthOnboardingImporter(private val applier: HearthBundleApplier) {
+  */
+ object HearthOnboardingText {
+   const val TITLE = "Настройка узла"
++
++  // --- Код доступа (ADR 0012) ---
++
++  const val CODE_TITLE = "Код доступа"
++  const val CODE_BODY =
++    "Введите код, который вам дали лично. Двенадцать знаков, вводится один раз — " +
++      "дальше приложение настроится само."
++  const val CODE_HINT = "Регистр и дефисы не важны."
++  const val CODE_BUTTON = "Продолжить"
++  const val CODE_WORKING = "Подключаемся к узлу…"
++
++  /** Набрано меньше двенадцати знаков — ловим до похода в сеть. */
++  const val CODE_INCOMPLETE = "В коде двенадцать знаков — проверьте, всё ли набрано."
++
++  /**
++   * Узел отказал. Формулировка намеренно одна на все случаи: узел не различает
++   * «такого кода нет», «он уже использован» и «он отозван» — по ответу нельзя
++   * узнать, существовал ли код. Человеку полезнее знать, что делать, чем почему.
++   */
++  const val CODE_REFUSED = "Код не подошёл — возможно, он уже использован. Попросите новый."
++
++  /** Ограничитель перебора на узле (deviceapi::throttle). */
++  const val CODE_THROTTLED = "Слишком много попыток. Попробуйте через час."
+   const val BODY =
+     "Отсканируйте QR-код, который показал администратор узла.\n\n" +
+       "Код содержит пароли релеев — показывайте его лично, " +
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthAccessCodeTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthAccessCodeTest.kt
+new file mode 100644
+index 0000000..bee1de3
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthAccessCodeTest.kt
+@@ -0,0 +1,66 @@
++package chat.hearth
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertFalse
++import kotlin.test.assertTrue
++
++/**
++ * Контракт кода доступа — зеркало `hearthd/src/model/code.rs`.
++ *
++ * Эти тесты стерегут одну вещь: клиент и узел должны одинаково понимать, что такое
++ * «тот же самый код». Если они разойдутся, человек с правильной бумажкой получит
++ * отказ, и разбираться будут по звонку, а не здесь.
++ */
++class HearthAccessCodeTest {
++
++  private val canonical = "H7K4P9QXM3TV"
++
++  @Test
++  fun forgivesHowAPersonTypesIt() {
++    for (typed in listOf(
++      "H7K4-P9QX-M3TV",
++      "h7k4 p9qx m3tv",
++      "  H7K4P9QXM3TV\n",
++      "h7k4-p9qx-m3tv\r\n",
++    )) {
++      assertEquals(canonical, HearthAccessCode.normalize(typed), "ввод: $typed")
++    }
++  }
++
++  @Test
++  fun mapsTheThreeConfusableLetters() {
++    // Крокфорд: человек видит ноль и печатает «О», видит единицу и печатает «I».
++    assertEquals("011", HearthAccessCode.normalize("OIL"))
++    assertEquals("011", HearthAccessCode.normalize("oil"))
++  }
++
++  @Test
++  fun aFullCodeIsValidAndAShortOneIsNot() {
++    assertTrue(HearthAccessCode.isValid(canonical))
++    assertFalse(HearthAccessCode.isValid(canonical.dropLast(1)))
++    assertFalse(HearthAccessCode.isValid(""))
++  }
++
++  @Test
++  fun lettersOutsideTheAlphabetNeverSurvive() {
++    // `U` в алфавите нет вовсе, поэтому и в нормализованном виде его быть не может.
++    assertFalse(HearthAccessCode.normalize("UUUUUUUUUUUU").contains('U'))
++  }
++
++  @Test
++  fun groupsAreShownAsDictated() {
++    assertEquals("H7K4-P9QX-M3TV", HearthAccessCode.formatGroups(canonical))
++  }
++
++  @Test
++  fun aFormattedCodeNormalizesBackToItself() {
++    assertEquals(canonical, HearthAccessCode.normalize(HearthAccessCode.formatGroups(canonical)))
++  }
++
++  @Test
++  fun typingMoreThanTwelveCharactersDoesNotGrowTheCode() {
++    val typed = HearthAccessCode.formatAsTyped(canonical + "ZZZZ")
++    assertEquals("H7K4-P9QX-M3TV", typed)
++  }
++}
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthInviteTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthInviteTest.kt
+index 8b4b108..6d4cc2b 100644
+--- a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthInviteTest.kt
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthInviteTest.kt
+@@ -3,26 +3,25 @@ package chat.hearth
+ import kotlinx.coroutines.runBlocking
+ import kotlin.test.Test
+ import kotlin.test.assertEquals
++import kotlin.test.assertNull
+ import kotlin.test.assertTrue
+ 
+ /**
+- * Контракт вшитого приглашения и первого запуска.
++ * Контракт вшитого адреса узла и первого запуска по коду доступа (ADR 0012).
+  *
+- * Гоняется на JVM без эмулятора: сборка, раздаваемая семье, обязана либо завестись
+- * сама, либо честно упасть в сканер, и узнавать об этом надо здесь, а не по звонку
+- * «у меня ничего не работает».
++ * Гоняется на JVM без эмулятора: сборка, которую раздают людям, обязана либо завести
++ * себя по коду, либо честно объяснить отказ, и узнавать об этом надо здесь, а не по
++ * звонку «у меня ничего не работает».
+  */
+ class HearthInviteTest {
+ 
+-  private val token = "a".repeat(64)
+-
+   private val valid = """
+-    {"host":"relay.example.org","port":7444,"token":"$token"}
++    {"host":"relay.example.org","port":7444}
+   """.trimIndent()
+ 
+   private val bundle = """
+     {"v":1,
+-     "smp":["smp://fp1:pass1@relay.example.org:5223"],
++     "smp":["smp://fp1:pass1@relay.example.org:8443"],
+      "xftp":["xftp://fp2:pass2@relay.example.org:5443"],
+      "ice":["stun:relay.example.org:3478"],
+      "net":{"privateRouting":"always","presetsEnabled":false,"ntfMode":"instant"},
+@@ -30,119 +29,123 @@ class HearthInviteTest {
+      "device":"xiaomi-22101316g"}
+   """.trimIndent()
+ 
++  private val code = "H7K4P9QXM3TV"
++
+   @Test
+   fun parsesWhatTheBakeScriptWrites() {
+-    val invite = HearthBakedInvite.parse(valid).getOrThrow()
+-    assertEquals("relay.example.org", invite.host)
+-    assertEquals(7444, invite.port)
+-    assertEquals(token, invite.token)
++    val node = HearthBakedNode.parse(valid).getOrThrow()
++    assertEquals("relay.example.org", node.host)
++    assertEquals(7444, node.port)
+   }
+ 
+   @Test
+-  fun portDefaultsToTheDeviceApiPort() {
+-    val invite = HearthBakedInvite.parse("""{"host":"h.example","token":"$token"}""").getOrThrow()
+-    assertEquals(HearthBakedInvite.DEFAULT_PORT, invite.port)
++  fun portDefaultsToDeviceApi() {
++    val node = HearthBakedNode.parse("""{"host":"h.example"}""").getOrThrow()
++    assertEquals(HearthBakedNode.DEFAULT_PORT, node.port)
+   }
+ 
+   @Test
+   fun refusesAUrlInsteadOfAHost() {
+-    // Подставлять адрес из файла нельзя даже когда файл свой: однажды он окажется
+-    // не своим, и «host» вида https://чужое/ увёл бы заведение на чужой узел.
+-    assertTrue(
+-      HearthBakedInvite.parse("""{"host":"https://evil.example/","token":"$token"}""").isFailure
+-    )
++    // Подставлять из файла произвольный адрес нельзя даже когда файл свой.
++    assertTrue(HearthBakedNode.parse("""{"host":"https://evil.example/"}""").isFailure)
+   }
+ 
+   @Test
+-  fun refusesAShortOrNonHexToken() {
+-    assertTrue(HearthBakedInvite.parse("""{"host":"h.example","token":"abc"}""").isFailure)
+-    assertTrue(
+-      HearthBakedInvite.parse("""{"host":"h.example","token":"${"Z".repeat(64)}"}""").isFailure
+-    )
++  fun refusesAnImpossiblePort() {
++    assertTrue(HearthBakedNode.parse("""{"host":"h.example","port":0}""").isFailure)
++    assertTrue(HearthBakedNode.parse("""{"host":"h.example","port":70000}""").isFailure)
+   }
+ 
+   @Test
+-  fun refusesAnImpossiblePort() {
+-    assertTrue(
+-      HearthBakedInvite.parse("""{"host":"h.example","port":0,"token":"$token"}""").isFailure
+-    )
++  fun aBuildWithoutANodeAsksForQr() = runBlocking {
++    val enroller = enroller(transport = { _, _, _ -> error("сети быть не должно") })
++    assertEquals(HearthClaimResult.NoNode, enroller.enrol(null, code, "Pixel"))
+   }
+ 
+   @Test
+-  fun withoutAnInviteItIsAnOrdinaryQrBuild() = runBlocking {
+-    val enroller = enroller(
+-      transport = { _, _ -> error("транспорт не должен вызываться") },
+-      accept = { error("принимать нечего") },
+-    )
+-    assertEquals(HearthClaimResult.NoInvite, enroller.setUp(null, "Pixel"))
++  fun anIncompleteCodeNeverReachesTheNode() = runBlocking {
++    var called = false
++    val enroller = enroller(transport = { _, _, _ -> called = true; Result.success(bundle) })
++    val node = HearthBakedNode.parse(valid).getOrThrow()
++
++    val result = enroller.enrol(node, "H7K4-P9QX", "Pixel")
++
++    assertEquals(HearthClaimResult.Failed(HearthOnboardingText.CODE_INCOMPLETE), result)
++    assertTrue(!called, "неполный код не должен тратить попытку у узла")
+   }
+ 
+   @Test
+-  fun aClaimedBundleIsAccepted() = runBlocking {
+-    // Применение отложено до появления профиля: на этом экране пользователя ещё нет,
+-    // и apiSetUserServers отказал бы. Здесь проверяется, что bundle принят и передан
+-    // дальше целиком.
+-    val accepted = mutableListOf<String>()
+-    val enroller = enroller(
+-      transport = { _, name ->
+-        assertEquals("Xiaomi 22101316G", name)
+-        Result.success(bundle)
+-      },
+-      accept = { payload ->
+-        accepted += payload
+-        val parsed = HearthBundle.parse(payload).getOrThrow()
+-        HearthImportResult.Applied(HearthPresets.serversFrom(parsed), parsed.device)
+-      },
+-    )
+-    val invite = HearthBakedInvite.parse(valid).getOrThrow()
+-    val result = enroller.setUp(invite, "Xiaomi 22101316G")
+-    assertEquals(HearthClaimResult.Applied("xiaomi-22101316g"), result)
+-    assertEquals(listOf(bundle), accepted)
++  fun theCodeIsNormalizedBeforeItIsSent() = runBlocking {
++    var sent: String? = null
++    val enroller = enroller(transport = { _, sentCode, _ -> sent = sentCode; Result.success(bundle) })
++    val node = HearthBakedNode.parse(valid).getOrThrow()
++
++    enroller.enrol(node, " h7k4-p9qx-m3tv ", "Pixel")
++
++    // Узел хранит канонический вид, и сравнение у него посимвольное: то, что человек
++    // набрал с дефисами и в нижнем регистре, обязано доехать приведённым.
++    assertEquals(code, sent)
+   }
+ 
+   @Test
+-  fun aDeadInviteFallsBackToTheScannerWithAReason() = runBlocking {
++  fun aSpentCodeIsReportedInWordsAPersonCanAct_on() = runBlocking {
+     val enroller = enroller(
+-      transport = { _, _ -> Result.failure(IllegalStateException("приглашение больше не действует")) },
+-      accept = { error("принимать нечего") },
++      transport = { _, _, _ -> Result.failure(IllegalStateException(HearthOnboardingText.CODE_REFUSED)) }
+     )
+-    val invite = HearthBakedInvite.parse(valid).getOrThrow()
+-    val result = enroller.setUp(invite, "Pixel")
++    val node = HearthBakedNode.parse(valid).getOrThrow()
++
++    val result = enroller.enrol(node, code, "Pixel")
++
++    assertEquals(HearthClaimResult.Failed(HearthOnboardingText.CODE_REFUSED), result)
++  }
++
++  @Test
++  fun aNodeThatDoesNotAnswerIsNotADeadEnd() = runBlocking {
++    val enroller = enroller(transport = { _, _, _ -> Result.failure(IllegalStateException()) })
++    val node = HearthBakedNode.parse(valid).getOrThrow()
++
++    val result = enroller.enrol(node, code, "Pixel")
++
+     assertTrue(result is HearthClaimResult.Failed)
+-    assertEquals("приглашение больше не действует", (result as HearthClaimResult.Failed).reason)
++    assertNull((result as? HearthClaimResult.Applied)?.device)
++  }
++
++  @Test
++  fun aGoodCodeEnrolsTheDevice() = runBlocking {
++    val enroller = enroller(transport = { _, _, _ -> Result.success(bundle) })
++    val node = HearthBakedNode.parse(valid).getOrThrow()
++
++    val result = enroller.enrol(node, code, "Pixel")
++
++    assertEquals(HearthClaimResult.Applied("xiaomi-22101316g"), result)
+   }
+ 
+   @Test
+-  fun aBundleThatFailsValidationIsNotStashed() = runBlocking {
+-    var stashed = 0
++  fun aBundleTheClientRefusesIsNotSilentlyAccepted() = runBlocking {
+     val enroller = enroller(
+-      // Узел доверенный, но ответ всё равно проверяется: подменённый или разъехавшийся
+-      // по версии формата документ не должен молча настроить телефон.
+-      transport = { _, _ -> Result.success("""{"v":99}""") },
+-      accept = { payload ->
+-        HearthBundle.parse(payload).fold(
+-          onSuccess = {
+-            stashed++
+-            HearthImportResult.Applied(HearthPresets.serversFrom(it), it.device)
+-          },
+-          onFailure = { HearthImportResult.Rejected(it.message ?: "плохой bundle") },
+-        )
+-      },
++      transport = { _, _, _ -> Result.success("""{"v":1}""") },
++      accept = { HearthImportResult.Rejected("bundle is not valid") },
+     )
+-    val invite = HearthBakedInvite.parse(valid).getOrThrow()
+-    assertTrue(enroller.setUp(invite, "Pixel") is HearthClaimResult.Failed)
+-    assertEquals(0, stashed)
++    val node = HearthBakedNode.parse(valid).getOrThrow()
++
++    val result = enroller.enrol(node, code, "Pixel")
++
++    assertEquals(HearthClaimResult.Failed("bundle is not valid"), result)
+   }
+-}
+ 
+-/** Транспорт из лямбды — чтобы каждый тест не заводил свой класс. */
+-private fun enroller(
+-  transport: suspend (HearthBakedInvite, String) -> Result<String>,
+-  accept: suspend (String) -> HearthImportResult,
+-) = HearthSelfEnroller(
+-  object : HearthClaimTransport {
+-    override suspend fun claim(invite: HearthBakedInvite, deviceName: String) =
+-      transport(invite, deviceName)
+-  },
+-  accept,
+-)
++  private fun enroller(
++    transport: suspend (HearthBakedNode, String, String) -> Result<String>,
++    accept: suspend (String) -> HearthImportResult = { payload ->
++      HearthBundle.parse(payload).fold(
++        onSuccess = { HearthImportResult.Applied(HearthPresets.serversFrom(it), it.device) },
++        onFailure = { HearthImportResult.Rejected(it.message ?: "bundle is not valid") },
++      )
++    },
++  ) = HearthCodeEnroller(
++    object : HearthClaimTransport {
++      override suspend fun claim(node: HearthBakedNode, code: String, deviceName: String) =
++        transport(node, code, deviceName)
++    },
++    accept,
++  )
++}
+diff --git a/apps/multiplatform/common/src/desktopMain/kotlin/chat/hearth/HearthInvite.desktop.kt b/apps/multiplatform/common/src/desktopMain/kotlin/chat/hearth/HearthInvite.desktop.kt
+index b8f70b1..ac8bf7c 100644
+--- a/apps/multiplatform/common/src/desktopMain/kotlin/chat/hearth/HearthInvite.desktop.kt
++++ b/apps/multiplatform/common/src/desktopMain/kotlin/chat/hearth/HearthInvite.desktop.kt
+@@ -1,10 +1,153 @@
+ package chat.hearth
+ 
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import java.io.InputStream
++import java.net.HttpURLConnection
++import java.net.URL
++import java.security.KeyStore
++import java.security.cert.CertificateFactory
++import javax.net.ssl.HttpsURLConnection
++import javax.net.ssl.SSLContext
++import javax.net.ssl.TrustManagerFactory
++
+ /**
+- * На desktop вшитого приглашения нет.
++ * Заведение настольной сборки по коду доступа (ADR 0012).
++ *
++ * # Почему здесь свой транспорт, а не общий с Android
++ *
++ * Транспорт-то одинаковый — `HttpURLConnection` из JVM. Разное доверие.
++ *
++ * На Android сертификат узла принимается через Network Security Config: CA лежит в
++ * ресурсах, и платформа подставляет его сама, поэтому в коде нет ни `SSLContext`, ни
++ * своего `TrustManager`. На JVM такого механизма нет: узел подписан собственным CA
++ * (`CN = hearth admin CA`), и обычное соединение упало бы на проверке цепочки.
+  *
+- * Раздача сборок для настольных машин у нас не автоматизирована, а класть туда
+- * долгоживущий секрет «на всякий случай» — это ровно тот вечный ключ, которого мы
+- * избегаем на Android. Настройка идёт по QR.
++ * Поэтому здесь доверие собирается руками — и ТОЛЬКО к нашему CA. Системные корни
++ * намеренно не добавляются: узел подписан своим CA, и принимать что-то ещё означало бы
++ * принимать любой сертификат из сотни корней, которым мы не обязаны верить.
++ *
++ * Общего набора исходников для JVM в проекте нет (только androidMain и desktopMain),
++ * поэтому разделить получилось бы лишь ценой нового source set в сборке upstream — а
++ * это ровно та правка, из-за которой ребейзы перестают быть механическими.
+  */
+-actual suspend fun hearthAutoSetUp(): HearthClaimResult = HearthClaimResult.NoInvite
++object HearthDesktopNodeSource {
++  private const val NODE_RESOURCE = "/hearth_node.json"
++  private const val CA_RESOURCE = "/hearth_ca.pem"
++  private const val LIMIT_BYTES = 8 * 1024
++
++  /** Адрес узла из сборки, или `null` — если это сборка «по QR». */
++  fun baked(): HearthBakedNode? {
++    val payload = readResource(NODE_RESOURCE) ?: return null
++    return HearthBakedNode.parse(payload).getOrNull()
++  }
++
++  /** Как назвать эту машину в реестре устройств. */
++  fun deviceName(): String {
++    val user = System.getProperty("user.name").orEmpty().trim()
++    val os = System.getProperty("os.name").orEmpty().trim().ifBlank { "ПК" }
++    return (if (user.isBlank()) os else "$os · $user").take(48)
++  }
++
++  /**
++   * Доверие ровно к одному CA — тому, что вшит в сборку.
++   *
++   * `null`, если CA в сборке нет: тогда заводиться по коду невозможно, и человеку
++   * честнее сказать это словами, чем молча не доверять узлу.
++   */
++  fun sslContext(): SSLContext? {
++    val pem = readResource(CA_RESOURCE) ?: return null
++    return runCatching {
++      val certificate = CertificateFactory.getInstance("X.509")
++        .generateCertificate(pem.byteInputStream(Charsets.UTF_8))
++      val store = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
++        load(null, null)
++        setCertificateEntry("hearth-ca", certificate)
++      }
++      val trust = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
++        .apply { init(store) }
++      SSLContext.getInstance("TLS").apply { init(null, trust.trustManagers, null) }
++    }.getOrNull()
++  }
++
++  private fun readResource(name: String): String? =
++    javaClass.getResourceAsStream(name)?.use { readBounded(it, LIMIT_BYTES) }
++
++  private fun readBounded(input: InputStream, limit: Int): String {
++    val out = java.io.ByteArrayOutputStream()
++    val buf = ByteArray(4 * 1024)
++    while (out.size() < limit) {
++      val n = input.read(buf)
++      if (n < 0) break
++      out.write(buf, 0, n)
++    }
++    return out.toString(Charsets.UTF_8.name())
++  }
++}
++
++/** `POST /claim` с доверием только к вшитому CA. */
++class HearthDesktopClaimTransport : HearthClaimTransport {
++
++  override suspend fun claim(
++    node: HearthBakedNode,
++    code: String,
++    deviceName: String,
++  ): Result<String> = withContext(Dispatchers.IO) {
++    runCatching {
++      val ssl = HearthDesktopNodeSource.sslContext()
++        ?: throw IllegalStateException("в сборке нет сертификата узла — нужна сборка от администратора")
++      val url = URL("https://${node.host}:${node.port}/claim")
++      val conn = (url.openConnection() as HttpsURLConnection).apply {
++        sslSocketFactory = ssl.socketFactory
++        requestMethod = "POST"
++        doOutput = true
++        // Код заголовком, а не в URL: URL оседает в логах прокси и в истории.
++        setRequestProperty("X-Hearth-Invite-Token", code)
++        setRequestProperty("Content-Type", "application/json")
++        connectTimeout = 15_000
++        readTimeout = 30_000
++        instanceFollowRedirects = false
++      }
++      try {
++        val body = kotlinx.serialization.json.Json.encodeToString(
++          kotlinx.serialization.json.JsonObject.serializer(),
++          kotlinx.serialization.json.JsonObject(
++            mapOf("name" to kotlinx.serialization.json.JsonPrimitive(deviceName))
++          ),
++        )
++        conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
++        when (val responseCode = conn.responseCode) {
++          200 -> conn.inputStream.use { readBounded(it) }
++          401 -> throw IllegalStateException(HearthOnboardingText.CODE_REFUSED)
++          429 -> throw IllegalStateException(HearthOnboardingText.CODE_THROTTLED)
++          409 -> throw IllegalStateException("на узле кончились места для устройств")
++          else -> throw IllegalStateException("узел ответил $responseCode")
++        }
++      } finally {
++        conn.disconnect()
++      }
++    }
++  }
++
++  private fun readBounded(input: InputStream): String {
++    val out = java.io.ByteArrayOutputStream()
++    val buf = ByteArray(8 * 1024)
++    while (out.size() < BUNDLE_LIMIT_BYTES) {
++      val n = input.read(buf)
++      if (n < 0) break
++      out.write(buf, 0, n)
++    }
++    if (out.size() >= BUNDLE_LIMIT_BYTES) throw IllegalStateException("ответ узла слишком длинный")
++    return out.toString(Charsets.UTF_8.name())
++  }
++
++  private companion object {
++    const val BUNDLE_LIMIT_BYTES = 64 * 1024
++  }
++}
++
++actual fun hearthBakedNode(): HearthBakedNode? = HearthDesktopNodeSource.baked()
++
++actual suspend fun hearthClaimWithCode(code: String): HearthClaimResult =
++  HearthCodeEnroller(HearthDesktopClaimTransport())
++    .enrol(hearthBakedNode(), code, HearthDesktopNodeSource.deviceName())
+diff --git a/apps/multiplatform/common/src/desktopMain/resources/hearth_ca.pem b/apps/multiplatform/common/src/desktopMain/resources/hearth_ca.pem
+new file mode 100644
+index 0000000..e4be48c
+--- /dev/null
++++ b/apps/multiplatform/common/src/desktopMain/resources/hearth_ca.pem
+@@ -0,0 +1,11 @@
++-----BEGIN CERTIFICATE-----
++MIIBnjCCAUOgAwIBAgIUTvASciYKvbRm7NaXqXd3Z0YIE4QwCgYIKoZIzj0EAwIw
++KzEYMBYGA1UEAwwPaGVhcnRoIGFkbWluIENBMQ8wDQYDVQQKDAZoZWFydGgwHhcN
++MjYwOTA5MDAwMDAwWhcNMzYwOTA2MDAwMDAwWjArMRgwFgYDVQQDDA9oZWFydGgg
++YWRtaW4gQ0ExDzANBgNVBAoMBmhlYXJ0aDBZMBMGByqGSM49AgEGCCqGSM49AwEH
++A0IABH7CJcsVTN64lsoiuyOiFQ0VL7IWFZjEE8V58rgiwUGnkWJzqEwjGWBwUObi
++ng4wmGU63O/+NC/Uyh4dglFt4RujRTBDMA4GA1UdDwEB/wQEAwIBhjAdBgNVHQ4E
++FgQULI6d9ljTxdSOjT98mNaqipTv6fEwEgYDVR0TAQH/BAgwBgEB/wIBADAKBggq
++hkjOPQQDAgNJADBGAiEA+r2lqB4dCHO9r+wP11i9cDDmKX8LOEwHKmIebjY39xMC
++IQDmNCleDF/4ebrmGfP5uMVCQXlSG3RGf7Hka3RwPuI/iw==
++-----END CERTIFICATE-----
+diff --git a/apps/multiplatform/common/src/desktopMain/resources/hearth_node.json b/apps/multiplatform/common/src/desktopMain/resources/hearth_node.json
+new file mode 100644
+index 0000000..a7c83e3
+--- /dev/null
++++ b/apps/multiplatform/common/src/desktopMain/resources/hearth_node.json
+@@ -0,0 +1 @@
++{"host":"relay.myhearth.ru","port":7444}
+diff --git a/apps/multiplatform/gradle.properties b/apps/multiplatform/gradle.properties
+index abd62ec..91b37a0 100644
+--- a/apps/multiplatform/gradle.properties
++++ b/apps/multiplatform/gradle.properties
+@@ -26,8 +26,8 @@ kotlin.jvm.target=11
+ 
+ # hearth: своя нумерация поверх тега upstream. versionCode обязан расти
+ # монотонно — по нему приложение решает, новее ли сборка на узле.
+-android.version_name=7.0.1-h14
+-android.version_code=385
++android.version_name=7.0.1-h15
++android.version_code=386
+ 
+ desktop.version_name=7.0.1
+ desktop.version_code=157

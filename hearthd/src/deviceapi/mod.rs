@@ -45,6 +45,8 @@ use crate::store;
 
 /// Заголовок с секретом устройства. Именно заголовок, не параметр URL: URL оседает в
 /// логах прокси, в истории и в отчётах об ошибках.
+pub mod throttle;
+
 const TOKEN_HEADER: &str = "x-hearth-device-token";
 /// Заголовок приглашения. Отдельный от токена устройства намеренно: у них разный
 /// срок жизни и разный смысл, и путать их в одном заголовке — значит однажды
@@ -52,6 +54,14 @@ const TOKEN_HEADER: &str = "x-hearth-device-token";
 const INVITE_HEADER: &str = "x-hearth-invite-token";
 /// Больше этого манифест обновления быть не может — он маленький по определению.
 const MANIFEST_LIMIT: u64 = 64 * 1024;
+/// Адрес того, кто пришёл.
+///
+/// Соединения device API принимает вручную (TLS поверх своего `accept`), а не через
+/// `axum::serve`, поэтому штатный `ConnectInfo` тут пуст — адрес кладётся в расширения
+/// запроса при приёме и достаётся обработчиком.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PeerIp(pub std::net::IpAddr);
+
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 pub async fn serve(
@@ -117,7 +127,8 @@ pub async fn serve_on(
                 }
             };
             let io = hyper_util::rt::TokioIo::new(tls);
-            let service = hyper::service::service_fn(move |req| {
+            let service = hyper::service::service_fn(move |mut req: hyper::Request<_>| {
+                req.extensions_mut().insert(PeerIp(peer.ip()));
                 let app = app.clone();
                 async move { tower::ServiceExt::oneshot(app, req).await }
             });
@@ -463,6 +474,7 @@ struct ClaimRequest {
 /// исчерпано, из сборки достать нечего: паролей релеев в ней нет.
 async fn claim(
     State(state): State<Arc<AppState>>,
+    peer: Option<axum::Extension<PeerIp>>,
     headers: HeaderMap,
     Json(req): Json<ClaimRequest>,
 ) -> ApiResult<Response> {
@@ -476,6 +488,20 @@ async fn claim(
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invite token required"));
     }
 
+    // Адреса может не быть: так вызывают из тестов, где соединение не настоящее.
+    // Отсутствие адреса не повод отказать — повод не считать.
+    let peer_ip = peer.map(|axum::Extension(PeerIp(ip))| ip);
+    let at = std::time::Instant::now();
+    if let Some(ip) = peer_ip {
+        if let throttle::Verdict::Blocked(left) = state.claim_throttle.check(ip, at) {
+            tracing::warn!(%ip, left = left.as_secs(), "device api: claim is throttled");
+            return Err(ApiError(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many attempts, try later",
+            ));
+        }
+    }
+
     let now = Utc::now();
     let invite_id = {
         let invites = state.invites.read().await;
@@ -485,10 +511,26 @@ async fn claim(
                 // Просроченное, исчерпанное и вовсе несуществующее приглашение
                 // отвечают одинаково: по ответу нельзя узнать, было ли оно.
                 tracing::warn!("device api: rejected an unusable invite token");
+                if let Some(ip) = peer_ip {
+                    if state.claim_throttle.note_failure(ip, at) {
+                        state
+                            .alerts
+                            .emit(crate::model::alert::Alert::warning(
+                                "deviceapi",
+                                format!(
+                                    "с адреса {ip} подбирали код доступа — вход с него закрыт на час"
+                                ),
+                            ))
+                            .await;
+                    }
+                }
                 return Err(ApiError(StatusCode::UNAUTHORIZED, "unknown invite"));
             }
         }
     };
+    if let Some(ip) = peer_ip {
+        state.claim_throttle.note_success(ip);
+    }
 
     let requested = req.name.trim();
     if requested.chars().count() > 64 {

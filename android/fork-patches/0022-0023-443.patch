@@ -1,0 +1,325 @@
+From 583c62e851aa03a0cfc7da0a9fb793bca6b9cd5d Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Fri, 11 Sep 2026 10:04:07 +0300
+Subject: [PATCH 22/24] =?UTF-8?q?0023:=20=D1=81=D0=B2=D0=BE=D0=B9=20=D1=80?=
+ =?UTF-8?q?=D0=B5=D0=BB=D0=B5=D0=B9=20=D0=BD=D0=B0=20=D0=BF=D0=BE=D1=80?=
+ =?UTF-8?q?=D1=82=D1=83=20443,=20=D0=B7=D0=B0=D0=BC=D0=B5=D0=BD=D0=B0=20?=
+ =?UTF-8?q?=D1=81=D1=81=D1=8B=D0=BB=D0=BE=D0=BA=20=D0=BD=D0=B0=20=D1=87?=
+ =?UTF-8?q?=D1=83=D0=B6=D0=B8=D1=85=20=D1=81=D0=B5=D1=80=D0=B2=D0=B5=D1=80?=
+ =?UTF-8?q?=D0=B0=D1=85?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Описание — hearth/android/patches/0013-own-servers-and-links.md (дополнение).
+
+Core.kt после hearthEnforceOwnServers: hearthMigrateRelayToWebPort сразу и
+локально, hearthCleanUpForeignLinks в withBGApi. Overlay: HearthRelayPort.kt,
+HearthServers.kt, HearthRelayPortTest.kt. Версия 7.0.1-h13 / 384.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rFCpGgTKkXuYYaCC7Zsew
+---
+ .../kotlin/chat/hearth/HearthRelayPort.kt     |  40 +++++++
+ .../kotlin/chat/hearth/HearthServers.kt       | 112 +++++++++++++++++-
+ .../chat/simplex/common/platform/Core.kt      |   6 +
+ .../kotlin/chat/hearth/HearthRelayPortTest.kt |  71 +++++++++++
+ apps/multiplatform/gradle.properties          |   4 +-
+ 5 files changed, 227 insertions(+), 6 deletions(-)
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthRelayPort.kt
+ create mode 100644 apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthRelayPortTest.kt
+
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthRelayPort.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthRelayPort.kt
+new file mode 100644
+index 0000000..163ff54
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthRelayPort.kt
+@@ -0,0 +1,40 @@
++package chat.hearth
++
++/**
++ * Порт, на котором телефоны ходят к своему релею.
++ *
++ * # Почему 443, а не 5223
++ *
++ * 5223 — родной порт SMP, но нестандартный, и его режут офисный и публичный Wi-Fi и
++ * часть провайдеров: соединение пропускают, а первое сообщение шифрования глушат.
++ * Именно так телефон «не мог создать ссылку» — на узле было видно, что соединение
++ * открывается, а до сервера не доходит ни байта, и через 60 секунд сервер его
++ * закрывает. 443 — порт обычных сайтов, его не режет почти никто.
++ *
++ * Серверы SimpleX клиент и сам водит через 443 (`smpWebPortServers = preset` в ядре);
++ * поэтому ссылки на их серверах из той же сети создавались, а на наших — нет.
++ *
++ * Релей слушает оба порта, так что переписывание ничего не ломает: уже созданные
++ * очереди продолжают жить на 5223, новые идут через 443.
++ */
++const val HEARTH_RELAY_WEB_PORT = 443
++private const val SMP_DEFAULT_PORT = 5223
++
++// smp://<отпечаток>:<пароль>@<хост[,хост…]>[:порт]
++private val SMP_ADDRESS = Regex("^(smp://[^@/?# ]+@)([A-Za-z0-9.,-]+)(?::([0-9]{1,5}))?$")
++
++/**
++ * Адрес своего релея, переведённый на 443, или `null`, если трогать нечего.
++ *
++ * Переписываем только SMP, только свой хост и только порт 5223 — явный или
++ * подразумеваемый. Чужие серверы, XFTP (у него свой порт) и нестандартные порты,
++ * которые кто-то задал сознательно, не трогаем.
++ */
++fun hearthRelayAddressOnWebPort(address: String, relayHost: String): String? {
++  val m = SMP_ADDRESS.matchEntire(address.trim()) ?: return null
++  val (prefix, hosts, port) = m.destructured
++  if (hosts.split(',').none { it.equals(relayHost, ignoreCase = true) }) return null
++  val current = port.toIntOrNull() ?: SMP_DEFAULT_PORT
++  if (current != SMP_DEFAULT_PORT) return null
++  return "$prefix$hosts:$HEARTH_RELAY_WEB_PORT"
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthServers.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthServers.kt
+index 7c51c2f..6f8c159 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthServers.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthServers.kt
+@@ -1,6 +1,12 @@
+ package chat.hearth
+ 
++import chat.simplex.common.model.AddressSettings
+ import chat.simplex.common.model.ChatController
++import chat.simplex.common.model.ChatDeleteMode
++import chat.simplex.common.model.ChatInfo
++import chat.simplex.common.model.ChatType
++import chat.simplex.common.model.CreatedConnLink
++import chat.simplex.common.model.UserContactLinkRec
+ import chat.simplex.common.platform.Log
+ import chat.simplex.common.platform.chatModel
+ 
+@@ -23,9 +29,9 @@ import chat.simplex.common.platform.chatModel
+  * заведённого устройства. Команда ядра `APISetServerOperators` тут же пересобирает
+  * списки серверов агента для всех профилей, так что перезапуск не нужен.
+  *
+- * Уже созданное это не переносит: адрес и неиспользованные приглашения, выданные до
+- * исправления, остаются на тех серверах, где были созданы. Их надо удалить и создать
+- * заново.
++ * Уже созданное это не переносит само: адрес и неиспользованные приглашения, выданные
++ * до исправления, остаются на тех серверах, где были созданы. Их заменяет
++ * [hearthCleanUpForeignLinks].
+  */
+ 
+ /** Выключить всех операторов. `true`, если какой-то был включён и выключился. */
+@@ -51,9 +57,107 @@ suspend fun hearthDisableOperators(): Boolean {
+  * операторов оставило бы его вовсе без серверов — с ошибкой вместо экрана настройки.
+  */
+ suspend fun hearthEnforceOwnServers(): Boolean {
+-  if (ChatController.appPrefs.hearthDeviceId.get().isNullOrBlank()) return false
++  if (!hearthEnrolled()) return false
+   return runCatching { hearthDisableOperators() }.getOrElse { e ->
+     Log.e("hearth", "не удалось проверить операторов: ${e.message}")
+     false
+   }
+ }
++
++/**
++ * Перевести свой релей на порт 443 у уже настроенного телефона (см. HearthRelayPort.kt).
++ *
++ * Работает локально — в сеть не ходит, узел для этого не нужен. Именно поэтому
++ * телефону в сети, которая режет 5223, достаточно поставить обновление файлом:
++ * до узла он ещё не достаёт, а достать должен как раз после этого шага.
++ */
++suspend fun hearthMigrateRelayToWebPort(): Boolean {
++  if (!hearthEnrolled()) return false
++  val host = hearthRelayHost() ?: return false
++  val rh = chatModel.remoteHostId()
++  val current = ChatController.getUserServers(rh) ?: return false
++  var changed = false
++  val updated = current.map { entry ->
++    if (entry.operator != null) entry
++    else entry.copy(smpServers = entry.smpServers.map { srv ->
++      val moved = if (srv.deleted) null else hearthRelayAddressOnWebPort(srv.server, host)
++      if (moved == null) srv else {
++        changed = true
++        // serverId сохраняем: ядро обновит ту же запись, а не заведёт вторую рядом.
++        srv.copy(server = moved, tested = null)
++      }
++    })
++  }
++  if (!changed) return false
++  val errors = ChatController.validateServers(rh, updated)?.first.orEmpty()
++  if (errors.isNotEmpty()) {
++    Log.e("hearth", "перевод на 443 отвергнут ядром: ${errors.joinToString()}")
++    return false
++  }
++  if (!ChatController.setUserServers(rh, updated)) return false
++  // Пересобрать серверы агента сразу, не дожидаясь перезапуска.
++  hearthDisableOperators()
++  Log.w("hearth", "свой релей переведён на порт $HEARTH_RELAY_WEB_PORT")
++  return true
++}
++
++/**
++ * Заменить то, что осталось на чужих серверах: адрес и незавершённые приглашения.
++ *
++ * Идёт в сеть — удаление очереди это команда её серверу, — поэтому запускается в
++ * фоне и не мешает старту. Неудача не страшна: следующий запуск попробует снова.
++ */
++suspend fun hearthCleanUpForeignLinks() {
++  if (!hearthEnrolled()) return
++  val host = hearthRelayHost() ?: return
++  runCatching { replaceForeignAddress(host) }
++    .onFailure { Log.e("hearth", "адрес не заменён: ${it.message}") }
++  runCatching { dropForeignInvitations(host) }
++    .onFailure { Log.e("hearth", "приглашения не удалены: ${it.message}") }
++}
++
++private suspend fun replaceForeignAddress(host: String) {
++  val address = chatModel.userAddress.value ?: return
++  if (address.connLinkContact.isOn(host)) return
++  val rh = chatModel.remoteHostId()
++  // Сначала удалить: у профиля один адрес, второй ядро не создаст.
++  ChatController.apiDeleteUserAddress(rh) ?: run {
++    Log.w("hearth", "старый адрес на чужом сервере не удалился — попробуем при следующем запуске")
++    return
++  }
++  chatModel.userAddress.value = null
++  val created = ChatController.apiCreateUserAddress(rh) ?: return
++  val shortLink = created.connShortLink != null
++  // Так же, как экран адреса после «Создать адрес».
++  chatModel.userAddress.value = UserContactLinkRec(
++    created,
++    shortLinkDataSet = shortLink,
++    shortLinkLargeDataSet = shortLink,
++    addressSettings = AddressSettings(businessAddress = false, autoAccept = null, autoReply = null),
++  )
++  Log.w("hearth", "адрес на чужом сервере заменён адресом на своём узле")
++}
++
++private suspend fun dropForeignInvitations(host: String) {
++  val rh = chatModel.remoteHostId()
++  // Только те, что создали мы сами (у них есть ссылка) и не на своём узле. Входящие
++  // запросы на соединение ссылки не имеют — их не трогаем.
++  val foreign = chatModel.chats.value.mapNotNull { chat ->
++    (chat.chatInfo as? ChatInfo.ContactConnection)?.contactConnection
++  }.filter { pcc -> pcc.connLinkInv?.let { !it.isOn(host) } == true }
++  for (pcc in foreign) {
++    runCatching {
++      ChatController.apiDeleteChat(rh, ChatType.ContactConnection, pcc.pccConnId, ChatDeleteMode.Full(notify = false))
++    }
++  }
++  if (foreign.isNotEmpty()) Log.w("hearth", "удалено приглашений на чужих серверах: ${foreign.size}")
++}
++
++/** Лежит ли ссылка на своём узле. Хост есть и в короткой ссылке, и внутри полной. */
++private fun CreatedConnLink.isOn(host: String): Boolean =
++  listOfNotNull(connShortLink, connFullLink).any { it.contains(host, ignoreCase = true) }
++
++private fun hearthEnrolled(): Boolean = !ChatController.appPrefs.hearthDeviceId.get().isNullOrBlank()
++
++/** Хост своего релея — тот же, что у device API узла, пришёл с bundle. */
++private fun hearthRelayHost(): String? = ChatController.appPrefs.hearthUpdateHost.get()?.ifBlank { null }
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
+index 3f228fb..fb97a46 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
+@@ -179,6 +179,12 @@ suspend fun initChatController(useKey: String? = null, confirmMigrations: Migrat
+       // hearth: операторы SimpleX могли включиться обратно — экраном условий на старой
+       // сборке или иначе. На каждом запуске выключаем: см. HearthServers.kt.
+       chat.hearth.hearthEnforceOwnServers()
++      // hearth: свой релей на порт 443 — нестандартный 5223 режут офисные и публичные
++      // сети. Локально, без узла: см. HearthRelayPort.kt.
++      chat.hearth.hearthMigrateRelayToWebPort()
++      // hearth: адрес и незавершённые приглашения, созданные до исправления на серверах
++      // SimpleX, заменяются своими. В фоне: удаление ходит в сеть.
++      withBGApi { chat.hearth.hearthCleanUpForeignLinks() }
+       // hearth: ядро заводит карточку «Ask SimpleX Team» на каждый новый профиль.
+       // Стираем — см. HearthPresetCards.kt.
+       chat.hearth.hearthRemovePresetContactCards()
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthRelayPortTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthRelayPortTest.kt
+new file mode 100644
+index 0000000..14efa07
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthRelayPortTest.kt
+@@ -0,0 +1,71 @@
++package chat.hearth
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertNull
++
++/**
++ * Переписывание адреса своего релея на порт 443.
++ *
++ * Ошибка здесь не падает, а тихо оставляет телефон на порту, который режут, — снова
++ * «ссылка крутится и не создаётся». Поэтому проверяется каждый случай, включая те,
++ * которые трогать нельзя.
++ */
++class HearthRelayPortTest {
++
++  private val host = "relay.myhearth.ru"
++  private val fp = "dl4E-N71pfkpNzTLXnI5sHuAeT-zDx21sCkqMCQNk9M="
++
++  @Test
++  fun anExplicit5223MovesTo443() {
++    assertEquals(
++      "smp://$fp:pass_123-x@$host:443",
++      hearthRelayAddressOnWebPort("smp://$fp:pass_123-x@$host:5223", host),
++    )
++  }
++
++  @Test
++  fun aMissingPortMeans5223AndAlsoMoves() {
++    assertEquals("smp://$fp:p@$host:443", hearthRelayAddressOnWebPort("smp://$fp:p@$host", host))
++  }
++
++  @Test
++  fun alreadyOn443IsLeftAlone() {
++    assertNull(hearthRelayAddressOnWebPort("smp://$fp:p@$host:443", host))
++  }
++
++  @Test
++  fun someoneElsesServerIsLeftAlone() {
++    assertNull(hearthRelayAddressOnWebPort("smp://$fp:p@smp8.simplex.im:5223", host))
++  }
++
++  @Test
++  fun xftpIsLeftAlone() {
++    // У XFTP свой порт, 443 на этом адресе уже занят SMP.
++    assertNull(hearthRelayAddressOnWebPort("xftp://$fp:p@$host:5443", host))
++  }
++
++  @Test
++  fun aDeliberateCustomPortIsLeftAlone() {
++    assertNull(hearthRelayAddressOnWebPort("smp://$fp:p@$host:7000", host))
++  }
++
++  @Test
++  fun hostComparisonIgnoresCaseAndSpaces() {
++    assertEquals("smp://$fp:p@RELAY.myhearth.ru:443", hearthRelayAddressOnWebPort("  smp://$fp:p@RELAY.myhearth.ru:5223  ", host))
++  }
++
++  @Test
++  fun aListOfHostsWithOursMoves() {
++    assertEquals(
++      "smp://$fp:p@$host,backup.myhearth.ru:443",
++      hearthRelayAddressOnWebPort("smp://$fp:p@$host,backup.myhearth.ru:5223", host),
++    )
++  }
++
++  @Test
++  fun garbageIsLeftAlone() {
++    assertNull(hearthRelayAddressOnWebPort("не адрес", host))
++    assertNull(hearthRelayAddressOnWebPort("", host))
++  }
++}
+diff --git a/apps/multiplatform/gradle.properties b/apps/multiplatform/gradle.properties
+index 77bdf68..e0ba5a6 100644
+--- a/apps/multiplatform/gradle.properties
++++ b/apps/multiplatform/gradle.properties
+@@ -26,8 +26,8 @@ kotlin.jvm.target=11
+ 
+ # hearth: своя нумерация поверх тега upstream. versionCode обязан расти
+ # монотонно — по нему приложение решает, новее ли сборка на узле.
+-android.version_name=7.0.1-h12
+-android.version_code=383
++android.version_name=7.0.1-h13
++android.version_code=384
+ 
+ desktop.version_name=7.0.1
+ desktop.version_code=157

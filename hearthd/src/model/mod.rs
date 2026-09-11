@@ -5,6 +5,7 @@
 
 pub mod alert;
 pub mod bundle;
+pub mod code;
 pub mod device;
 pub mod health;
 pub mod invite;

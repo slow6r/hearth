@@ -147,6 +147,15 @@ enum InviteCommand {
         /// сессии. Для сборки нужен именно файл.
         #[arg(long)]
         write_token: Option<PathBuf>,
+        /// Сколько кодов выписать разом.
+        #[arg(long, default_value_t = 1)]
+        count: u32,
+        /// Куда сложить выписанные коды — список для раздачи (0600).
+        ///
+        /// Для пачки это единственный разумный вывод: полсотни кодов на экране
+        /// останутся в истории терминала, а раздавать их всё равно с бумаги.
+        #[arg(long)]
+        write_codes: Option<PathBuf>,
     },
     /// Показать приглашения и их состояние.
     List,
@@ -508,50 +517,100 @@ async fn run(cli: Cli) -> Result<()> {
             days,
             note,
             write_token,
+            count,
+            write_codes,
         }) => {
-            let invite: Invite = api
-                .post_json(
-                    "/invites",
-                    Some(serde_json::json!({
-                        "max_uses": uses,
-                        "ttl_days": days,
-                        "note": note,
-                    })),
-                )
-                .await?;
-            println!(
-                "выписано `{}`: {}, {}",
-                invite.id,
-                if invite.max_uses == 0 {
-                    "без ограничения по числу устройств".to_string()
-                } else {
-                    format!("до {} устройств", invite.max_uses)
+            if !(1..=500).contains(&count) {
+                return Err(Error::invalid("count must be between 1 and 500"));
+            }
+            let mut issued: Vec<Invite> = Vec::with_capacity(count as usize);
+            for n in 0..count {
+                // Пометка нумеруется, иначе полсотни одинаковых строк в `invite list`
+                // не дают понять, какой код кому ушёл.
+                let note = match (&note, count) {
+                    (Some(note), 1) => Some(note.clone()),
+                    (Some(note), _) => Some(format!("{note} #{}", n + 1)),
+                    (None, _) => None,
+                };
+                let invite: Invite = api
+                    .post_json(
+                        "/invites",
+                        Some(serde_json::json!({
+                                "max_uses": uses,
+                                "ttl_days": days,
+                                "note": note,
+                        })),
+                    )
+                    .await?;
+                issued.push(invite);
+            }
+
+            let limits = format!(
+                "{}, {}",
+                match uses {
+                    0 => "без ограничения по числу устройств".to_string(),
+                    n => format!("до {n} устройств на код"),
                 },
-                match invite.expires {
+                match issued[0].expires {
                     Some(expires) => format!("до {}", expires.format("%Y-%m-%d %H:%M UTC")),
                     None => "бессрочно".to_string(),
                 }
             );
-            match write_token {
-                Some(path) => {
-                    hearthd::store::write_secret(&path, &invite.token)?;
-                    println!("токен записан в {} (0600)", path.display());
+            println!("выписано кодов: {} — {}", issued.len(), limits);
+
+            if let Some(path) = &write_codes {
+                let mut list = String::new();
+                list.push_str(
+                    "Коды доступа Hearth — выдавать лично, по одному человеку на код.
+",
+                );
+                list.push_str(&format!(
+                    "Выписано {}. Ограничения: {}.
+
+",
+                    Utc::now().format("%Y-%m-%d %H:%M UTC"),
+                    limits
+                ));
+                for (n, invite) in issued.iter().enumerate() {
+                    list.push_str(&format!(
+                        "{:>3}. {}   id {}   кому: ______________________
+",
+                        n + 1,
+                        hearthd::model::code::format_groups(&invite.token),
+                        invite.id
+                    ));
                 }
-                None => {
-                    println!();
-                    println!("токен (виден один раз, дальше только в сборке):");
-                    println!("{}", invite.token);
+                list.push_str(
+                    "
+Отозвать один код: hearthctl invite revoke <id>
+",
+                );
+                list.push_str(
+                    "Кто заведён по коду — hearthctl invite list.
+",
+                );
+                hearthd::store::write_secret(path, &list)?;
+                println!("список записан в {} (0600)", path.display());
+            } else if let Some(path) = &write_token {
+                hearthd::store::write_secret(path, &issued[0].token)?;
+                println!("токен записан в {} (0600)", path.display());
+            } else {
+                println!();
+                println!("коды (видны один раз):");
+                for invite in &issued {
+                    println!(
+                        "  {}   id {}",
+                        hearthd::model::code::format_groups(&invite.token),
+                        invite.id
+                    );
                 }
             }
             println!();
-            println!("Кто получит этот APK, сможет создавать очереди на релее — то есть");
-            println!("тратить ваш трафик и диск. Переписки это не открывает: она");
-            println!("зашифрована от устройства до устройства.");
-            println!(
-                "Если раздали не туда — `hearthctl invite revoke {}`.",
-                invite.id
-            );
-            println!("Уже заведённые устройства отзыв приглашения не трогает.");
+            println!("Код впускает в контур: по нему заводится устройство и получает");
+            println!("адреса релеев. Переписки это не открывает — она зашифрована от");
+            println!("устройства до устройства, узел её не читает.");
+            println!("Если код ушёл не туда — `hearthctl invite revoke <id>`.");
+            println!("Уже заведённые по нему устройства отзыв не трогает.");
         }
         Command::Invite(InviteCommand::List) => {
             let invites: Vec<Invite> = api.get_json("/invites").await?;
