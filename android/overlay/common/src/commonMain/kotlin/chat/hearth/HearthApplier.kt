@@ -65,6 +65,10 @@ class HearthCoreApplier : HearthBundleApplier {
     // Перечитать: ядро присваивает serverId вновь добавленным записям, и без этого
     // модель в UI разойдётся с тем, что реально записано.
     ChatController.getServerOperators(rh)?.let { chatModel.conditions.value = it }
+    // И выключить операторов отдельной командой. setUserServers выключает их тоже, но
+    // именно APISetServerOperators сразу пересобирает списки серверов агента: без неё
+    // до перезапуска очереди могли уходить на прежние серверы (HearthServers.kt).
+    hearthDisableOperators()
 
     // ICE (patches/0004). Хранятся строками через перевод строки — тот же формат,
     // который читает `getIceServers()` и разбирает `parseRTCIceServers`. Именно под
