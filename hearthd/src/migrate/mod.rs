@@ -108,6 +108,17 @@ pub async fn export(state: &Arc<AppState>) -> Result<ExportReport> {
     }
     state.save_migrate_status().await?;
 
+    // Иначе supervisor поднимет релеи обратно на ближайшем тике, и после импорта на
+    // новом узле в сети окажутся два релея с одним CA и одним адресом — ровно то
+    // расщепление, которое этот модуль объявляет недопустимым.
+    state
+        .set_mode(
+            crate::model::mode::NodeMode::Migration,
+            "перенос узла: выполнен `hearthctl migrate export`",
+            Vec::new(),
+        )
+        .await?;
+
     state
         .alerts
         .emit(

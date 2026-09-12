@@ -85,6 +85,20 @@ enum Command {
     /// Pinned binaries (ТЗ §6.1).
     #[command(subcommand)]
     Manifest(ManifestCommand),
+    /// Режим узла: карантин, обслуживание, перенос.
+    #[command(subcommand)]
+    Mode(ModeCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum ModeCommand {
+    /// Показать режим и причину, по которой он наступил.
+    Show,
+    /// Снять режим и вернуть узел в норму.
+    ///
+    /// Только вручную: узел не снимает карантин сам, даже если проверка целостности
+    /// снова сошлась — причина могла быть устранена и подменой манифеста.
+    Clear,
 }
 
 #[derive(Debug, Args)]
@@ -396,6 +410,27 @@ async fn run(cli: Cli) -> Result<()> {
     )?;
 
     match cli.command {
+        Command::Mode(ModeCommand::Show) => {
+            let mode: hearthd::model::mode::NodeState = api.get_json("/mode").await?;
+            if cli.json {
+                print_json(&mode)?;
+            } else {
+                println!("{}", mode.summary());
+                for finding in &mode.findings {
+                    println!("  {finding}");
+                }
+                if mode.mode != hearthd::model::mode::NodeMode::Normal {
+                    println!();
+                    println!("Релеи удерживаются остановленными. Разберитесь с причиной,");
+                    println!("затем снимите режим: hearthctl mode clear");
+                }
+            }
+        }
+        Command::Mode(ModeCommand::Clear) => {
+            let mode: hearthd::model::mode::NodeState = api.post_json("/mode", None).await?;
+            println!("{}", mode.summary());
+            println!("Надзор снова поднимет релеи на ближайшем тике.");
+        }
         Command::Health => {
             let health: HealthSnapshot = api.get_json("/health").await?;
             if cli.json {
@@ -855,6 +890,18 @@ fn print_egress(egress: &hearthd::model::health::EgressSnapshot) {
 }
 
 fn print_status(status: &NodeStatus) {
+    // Режим печатается первым: если релеи остановлены, это главное, что человек
+    // должен узнать, а не двадцатая строка под списком служб.
+    println!("{}", status.mode.summary());
+    if !status.mode.findings.is_empty() {
+        for finding in &status.mode.findings {
+            println!("  {finding}");
+        }
+    }
+    if status.mode.mode != hearthd::model::mode::NodeMode::Normal {
+        println!("  снять: hearthctl mode clear");
+    }
+    println!();
     print_health(&status.health);
     println!();
     print_egress(&status.egress);

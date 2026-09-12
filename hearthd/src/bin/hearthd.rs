@@ -79,9 +79,16 @@ enum CaCommand {
     /// приходит по имени из bundle, и SAN должен совпадать.
     IssueDeviceApi,
     /// Revoke an admin client certificate.
+    ///
+    /// По имени гасятся ВСЕ действующие сертификаты с этим именем: после штатной
+    /// ротации их бывает несколько, и «отозвать owner» обязано означать «ни один
+    /// owner больше не пускает», а не «отозван первый попавшийся».
     Revoke {
-        /// Admin name.
-        name: String,
+        /// Admin name. Взаимоисключимо с `--fingerprint`.
+        name: Option<String>,
+        /// Отозвать ровно одну личность по отпечатку сертификата (64 hex).
+        #[arg(long, conflicts_with = "name")]
+        fingerprint: Option<String>,
     },
 }
 
@@ -178,10 +185,31 @@ fn run(cli: Cli) -> Result<()> {
             println!("Дальше: ./deploy/fix-permissions.sh && systemctl restart hearthd");
             Ok(())
         }
-        Command::Ca(CaCommand::Revoke { name }) => {
+        Command::Ca(CaCommand::Revoke { name, fingerprint }) => {
             let mut registry = pki::AdminRegistry::load(&config.api.pki_dir)?;
-            let admin = registry.revoke(&name)?;
-            println!("revoked `{}` ({})", admin.name, admin.fingerprint);
+            let revoked = match (name, fingerprint) {
+                (_, Some(fingerprint)) => vec![registry.revoke_by_fingerprint(&fingerprint)?],
+                (Some(name), None) => registry.revoke(&name)?,
+                (None, None) => {
+                    return Err(hearthd::error::Error::invalid(
+                        "нужно имя администратора или --fingerprint",
+                    ))
+                }
+            };
+            for admin in &revoked {
+                println!("revoked `{}` ({})", admin.name, admin.fingerprint);
+            }
+            if revoked.len() > 1 {
+                println!();
+                println!(
+                    "Действующих сертификатов с этим именем было {} — погашены все.",
+                    revoked.len()
+                );
+            }
+            println!();
+            println!("Отзыв вступает в силу для НОВЫХ соединений сразу; уже открытые");
+            println!("админские соединения закрываются по таймауту. Если сертификат");
+            println!("украден, перезапустите hearthd: systemctl restart hearthd");
             Ok(())
         }
         Command::Run => serve(config, cli.dry_run),

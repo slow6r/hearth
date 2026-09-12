@@ -10,6 +10,7 @@ pub mod device;
 pub mod health;
 pub mod invite;
 pub mod manifest;
+pub mod mode;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 

@@ -75,6 +75,8 @@ impl Watched {
 pub struct Supervisor {
     state: Arc<AppState>,
     watched: Vec<Watched>,
+    /// Про удержание релеев сообщаем один раз на инцидент, а не каждые 15 секунд.
+    held_logged: bool,
 }
 
 impl Supervisor {
@@ -102,7 +104,11 @@ impl Supervisor {
                 None,
             ));
         }
-        Self { state, watched }
+        Self {
+            state,
+            watched,
+            held_logged: false,
+        }
     }
 
     /// Run until `shutdown` resolves.
@@ -130,16 +136,45 @@ impl Supervisor {
         let mut services = Vec::with_capacity(self.watched.len());
         let mut overall = HealthState::Ok;
 
+        // Режим читается один раз на тик. Решение «можно ли поднимать релей»
+        // принимается не здесь, а в model::mode, и надзор обязан ему подчиняться:
+        // без этого карантин по целостности и остановка на время переноса
+        // отменялись сами собой через check_interval_secs.
+        let node = self.state.mode.read().await.clone();
+        let relay_units: Vec<String> = config
+            .relays()
+            .iter()
+            .map(|relay| relay.unit.clone())
+            .collect();
+        if node.relays_allowed() {
+            self.held_logged = false;
+        }
+        let mut any_held = false;
+
         for watched in &mut self.watched {
             let health = probe(&self.state, watched, &config, now).await;
             overall = overall.worst(health.state);
-            if health.state != HealthState::Ok {
+            let held = !may_restart(node.mode, &watched.unit, &relay_units);
+            if held {
+                // Не поднимаем и не сбрасываем backoff: узел не воюет с оператором,
+                // который поднял службу руками, но сам её не возвращает.
+                any_held = true;
+            } else if health.state != HealthState::Ok {
                 maybe_restart(&self.state, watched, &config, now).await;
             } else {
                 watched.backoff_step = 0;
                 watched.hold_until = None;
             }
             services.push(health);
+        }
+
+        if any_held && !self.held_logged {
+            self.held_logged = true;
+            tracing::error!(
+                mode = node.mode.label(),
+                reason = %node.reason,
+                "релеи удерживаются остановленными: режим узла запрещает их работу"
+            );
         }
 
         let snapshot = HealthSnapshot {
@@ -153,6 +188,16 @@ impl Supervisor {
         };
         *self.state.health.write().await = snapshot;
     }
+}
+
+/// Можно ли надзору поднимать этот юнит сейчас.
+///
+/// Отдельная функция, а не условие по месту: это решение принимается в двух точках
+/// (обход в `tick` и сама `maybe_restart`), и разъехавшиеся копии одного правила —
+/// именно то, из-за чего карантин когда-то не работал. Здесь его можно проверить
+/// тестом, не поднимая ни systemd, ни узел.
+fn may_restart(mode: crate::model::mode::NodeMode, unit: &str, relay_units: &[String]) -> bool {
+    mode.relays_allowed() || !relay_units.iter().any(|relay| relay == unit)
 }
 
 /// Collect the health of one unit.
@@ -248,6 +293,18 @@ async fn maybe_restart(
     config: &Config,
     now: DateTime<Utc>,
 ) {
+    // Второй замок на той же двери. Проверка есть и в `tick`, но перезапуск —
+    // необратимое действие с точки зрения карантина: подменённый бинарь, поднятый
+    // один раз, снова начинает обслуживать трафик. Поэтому решение проверяется и в
+    // самой точке действия, а не только у вызывающего.
+    let relay_units: Vec<String> = config
+        .relays()
+        .iter()
+        .map(|relay| relay.unit.clone())
+        .collect();
+    if !may_restart(state.node_mode().await, &watched.unit, &relay_units) {
+        return;
+    }
     if !config.supervisor.restart_enabled {
         return;
     }
@@ -329,6 +386,59 @@ mod tests {
             unit_file_state: "enabled".into(),
             n_restarts: 0,
             start_timestamp: String::new(),
+        }
+    }
+
+    fn relays() -> Vec<String> {
+        vec![
+            "smp-server.service".to_string(),
+            "xftp-server.service".to_string(),
+        ]
+    }
+
+    #[test]
+    fn quarantine_holds_the_relays_down() {
+        // Главный блокер: раньше supervisor поднимал остановленный по целостности
+        // релей на ближайшем тике, то есть карантин жил пятнадцать секунд.
+        for mode in [
+            crate::model::mode::NodeMode::Quarantine,
+            crate::model::mode::NodeMode::Maintenance,
+            crate::model::mode::NodeMode::Migration,
+        ] {
+            assert!(
+                !may_restart(mode, "smp-server.service", &relays()),
+                "{mode:?} обязан удерживать релей остановленным"
+            );
+            assert!(
+                !may_restart(mode, "xftp-server.service", &relays()),
+                "{mode:?} обязан удерживать релей остановленным"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quarantine_does_not_freeze_the_rest_of_the_node() {
+        // Карантин про релеи. Управляющий контур и TURN под запрет не попадают:
+        // иначе узел, потерявший целостность, становится ещё и неуправляемым.
+        assert!(may_restart(
+            crate::model::mode::NodeMode::Quarantine,
+            "coturn.service",
+            &relays()
+        ));
+    }
+
+    #[test]
+    fn normal_mode_restarts_everything_as_before() {
+        for unit in [
+            "smp-server.service",
+            "xftp-server.service",
+            "coturn.service",
+        ] {
+            assert!(may_restart(
+                crate::model::mode::NodeMode::Normal,
+                unit,
+                &relays()
+            ));
         }
     }
 

@@ -33,6 +33,9 @@ pub struct AppState {
     /// Неудачные попытки предъявить код доступа, по адресам. Не `RwLock`: внутри
     /// обычный `Mutex`, и держать его дольше одной вставки в таблицу негде.
     pub claim_throttle: crate::deviceapi::throttle::ClaimThrottle,
+    /// Режим узла — единственное место, где решается, можно ли держать релеи.
+    /// Переживает перезапуск: запрет, живущий в памяти процесса, не запрет.
+    pub mode: RwLock<crate::model::mode::NodeState>,
     pub health: RwLock<HealthSnapshot>,
     pub egress: RwLock<EgressSnapshot>,
     pub integrity: RwLock<IntegritySnapshot>,
@@ -54,6 +57,10 @@ impl AppState {
             store::read_json(config.paths.backup_status_file())?.unwrap_or_default();
         let migrate: MigrateStatus =
             store::read_json(config.paths.migrate_status_file())?.unwrap_or_default();
+        // Режим читается до запуска надзора: иначе после перезагрузки supervisor
+        // успеет поднять то, что было запрещено.
+        let mode: crate::model::mode::NodeState =
+            store::read_json(config.paths.node_mode_file())?.unwrap_or_default();
 
         let node = config.node.name.clone();
         let address = config.node.host.clone();
@@ -66,6 +73,7 @@ impl AppState {
             devices: RwLock::new(devices),
             invites: RwLock::new(invites),
             claim_throttle: Default::default(),
+            mode: RwLock::new(mode),
             health: RwLock::new(HealthSnapshot::pending(&node, &address)),
             egress: RwLock::new(pending_egress()),
             integrity: RwLock::new(pending_integrity()),
@@ -83,6 +91,7 @@ impl AppState {
     pub async fn status(&self) -> NodeStatus {
         let devices = self.devices.read().await;
         NodeStatus {
+            mode: self.mode.read().await.clone(),
             health: self.health.read().await.clone(),
             egress: self.egress.read().await.clone(),
             integrity: self.integrity.read().await.clone(),
@@ -92,6 +101,37 @@ impl AppState {
             devices_total: devices.devices.len(),
             alerts_critical_open: self.alerts.critical_count().await,
         }
+    }
+
+    /// Текущий режим узла.
+    pub async fn node_mode(&self) -> crate::model::mode::NodeMode {
+        self.mode.read().await.mode
+    }
+
+    /// Перевести узел в режим и зафиксировать это на диске.
+    ///
+    /// Пишем файл ДО обновления памяти: если запись не удалась, узел не имеет права
+    /// считать запрет установленным — иначе он исчезнет при следующем перезапуске, и
+    /// ровно в тот момент, когда был нужен.
+    pub async fn set_mode(
+        &self,
+        mode: crate::model::mode::NodeMode,
+        reason: impl Into<String>,
+        findings: Vec<String>,
+    ) -> Result<()> {
+        let next = crate::model::mode::NodeState::enter(mode, reason, findings);
+        store::write_json_atomic(self.config.paths.node_mode_file(), &next, store::MODE_STATE)?;
+        *self.mode.write().await = next;
+        Ok(())
+    }
+
+    /// Снять режим. Только по явной команде человека: причина, по которой службы
+    /// остановлены, не исчезает оттого, что проверка снова прошла.
+    pub async fn clear_mode(&self) -> Result<crate::model::mode::NodeState> {
+        let next = crate::model::mode::NodeState::normal();
+        store::write_json_atomic(self.config.paths.node_mode_file(), &next, store::MODE_STATE)?;
+        *self.mode.write().await = next.clone();
+        Ok(next)
     }
 
     /// Persist the backup status slot.
@@ -172,6 +212,54 @@ pub(crate) mod tests {
         assert_eq!(status.devices_total, 0);
         assert_eq!(status.health.state, HealthState::Degraded);
         assert!(!status.egress.counters_readable);
+    }
+
+    #[tokio::test]
+    async fn a_quarantine_survives_a_restart() {
+        // Запрет, живущий в памяти процесса, запретом не является: после
+        // перезагрузки узла supervisor поднимал бы остановленные релеи.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::new(test_config(dir.path()), Sys::new(true)).expect("state");
+        state
+            .set_mode(
+                crate::model::mode::NodeMode::Quarantine,
+                "хеш smp-server не совпал",
+                vec!["smp-server".into()],
+            )
+            .await
+            .expect("set mode");
+        drop(state);
+
+        let state = AppState::new(test_config(dir.path()), Sys::new(true)).expect("restart");
+        let node = state.mode.read().await.clone();
+        assert_eq!(node.mode, crate::model::mode::NodeMode::Quarantine);
+        assert!(!node.relays_allowed());
+        assert_eq!(node.reason, "хеш smp-server не совпал");
+        assert_eq!(node.findings, vec!["smp-server".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_node_starts_in_normal_mode() {
+        // Отсутствие файла — это обычная работа, а не «неизвестно, поэтому запретим»:
+        // иначе первый же запуск встал бы колом.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::new(test_config(dir.path()), Sys::new(true)).expect("state");
+        assert!(state.node_mode().await.relays_allowed());
+    }
+
+    #[tokio::test]
+    async fn clearing_the_mode_is_persistent_too() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::new(test_config(dir.path()), Sys::new(true)).expect("state");
+        state
+            .set_mode(crate::model::mode::NodeMode::Migration, "перенос", vec![])
+            .await
+            .expect("set");
+        state.clear_mode().await.expect("clear");
+        drop(state);
+
+        let state = AppState::new(test_config(dir.path()), Sys::new(true)).expect("restart");
+        assert!(state.node_mode().await.relays_allowed());
     }
 
     #[tokio::test]

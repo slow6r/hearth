@@ -36,6 +36,7 @@ pub struct Admin {
 pub fn router(state: Arc<AppState>) -> Router {
     let max_body = state.config.api.max_body_bytes;
     Router::new()
+        .route("/mode", get(node_mode).post(clear_node_mode))
         .route("/health", get(health))
         .route("/status", get(status))
         .route("/alerts", get(alerts))
@@ -180,6 +181,39 @@ struct NewInvite {
     ttl_days: Option<i64>,
     #[serde(default)]
     note: Option<String>,
+}
+
+/// Текущий режим узла: почему остановлены релеи и с какого момента.
+async fn node_mode(State(state): State<Arc<AppState>>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(state.mode.read().await.clone()))
+}
+
+/// Снять режим и вернуть узел в норму.
+///
+/// Только по явной команде человека — в этом весь смысл режима. Проверка целостности,
+/// снова показавшая совпадение, карантин НЕ снимает: причина, по которой бинарь не
+/// сошёлся, могла быть устранена подменой манифеста ровно так же, как и починкой.
+async fn clear_node_mode(State(state): State<Arc<AppState>>) -> ApiResult<impl IntoResponse> {
+    let previous = state.mode.read().await.clone();
+    let next = state.clear_mode().await?;
+    if previous.mode != crate::model::mode::NodeMode::Normal {
+        state
+            .alerts
+            .emit(crate::model::alert::Alert::warning(
+                "mode",
+                format!(
+                    "режим `{}` снят оператором; причина была: {}",
+                    previous.mode.label(),
+                    if previous.reason.is_empty() {
+                        "не записана"
+                    } else {
+                        &previous.reason
+                    }
+                ),
+            ))
+            .await;
+    }
+    Ok(Json(next))
 }
 
 async fn list_invites(State(state): State<Arc<AppState>>) -> ApiResult<impl IntoResponse> {

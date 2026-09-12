@@ -82,6 +82,13 @@ impl IntegrityChecker {
                             .with_details(serde_json::json!({ "findings": bad })),
                         )
                         .await;
+                    // Карантин фиксируется на диске ДО остановки: запрет, который не
+                    // пережил бы перезагрузку, запретом не является.
+                    self.quarantine(
+                        format!("{} пинованных бинарей не совпали с манифестом", bad.len()),
+                        bad.iter().map(|f| f.name.clone()).collect(),
+                    )
+                    .await;
                     self.stop_relays().await;
                 } else {
                     self.stopped_relays = false;
@@ -108,6 +115,18 @@ impl IntegrityChecker {
                         })),
                     )
                     .await;
+                // Нечитаемый манифест — это НЕ «проверить не удалось, поедем
+                // дальше». Усечь файл или снять с него права проще, чем подделать
+                // хеш, и если такая ошибка оставляет релеи работать, вся проверка
+                // целостности обходится одной строкой. Поэтому тот же карантин, что
+                // и при несовпадении: различаются только слова в алерте.
+                self.quarantine(
+                    format!("манифест целостности не прочитан: {e}"),
+                    vec![manifest_path.display().to_string()],
+                )
+                .await;
+                self.stop_relays().await;
+
                 IntegritySnapshot {
                     checked: Utc::now(),
                     state: HealthState::Down,
@@ -120,6 +139,32 @@ impl IntegrityChecker {
 
         *self.state.integrity.write().await = snapshot.clone();
         snapshot
+    }
+
+    /// Перевести узел в карантин и записать это на диск.
+    ///
+    /// Отдельный метод, потому что точек входа две — несовпадение хеша и нечитаемый
+    /// манифест, — и обе обязаны оставлять одинаково прочный след.
+    async fn quarantine(&mut self, reason: String, findings: Vec<String>) {
+        if !self.state.config.integrity.stop_relays_on_mismatch {
+            return;
+        }
+        if let Err(e) = self
+            .state
+            .set_mode(crate::model::mode::NodeMode::Quarantine, reason, findings)
+            .await
+        {
+            // Не смогли записать запрет — говорим об этом громко: после перезапуска
+            // узел поднимет релеи, и человек должен узнать об этом сейчас.
+            tracing::error!(error = %e, "карантин не записан на диск");
+            self.state
+                .alerts
+                .emit(Alert::critical(
+                    "integrity",
+                    format!("карантин не удалось записать на диск: {e}"),
+                ))
+                .await;
+        }
     }
 
     /// ТЗ §7.3: "Несовпадение → стоп релея + алерт".
@@ -175,6 +220,32 @@ mod tests {
         let mut f = std::fs::File::create(&path).expect("create");
         f.write_all(name.as_bytes()).expect("write");
         path
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_manifest_quarantines_the_node() {
+        // Усечь файл или снять с него права проще, чем подделать хеш. Если такая
+        // ошибка оставляет релеи работать, вся проверка целостности обходится одной
+        // строкой — поэтому тот же карантин, что и при несовпадении.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = crate::state::tests::test_config(dir.path());
+        if let Some(parent) = config.paths.manifest.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&config.paths.manifest, "это не toml ====").expect("write");
+
+        let state = crate::state::AppState::new(config, Sys::new(true)).expect("state");
+        let mut checker = IntegrityChecker::new(state.clone());
+        let snapshot = checker.check().await;
+
+        assert_eq!(snapshot.state, HealthState::Down);
+        let node = state.mode.read().await.clone();
+        assert_eq!(
+            node.mode,
+            crate::model::mode::NodeMode::Quarantine,
+            "нечитаемый манифест обязан переводить узел в карантин"
+        );
+        assert!(!node.relays_allowed());
     }
 
     #[tokio::test]

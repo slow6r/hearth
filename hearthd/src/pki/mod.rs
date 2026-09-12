@@ -83,15 +83,49 @@ impl AdminRegistry {
             .find(|a| a.fingerprint.eq_ignore_ascii_case(fingerprint) && a.is_valid_at(now))
     }
 
-    pub fn revoke(&mut self, name: &str) -> Result<AdminCert> {
+    /// Отозвать ВСЕ действующие сертификаты с этим именем.
+    ///
+    /// Раньше искалась первая запись с таким именем — и после штатной ротации
+    /// (`revoke` + `issue`, ADR 0004) это была СТАРАЯ, уже отозванная. Команда
+    /// отвечала «отозвано», код возврата 0, а украденный действующий сертификат
+    /// продолжал пускать в admin API. Поэтому: выбираем только действующие, и если
+    /// их несколько — гасим все, возвращая список.
+    pub fn revoke(&mut self, name: &str) -> Result<Vec<AdminCert>> {
+        let now = Utc::now();
+        let mut revoked = Vec::new();
+        for admin in self.admins.iter_mut() {
+            if admin.name == name && admin.revoked.is_none() {
+                admin.revoked = Some(now);
+                revoked.push(admin.clone());
+            }
+        }
+        if revoked.is_empty() {
+            // Повторный отзыв — ошибка, а не тихий успех: человек, набравший команду
+            // второй раз, должен узнать, что действующего сертификата уже нет.
+            return Err(Error::NotFound(format!(
+                "активного сертификата `{name}` нет (уже отозван?)"
+            )));
+        }
+        self.save()?;
+        Ok(revoked)
+    }
+
+    /// Отозвать ровно одну личность по отпечатку.
+    ///
+    /// Нужен, когда имён несколько или когда отзывать надо именно тот сертификат,
+    /// что лежит на украденной машине: отпечаток называет личность однозначно.
+    pub fn revoke_by_fingerprint(&mut self, fingerprint: &str) -> Result<AdminCert> {
+        let now = Utc::now();
         let admin = self
             .admins
             .iter_mut()
-            .find(|a| a.name == name)
-            .ok_or_else(|| Error::NotFound(format!("admin certificate `{name}`")))?;
-        if admin.revoked.is_none() {
-            admin.revoked = Some(Utc::now());
-        }
+            .find(|a| a.fingerprint.eq_ignore_ascii_case(fingerprint) && a.revoked.is_none())
+            .ok_or_else(|| {
+                Error::NotFound(format!(
+                    "активного сертификата с отпечатком `{fingerprint}` нет"
+                ))
+            })?;
+        admin.revoked = Some(now);
         let admin = admin.clone();
         self.save()?;
         Ok(admin)
@@ -356,6 +390,97 @@ mod tests {
 
         let ca_pem = std::fs::read_to_string(dir.path().join(CA_CERT)).expect("read");
         assert!(ca_pem.starts_with("-----BEGIN CERTIFICATE-----"));
+    }
+
+    #[test]
+    fn revoking_after_a_rotation_kills_the_live_certificate() {
+        // Сценарий из жизни: рабочую станцию меняли, сертификат ротировали. Потом
+        // ноутбук со вторым ключом украли. `ca revoke owner` обязан погасить именно
+        // действующий сертификат, а не найти первую запись с таким именем — раньше
+        // команда рапортовала успех, а украденный ключ продолжал пускать.
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_ca(dir.path(), "hearth-node", node(), false).expect("init");
+
+        let first = issue_admin(dir.path(), "owner", 30).expect("first");
+        AdminRegistry::load(dir.path())
+            .expect("load")
+            .revoke("owner")
+            .expect("revoke first");
+
+        let second = issue_admin(dir.path(), "owner", 30).expect("second");
+        assert_ne!(first.fingerprint, second.fingerprint);
+
+        let revoked = AdminRegistry::load(dir.path())
+            .expect("reload")
+            .revoke("owner")
+            .expect("revoke second");
+        assert_eq!(revoked.len(), 1);
+        assert_eq!(revoked[0].fingerprint, second.fingerprint);
+
+        let registry = AdminRegistry::load(dir.path()).expect("reload");
+        let now = Utc::now();
+        assert!(
+            registry.authorize(&second.fingerprint, now).is_none(),
+            "действующий сертификат обязан перестать пускать"
+        );
+        assert!(registry.authorize(&first.fingerprint, now).is_none());
+    }
+
+    #[test]
+    fn revoking_twice_is_an_error_not_a_quiet_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_ca(dir.path(), "hearth-node", node(), false).expect("init");
+        issue_admin(dir.path(), "owner", 30).expect("issue");
+
+        AdminRegistry::load(dir.path())
+            .expect("load")
+            .revoke("owner")
+            .expect("first revoke");
+        let again = AdminRegistry::load(dir.path())
+            .expect("load")
+            .revoke("owner");
+        assert!(
+            again.is_err(),
+            "повторный отзыв обязан быть ошибкой: иначе он неотличим от настоящего"
+        );
+    }
+
+    #[test]
+    fn two_live_certificates_for_one_name_are_refused() {
+        // Второй действующий сертификат с тем же именем не выписывается вовсе —
+        // и это правильно: пока имя однозначно, отзыв по имени однозначен тоже.
+        // Тест закрепляет свойство, на котором держится `revoke`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_ca(dir.path(), "hearth-node", node(), false).expect("init");
+        issue_admin(dir.path(), "owner", 30).expect("first");
+
+        let second = issue_admin(dir.path(), "owner", 30);
+        assert!(
+            second.is_err(),
+            "повторный выпуск без отзыва обязан быть отказом"
+        );
+    }
+
+    #[test]
+    fn a_fingerprint_names_exactly_one_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_ca(dir.path(), "hearth-node", node(), false).expect("init");
+        let owner = issue_admin(dir.path(), "owner", 30).expect("owner");
+        let auditor = issue_admin(dir.path(), "auditor", 30).expect("auditor");
+
+        let revoked = AdminRegistry::load(dir.path())
+            .expect("load")
+            .revoke_by_fingerprint(&owner.fingerprint)
+            .expect("revoke by fingerprint");
+        assert_eq!(revoked.fingerprint, owner.fingerprint);
+
+        let registry = AdminRegistry::load(dir.path()).expect("reload");
+        let now = Utc::now();
+        assert!(registry.authorize(&owner.fingerprint, now).is_none());
+        assert!(
+            registry.authorize(&auditor.fingerprint, now).is_some(),
+            "отзыв по отпечатку не должен задевать соседа"
+        );
     }
 
     #[test]

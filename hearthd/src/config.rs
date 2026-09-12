@@ -194,6 +194,11 @@ impl Paths {
     pub fn migrate_status_file(&self) -> PathBuf {
         self.state_dir.join("migrate-status.json")
     }
+    /// Режим узла: карантин, обслуживание, перенос. Переживает перезапуск — в этом
+    /// весь смысл файла (см. `crate::model::mode`).
+    pub fn node_mode_file(&self) -> PathBuf {
+        self.state_dir.join("node-mode.json")
+    }
     /// Issued admin client certificates (fingerprint allowlist for the API).
     pub fn admins_file(&self) -> PathBuf {
         self.hearth_etc.join("pki").join("admins.json")

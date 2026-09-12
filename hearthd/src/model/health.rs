@@ -208,6 +208,8 @@ pub struct MigrateStatus {
 /// `GET /status` — everything at once, for `hearthctl status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeStatus {
+    /// Режим узла: норма, карантин, обслуживание, перенос.
+    pub mode: crate::model::mode::NodeState,
     pub health: HealthSnapshot,
     pub egress: EgressSnapshot,
     pub integrity: IntegritySnapshot,
