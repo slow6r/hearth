@@ -1,0 +1,1111 @@
+From e3823db207356bec7d21df1964bef30894c6d66e Mon Sep 17 00:00:00 2001
+From: slow6r <lodikovf@gmail.com>
+Date: Sat, 12 Sep 2026 09:59:49 +0300
+Subject: [PATCH 25/25] =?UTF-8?q?0026:=20=D0=BF=D0=BE=D0=B4=D0=BF=D0=B8?=
+ =?UTF-8?q?=D1=81=D1=8C=20=D0=BC=D0=B0=D0=BD=D0=B8=D1=84=D0=B5=D1=81=D1=82?=
+ =?UTF-8?q?=D0=B0,=20=D0=BF=D0=BE=D0=BB=D0=B8=D1=82=D0=B8=D0=BA=D0=B0=20IC?=
+ =?UTF-8?q?E,=20=D0=BE=D1=81=D0=BC=D0=BE=D1=82=D1=80=20APK=20=D0=BF=D0=B5?=
+ =?UTF-8?q?=D1=80=D0=B5=D0=B4=20=D1=83=D1=81=D1=82=D0=B0=D0=BD=D0=BE=D0=B2?=
+ =?UTF-8?q?=D0=BA=D0=BE=D0=B9?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Клиентская часть исправлений по аудиту: обновление проверяется до передачи
+установщику, манифест обновления обязан быть подписан ключом, которого нет на
+узле, обновление TURN-кредов проверяется так же строго, как bundle, секретный QR
+не уходит в системное «Поделиться», экран звонка запрещает скриншоты.
+---
+ .../simplex/app/views/call/CallActivity.kt    |   8 ++
+ .../src/main/res/raw/hearth_release_key.pub   |   1 +
+ .../chat/hearth/HearthApkGuard.android.kt     |  69 +++++++++
+ .../chat/hearth/HearthReleaseKey.android.kt   |  55 ++++++++
+ .../chat/hearth/HearthSecretQR.android.kt     |  54 +++++++
+ .../chat/hearth/HearthSettingsView.android.kt |  13 +-
+ .../kotlin/chat/hearth/HearthTurn.android.kt  |   9 +-
+ .../chat/hearth/HearthUpdate.android.kt       |  17 +++
+ .../hearth/HearthUpdateService.android.kt     |  28 +++-
+ .../kotlin/chat/hearth/HearthApkRules.kt      |  85 +++++++++++
+ .../kotlin/chat/hearth/HearthBundle.kt        |   2 +-
+ .../kotlin/chat/hearth/HearthTurn.kt          |  41 ++++--
+ .../kotlin/chat/hearth/HearthUpdate.kt        |  47 +++++++
+ .../kotlin/chat/hearth/HearthUpdateTrust.kt   |  76 ++++++++++
+ .../chat/simplex/common/model/SimpleXAPI.kt   |   5 +
+ .../kotlin/chat/hearth/HearthApkRulesTest.kt  | 105 ++++++++++++++
+ .../chat/hearth/HearthTurnPolicyTest.kt       |  63 +++++++++
+ .../chat/hearth/HearthUpdateTrustTest.kt      | 132 ++++++++++++++++++
+ apps/multiplatform/gradle.properties          |   4 +-
+ 19 files changed, 797 insertions(+), 17 deletions(-)
+ create mode 100644 apps/multiplatform/android/src/main/res/raw/hearth_release_key.pub
+ create mode 100644 apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthApkGuard.android.kt
+ create mode 100644 apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthReleaseKey.android.kt
+ create mode 100644 apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSecretQR.android.kt
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthApkRules.kt
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthUpdateTrust.kt
+ create mode 100644 apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthApkRulesTest.kt
+ create mode 100644 apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthTurnPolicyTest.kt
+ create mode 100644 apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthUpdateTrustTest.kt
+
+diff --git a/apps/multiplatform/android/src/main/java/chat/simplex/app/views/call/CallActivity.kt b/apps/multiplatform/android/src/main/java/chat/simplex/app/views/call/CallActivity.kt
+index 995b584..f47a647 100644
+--- a/apps/multiplatform/android/src/main/java/chat/simplex/app/views/call/CallActivity.kt
++++ b/apps/multiplatform/android/src/main/java/chat/simplex/app/views/call/CallActivity.kt
+@@ -61,6 +61,14 @@ class CallActivity: ComponentActivity(), ServiceConnection {
+     applyAppLocale(appPrefs.appLanguage)
+     super.onCreate(savedInstanceState)
+     callActivity = WeakReference(this)
++    // hearth (patches/0006): экран звонка — такая же чувствительная поверхность, как
++    // переписка. Без этого видео собеседника, имя звонящего на экране блокировки и
++    // окно «картинка в картинке» попадают в скриншот, системную запись экрана и в
++    // любое приложение с MediaProjection.
++    window.setFlags(
++      android.view.WindowManager.LayoutParams.FLAG_SECURE,
++      android.view.WindowManager.LayoutParams.FLAG_SECURE,
++    )
+     when (intent?.action) {
+       AcceptCallAction -> {
+         val remoteHostId = intent.getLongExtra("remoteHostId", -1).takeIf { it != -1L }
+diff --git a/apps/multiplatform/android/src/main/res/raw/hearth_release_key.pub b/apps/multiplatform/android/src/main/res/raw/hearth_release_key.pub
+new file mode 100644
+index 0000000..e573a9c
+--- /dev/null
++++ b/apps/multiplatform/android/src/main/res/raw/hearth_release_key.pub
+@@ -0,0 +1 @@
++MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEdOmdtSrjyHhpBo89JBGlgE7JxqZXdOBbHhOLrrUaQJjNfuoNHuQPcouy/J1iMuRcQtdsaNe+R9wETrey/g0z/A==
+\ No newline at end of file
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthApkGuard.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthApkGuard.android.kt
+new file mode 100644
+index 0000000..11570e8
+--- /dev/null
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthApkGuard.android.kt
+@@ -0,0 +1,69 @@
++package chat.hearth
++
++import android.content.Context
++import android.content.pm.PackageInfo
++import android.content.pm.PackageManager
++import android.os.Build
++import java.io.File
++import java.security.MessageDigest
++
++/**
++ * Осмотр скачанного APK перед тем, как предложить его установщику.
++ *
++ * Здесь только добыча фактов; решение принимает [HearthApkRules], и оно покрыто
++ * тестами на JVM. Разделение не ради красоты: проверить «что будет, если узел
++ * подсунет чужой пакет» иначе можно было бы только установкой чужого пакета.
++ */
++object HearthApkGuard {
++
++  fun inspect(context: Context, apk: File, expectedVersionCode: Long): HearthApkRules.Verdict {
++    if (!apk.isFile || apk.length() == 0L) {
++      return HearthApkRules.Verdict.Refuse("файл обновления не найден")
++    }
++    val pm = context.packageManager
++    val flags = PackageManager.GET_SIGNING_CERTIFICATES
++    val downloaded = runCatching { pm.getPackageArchiveInfo(apk.absolutePath, flags) }.getOrNull()
++    val installed = runCatching { pm.getPackageInfo(context.packageName, flags) }.getOrNull()
++
++    return HearthApkRules.decide(
++      HearthApkRules.Facts(
++        packageName = downloaded?.packageName,
++        ownPackageName = context.packageName,
++        versionCode = downloaded?.let(::versionCodeOf) ?: 0L,
++        installedVersionCode = installed?.let(::versionCodeOf) ?: 0L,
++        expectedVersionCode = expectedVersionCode,
++        signatures = downloaded?.let(::signaturesOf).orEmpty(),
++        installedSignatures = installed?.let(::signaturesOf).orEmpty(),
++      )
++    )
++  }
++
++  private fun versionCodeOf(info: PackageInfo): Long =
++    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
++      info.longVersionCode
++    } else {
++      @Suppress("DEPRECATION")
++      info.versionCode.toLong()
++    }
++
++  /**
++   * Отпечатки сертификатов подписи.
++   *
++   * Берём именно `apkContentsSigners`: это тот набор, которым файл подписан сейчас.
++   * Цепочку ротации (`signingCertificateHistory`) сознательно не принимаем — у нас
++   * один офлайновый ключ, и «подпись другим ключом из истории» означала бы, что
++   * ключ менялся; такое обновление ставится руками, а не молча по воздуху.
++   */
++  private fun signaturesOf(info: PackageInfo): Set<String> {
++    val signing = info.signingInfo ?: return emptySet()
++    val certs = if (signing.hasMultipleSigners()) {
++      signing.apkContentsSigners
++    } else {
++      signing.apkContentsSigners
++    }
++    return certs.orEmpty().map { sha256Hex(it.toByteArray()) }.toSet()
++  }
++
++  private fun sha256Hex(bytes: ByteArray): String =
++    MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
++}
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthReleaseKey.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthReleaseKey.android.kt
+new file mode 100644
+index 0000000..7e99d33
+--- /dev/null
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthReleaseKey.android.kt
+@@ -0,0 +1,55 @@
++package chat.hearth
++
++import android.content.Context
++import android.util.Base64
++import java.security.KeyFactory
++import java.security.Signature
++import java.security.spec.X509EncodedKeySpec
++
++/**
++ * Открытый ключ подписи манифестов и проверка этой подписи.
++ *
++ * Ключ вшивается в сборку скриптом раздачи (`bake-node.sh`) и секретом не является —
++ * секретна закрытая половина, и она на узел не попадает никогда. Именно поэтому
++ * захваченный узел не может выдать своё обновление: подписать манифест ему нечем.
++ *
++ * ECDSA P-256, а не Ed25519: `SHA256withECDSA` есть во всех версиях Android, а
++ * Ed25519 появился только в API 33. Новых зависимостей не требуется ни там, ни там.
++ */
++object HearthReleaseKey {
++  private const val RESOURCE_NAME = "hearth_release_key"
++  private const val LIMIT_BYTES = 4 * 1024
++
++  /** Открытый ключ из сборки (base64 SPKI), или `null` — сборка без него. */
++  fun pinned(context: Context): String? {
++    val id = context.resources.getIdentifier(RESOURCE_NAME, "raw", context.packageName)
++    if (id == 0) return null
++    return runCatching {
++      context.resources.openRawResource(id).use { input ->
++        val bytes = ByteArray(LIMIT_BYTES)
++        val read = input.read(bytes)
++        if (read <= 0) return null
++        String(bytes, 0, read, Charsets.UTF_8).trim()
++      }
++    }.getOrNull()?.ifBlank { null }
++  }
++
++  /**
++   * Сошлась ли подпись.
++   *
++   * Любая осечка — разбора ключа, разбора подписи, самой проверки — это `false`.
++   * Исключение здесь означало бы «проверить не удалось», а такое состояние обязано
++   * читаться как отказ, а не как успех.
++   */
++  fun verify(body: ByteArray, signatureBase64: String, publicKeyBase64: String): Boolean =
++    runCatching {
++      val spki = Base64.decode(publicKeyBase64, Base64.DEFAULT)
++      val der = Base64.decode(signatureBase64, Base64.DEFAULT)
++      val key = KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(spki))
++      Signature.getInstance("SHA256withECDSA").run {
++        initVerify(key)
++        update(body)
++        verify(der)
++      }
++    }.getOrDefault(false)
++}
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSecretQR.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSecretQR.android.kt
+new file mode 100644
+index 0000000..5a37297
+--- /dev/null
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSecretQR.android.kt
+@@ -0,0 +1,54 @@
++package chat.hearth
++
++import androidx.compose.foundation.Image
++import androidx.compose.foundation.layout.*
++import androidx.compose.runtime.*
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.toArgb
++import androidx.compose.ui.unit.dp
++import boofcv.alg.fiducial.qrcode.QrCode
++import chat.simplex.common.ui.theme.DEFAULT_PADDING
++import chat.simplex.common.ui.theme.DEFAULT_PADDING_HALF
++import chat.simplex.common.views.newchat.qrCodeBitmap
++import chat.simplex.common.views.newchat.replaceColor
++import chat.simplex.common.views.helpers.*
++import chat.simplex.res.MR
++import dev.icerock.moko.resources.compose.stringResource
++
++/**
++ * QR с секретом — без «поделиться».
++ *
++ * # Зачем свой, а не upstream'овский
++ *
++ * `QRCode` из upstream вешает на картинку `clickable`, который сохраняет её во
++ * временный файл и отдаёт в системный выбор приложений. Для ссылки-приглашения это
++ * удобно и безопасно. Для нашего QR настроек узла — нет: в нём пароли релеев и
++ * токен устройства. Один промах по картинке (Галерея, облачный клиент, любой
++ * мессенджер) выносит их за контур, а `FLAG_SECURE` от этого не спасает вовсе — он
++ * запрещает скриншот, а не `ACTION_SEND`.
++ *
++ * Поэтому здесь та же отрисовка без обработчика касания. Отдельный файл в overlay, а
++ * не правка upstream: так ребейз на новый тег не потеряет это решение и не потребует
++ * разрешать конфликт в чужом файле.
++ */
++@Composable
++fun HearthSecretQR(payload: String) {
++  val tint = Color(0xff2e1d12)
++  val qr: androidx.compose.ui.graphics.ImageBitmap = remember(payload) {
++    qrCodeBitmap(payload, 1024, QrCode.ErrorLevel.L)
++      .replaceColor(Color.Black.toArgb(), tint.toArgb())
++  }
++  Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
++    Image(
++      bitmap = qr,
++      contentDescription = stringResource(MR.strings.image_descr_qr_code),
++      modifier = Modifier
++        .padding(horizontal = DEFAULT_PADDING * 2f, vertical = DEFAULT_PADDING_HALF)
++        .widthIn(max = 400.dp)
++        .fillMaxWidth()
++        .aspectRatio(1f),
++    )
++  }
++}
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt
+index 4cd7dc0..6d5b17d 100644
+--- a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt
+@@ -23,7 +23,6 @@ import SectionDividerSpaced
+ import SectionItemView
+ import SectionTextFooter
+ import SectionView
+-import chat.simplex.common.views.newchat.QRCode
+ import kotlinx.coroutines.launch
+ 
+ @Composable
+@@ -63,7 +62,15 @@ actual fun HearthNodeSettingsView() {
+             return@launch
+           }
+           val installed = installedVersionCode(context)
+-          when (val r = HearthUpdateChecker(transport, installed).check()) {
++          val checker = HearthUpdateChecker(
++            transport = transport,
++            installedVersionCode = installed,
++            pinnedKey = HearthReleaseKey.pinned(context),
++            verify = HearthReleaseKey::verify,
++            lastSeenIssued = ChatController.appPrefs.hearthLastManifestIssued.get()?.ifBlank { null },
++            rememberIssued = { ChatController.appPrefs.hearthLastManifestIssued.set(it) },
++          )
++          when (val r = checker.check()) {
+             is HearthUpdateCheck.UpToDate ->
+               status.value = "установлена последняя версия ($installed)"
+             is HearthUpdateCheck.Failed ->
+@@ -129,7 +136,7 @@ actual fun HearthNodeSettingsView() {
+     val bundle = inviteBundle.value
+     if (bundle != null) {
+       Spacer(Modifier.height(DEFAULT_PADDING))
+-      QRCode(connReq = bundle, withLogo = false)
++      HearthSecretQR(payload = bundle)
+       Text(
+         "QR содержит пароли релеев. Показывайте лично, не пересылайте и не сохраняйте " +
+           "в галерею.",
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthTurn.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthTurn.android.kt
+index 8920e65..726b422 100644
+--- a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthTurn.android.kt
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthTurn.android.kt
+@@ -25,7 +25,14 @@ private object PrefsIceSink : HearthIceSink {
+ actual suspend fun hearthRefreshIceServers() {
+   val context = chat.simplex.common.platform.androidAppContext
+   val transport = HearthAndroidUpdateTransport.fromPrefs(context)
+-  val refresher = HearthTurnRefresher(transport?.let(::AndroidTurnTransport), PrefsIceSink)
++  // Хост берём из настроек устройства — из уже применённого bundle, — а не из
++  // ответа, который собираемся проверять: иначе проверка подтверждала бы сама себя.
++  val trustedHost = ChatController.appPrefs.hearthUpdateHost.get()?.ifBlank { null }
++  val refresher = HearthTurnRefresher(
++    transport?.let(::AndroidTurnTransport),
++    PrefsIceSink,
++    trustedHost,
++  )
+   when (val result = refresher.refresh()) {
+     is HearthTurnRefresh.Updated ->
+       Log.d("hearth", "ICE обновлены с узла: ${result.count} записей")
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdate.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdate.android.kt
+index 41b28e9..eea0f51 100644
+--- a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdate.android.kt
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdate.android.kt
+@@ -40,6 +40,23 @@ class HearthAndroidUpdateTransport(
+     }
+   }
+ 
++  override suspend fun fetchManifestSignature(): Result<String?> = withContext(Dispatchers.IO) {
++    runCatching {
++      val conn = open("$BASE/manifest.json.sig")
++      try {
++        when (val code = conn.responseCode) {
++          200 -> conn.inputStream.use { it.readBoundedText(MANIFEST_LIMIT_BYTES) }.trim()
++          // Подписи на узле нет. Решение об этом принимает HearthUpdateTrust: для
++          // сборки со вшитым ключом это отказ, а не повод продолжить.
++          404 -> null
++          else -> throw IllegalStateException("узел ответил $code")
++        }
++      } finally {
++        conn.disconnect()
++      }
++    }
++  }
++
+   override suspend fun download(
+     file: String,
+     expectedSha256: String,
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdateService.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdateService.android.kt
+index 466f70a..5827bcc 100644
+--- a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdateService.android.kt
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdateService.android.kt
+@@ -58,6 +58,7 @@ class HearthUpdateService : Service() {
+     val file = intent?.getStringExtra(EXTRA_FILE)
+     val sha256 = intent?.getStringExtra(EXTRA_SHA256)
+     val version = intent?.getStringExtra(EXTRA_VERSION) ?: "?"
++    val versionCode = intent?.getIntExtra(EXTRA_VERSION_CODE, 0)?.toLong() ?: 0L
+     if (file == null || sha256 == null) {
+       stopSelf()
+       return START_NOT_STICKY
+@@ -89,7 +90,26 @@ class HearthUpdateService : Service() {
+       }
+ 
+       when (result) {
+-        is HearthDownloadResult.Ready -> notify(doneNotification(readyText(version), result.path))
++        is HearthDownloadResult.Ready -> {
++          // Осмотр ДО того, как человеку предложат установку. Android и сам отвергнет
++          // чужую подпись — но уже после системного диалога, на который человек,
++          // которому приложение само предложило обновиться, нажмёт «Установить».
++          // Здесь же отбрасываются случаи, которые система пропустила бы молча:
++          // другой пакет, версия не та, что обещал узел, откат на старую.
++          val apk = java.io.File(result.path)
++          when (val verdict = HearthApkGuard.inspect(applicationContext, apk, versionCode)) {
++            is HearthApkRules.Verdict.Allow ->
++              notify(doneNotification(readyText(version), result.path))
++
++            is HearthApkRules.Verdict.Refuse -> {
++              // Файл удаляем: он не должен остаться лежать и однажды быть установлен
++              // руками из «Загрузок».
++              apk.delete()
++              notify(doneNotification(refusedText(verdict.reason), null))
++            }
++          }
++        }
++
+         is HearthDownloadResult.Failed -> notify(doneNotification(failedText(result.reason), null))
+       }
+       stopForeground(STOP_FOREGROUND_DETACH)
+@@ -169,6 +189,10 @@ class HearthUpdateService : Service() {
+     "Версия $version скачана. Нажмите, чтобы установить — Android покажет свой диалог, " +
+       "приложение при этом перезапустится."
+ 
++  /** Обновление отвергнуто проверкой — это не сетевая ошибка, и текст другой. */
++  private fun refusedText(reason: String): String =
++    "Обновление отклонено: $reason. Файл удалён. Возьмите сборку у администратора."
++
+   private fun failedText(reason: String) = "Обновление не скачалось: $reason"
+ 
+   companion object {
+@@ -178,6 +202,7 @@ class HearthUpdateService : Service() {
+     private const val EXTRA_FILE = "file"
+     private const val EXTRA_SHA256 = "sha256"
+     private const val EXTRA_VERSION = "version"
++    private const val EXTRA_VERSION_CODE = "versionCode"
+     private const val NO_NODE =
+       "Узел не настроен: сначала отсканируйте QR настроек узла."
+ 
+@@ -187,6 +212,7 @@ class HearthUpdateService : Service() {
+         .putExtra(EXTRA_FILE, manifest.file)
+         .putExtra(EXTRA_SHA256, manifest.sha256)
+         .putExtra(EXTRA_VERSION, manifest.versionName)
++        .putExtra(EXTRA_VERSION_CODE, manifest.versionCode)
+       androidx.core.content.ContextCompat.startForegroundService(context, intent)
+     }
+ 
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthApkRules.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthApkRules.kt
+new file mode 100644
+index 0000000..d19f3b2
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthApkRules.kt
+@@ -0,0 +1,85 @@
++package chat.hearth
++
++/**
++ * Правила допуска обновления к установке.
++ *
++ * # Зачем отдельно от платформы
++ *
++ * Факты о файле добывает Android (`PackageManager`), а решение принимается здесь —
++ * чистой функцией, которую можно прогнать на JVM по таблице случаев. Иначе
++ * единственным способом проверить «а что будет, если узел подсунет чужой пакет»
++ * была бы ручная установка чужого пакета на живой телефон.
++ *
++ * # Что защищает
++ *
++ * Захват узла раздачи не должен позволять выдать клиенту произвольное обновление.
++ * Android и сам отвергнет пакет, подписанный не тем ключом, — но отвергнет он его
++ * ПОСЛЕ того, как человек увидит системный диалог установки и нажмёт «Установить».
++ * Человек, которому приложение само предложило обновиться, нажмёт. Поэтому решение
++ * принимается до диалога, и до него же отбрасываются случаи, которые Android
++ * пропустил бы молча: другой пакет с тем же именем, версия не та, что обещал узел,
++ * откат на старую версию с известной дырой.
++ */
++object HearthApkRules {
++
++  /** Чем закончился осмотр скачанного файла. */
++  sealed interface Verdict {
++    /** Можно предлагать установку. */
++    data object Allow : Verdict
++
++    /** Нельзя. Причина показывается человеку и пишется в журнал. */
++    data class Refuse(val reason: String) : Verdict
++  }
++
++  /** Факты о файле и об установленном приложении — всё, что нужно для решения. */
++  data class Facts(
++    /** Имя пакета внутри скачанного файла; `null`, если файл не разобрался. */
++    val packageName: String?,
++    /** Имя пакета установленного приложения. */
++    val ownPackageName: String,
++    /** versionCode внутри файла. */
++    val versionCode: Long,
++    /** versionCode установленного приложения. */
++    val installedVersionCode: Long,
++    /** versionCode, который обещал узел в манифесте. 0 — узел не назвал. */
++    val expectedVersionCode: Long,
++    /** sha256 сертификатов подписи файла (в нижнем регистре). */
++    val signatures: Set<String>,
++    /** sha256 сертификатов подписи установленного приложения. */
++    val installedSignatures: Set<String>,
++  )
++
++  fun decide(facts: Facts): Verdict {
++    if (facts.packageName == null) {
++      return Verdict.Refuse("файл не разбирается как приложение Android")
++    }
++    if (facts.packageName != facts.ownPackageName) {
++      return Verdict.Refuse("это другое приложение: ${facts.packageName}")
++    }
++    if (facts.signatures.isEmpty()) {
++      return Verdict.Refuse("у файла нет подписи")
++    }
++    if (facts.installedSignatures.isEmpty()) {
++      // Своей подписи не видно — сравнивать не с чем. Это не повод разрешать.
++      return Verdict.Refuse("не удалось прочитать подпись установленного приложения")
++    }
++    if (facts.signatures != facts.installedSignatures) {
++      return Verdict.Refuse("обновление подписано другим ключом")
++    }
++    if (facts.versionCode <= facts.installedVersionCode) {
++      // Откат на старую версию — способ вернуть уже закрытую дыру. Узел, который
++      // предлагает такое, либо сломан, либо захвачен.
++      return Verdict.Refuse(
++        "версия не новее установленной (${facts.versionCode} ≤ ${facts.installedVersionCode})"
++      )
++    }
++    if (facts.expectedVersionCode > 0 && facts.versionCode != facts.expectedVersionCode) {
++      // Файл не тот, что описан в манифесте: хеш сошёлся, а содержимое другое —
++      // значит манифест и файл разошлись, и доверять ни тому, ни другому нельзя.
++      return Verdict.Refuse(
++        "версия не та, что обещал узел (${facts.versionCode} вместо ${facts.expectedVersionCode})"
++      )
++    }
++    return Verdict.Allow
++  }
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthBundle.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthBundle.kt
+index 372d35c..c493dbe 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthBundle.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthBundle.kt
+@@ -137,7 +137,7 @@ private fun requireServerUri(uri: String, scheme: String, expectedHost: String)
+  * built-in **public** STUN/TURN. A malformed entry would therefore not break calls
+  * loudly — it would quietly route them through a third party.
+  */
+-private fun requireIceEntry(entry: String, expectedHost: String) {
++internal fun requireIceEntry(entry: String, expectedHost: String) {
+   val scheme = entry.substringBefore(':', "")
+   require(scheme in setOf("stun", "stuns", "turn", "turns")) {
+     "unsupported ICE scheme: $entry"
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthTurn.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthTurn.kt
+index 191d5cf..281a9b8 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthTurn.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthTurn.kt
+@@ -41,14 +41,29 @@ data class HearthTurnCredentials(
+       isLenient = false
+     }
+ 
+-    fun parse(payload: String): Result<HearthTurnCredentials> = runCatching {
+-      val creds = json.decodeFromString(serializer(), payload)
+-      require(creds.ice.isNotEmpty()) { "узел вернул пустой список ICE" }
+-      // Пустой список записать в настройки хуже, чем не трогать их вовсе: старые
+-      // креды хотя бы могут быть ещё живы, а пустой ICE — гарантированная тишина.
+-      require(creds.ice.none { it.contains("\n") }) { "в строке ICE перевод строки" }
+-      creds
+-    }
++    /**
++     * @param expectedHost хост узла, которому это устройство доверяет.
++     *
++     * Проверка та же, что у bundle, и это принципиально. Bundle человек сканирует
++     * лично, а креды приходят от узла по сети — то есть от стороны, которую мы как
++     * раз и не считаем доверенной после захвата. Раньше здесь проверялись только
++     * непустота и отсутствие перевода строки: узел мог вернуть ICE, указывающий на
++     * ЧУЖОЙ TURN, звонки пошли бы через него, и адреса собеседников достались бы
++     * третьей стороне. Шифрование содержимого это не ломает — ломает ровно то
++     * свойство, ради которого свой TURN и поднимали.
++     */
++    fun parse(payload: String, expectedHost: String? = null): Result<HearthTurnCredentials> =
++      runCatching {
++        val creds = json.decodeFromString(serializer(), payload)
++        require(creds.ice.isNotEmpty()) { "узел вернул пустой список ICE" }
++        // Пустой список записать в настройки хуже, чем не трогать их вовсе: старые
++        // креды хотя бы могут быть ещё живы, а пустой ICE — гарантированная тишина.
++        require(creds.ice.none { it.contains("\n") }) { "в строке ICE перевод строки" }
++        if (expectedHost != null) {
++          creds.ice.forEach { requireIceEntry(it, expectedHost) }
++        }
++        creds
++      }
+   }
+ }
+ 
+@@ -80,13 +95,21 @@ sealed interface HearthTurnRefresh {
+ class HearthTurnRefresher(
+   private val transport: HearthTurnTransport?,
+   private val sink: HearthIceSink,
++  /**
++   * Хост узла, которому это устройство доверяет.
++   *
++   * Берётся из уже применённого bundle — то есть из того, что человек сканировал или
++   * получил по коду доступа, — а не из ответа, который мы сейчас проверяем. Иначе
++   * проверка была бы самоподтверждающейся.
++   */
++  private val expectedHost: String? = null,
+ ) {
+   suspend fun refresh(): HearthTurnRefresh {
+     val transport = transport ?: return HearthTurnRefresh.NotConfigured
+     val payload = transport.turnCredentials().getOrElse { e ->
+       return HearthTurnRefresh.Failed(e.message ?: "узел недоступен")
+     }
+-    val creds = HearthTurnCredentials.parse(payload).getOrElse { e ->
++    val creds = HearthTurnCredentials.parse(payload, expectedHost).getOrElse { e ->
+       return HearthTurnRefresh.Failed(e.message ?: "ответ узла не разобран")
+     }
+     return runCatching {
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthUpdate.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthUpdate.kt
+index 78cb71b..001a328 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthUpdate.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthUpdate.kt
+@@ -45,6 +45,13 @@ data class HearthUpdateManifest(
+   /** Путь к APK относительно того же эндпоинта. Абсолютные URL запрещены — см. validate. */
+   val file: String,
+   val notes: String = "",
++  /**
++   * Когда манифест выпущен, RFC 3339.
++   *
++   * Нужна не для красоты: по ней ловится откат метаданных — узел, показывающий
++   * манифест старее уже виденного, пытается удержать телефон на прежней версии.
++   */
++  val issued: String = "",
+ ) {
+   companion object {
+     const val SUPPORTED_VERSION = 1
+@@ -109,6 +116,14 @@ interface HearthUpdateTransport {
+   /** GET манифеста. Токен устройства уходит заголовком, не в URL: URL попадает в логи. */
+   suspend fun fetchManifest(): Result<String>
+ 
++  /**
++   * GET подписи манифеста (`manifest.json.sig`, base64 DER).
++   *
++   * `null` — подписи на узле нет. Для сборки со вшитым ключом это отказ, а не
++   * повод продолжить: иначе достаточно удалить файл, чтобы выключить проверку.
++   */
++  suspend fun fetchManifestSignature(): Result<String?>
++
+   /**
+    * Скачать файл, сообщая прогресс. Реализация обязана быть докачиваемой и жить в
+    * foreground-сервисе: пользователь свернёт приложение, и загрузка не должна умирать.
+@@ -132,14 +147,46 @@ interface HearthUpdateTransport {
+ class HearthUpdateChecker(
+   private val transport: HearthUpdateTransport,
+   private val installedVersionCode: Int,
++  /** Открытый ключ подписи манифестов из сборки; `null` — сборка без него. */
++  private val pinnedKey: String? = null,
++  /** Проверка подписи. Платформенная: на Android — штатный SHA256withECDSA. */
++  private val verify: (ByteArray, String, String) -> Boolean = { _, _, _ -> false },
++  /** Самая свежая отметка времени, которую этот телефон уже видел. */
++  private val lastSeenIssued: String? = null,
++  /** Куда запомнить отметку принятого манифеста. */
++  private val rememberIssued: (String) -> Unit = {},
+ ) {
+   suspend fun check(): HearthUpdateCheck {
+     val payload = transport.fetchManifest().getOrElse { e ->
+       return HearthUpdateCheck.Failed(e.message ?: "узел недоступен")
+     }
++    // Подпись запрашивается всегда, когда в сборке есть ключ: её отсутствие — такой
++    // же отказ, как несовпадение.
++    val signature = if (pinnedKey != null) {
++      transport.fetchManifestSignature().getOrElse { e ->
++        return HearthUpdateCheck.Failed(e.message ?: "подпись манифеста не получена")
++      }
++    } else {
++      null
++    }
++
+     val manifest = HearthUpdateManifest.parse(payload).getOrElse { e ->
+       return HearthUpdateCheck.Failed(e.message ?: "манифест не разобран")
+     }
++
++    val verdict = HearthUpdateTrust.decide(
++      hasPinnedKey = pinnedKey != null,
++      signaturePresent = signature != null,
++      signatureValid = signature != null && pinnedKey != null &&
++        verify(payload.encodeToByteArray(), signature, pinnedKey),
++      issued = manifest.issued.ifBlank { null },
++      lastSeenIssued = lastSeenIssued,
++    )
++    if (verdict is HearthUpdateTrust.Verdict.Refuse) {
++      return HearthUpdateCheck.Failed(verdict.reason)
++    }
++    if (manifest.issued.isNotBlank()) rememberIssued(manifest.issued)
++
+     return if (manifest.isNewerThan(installedVersionCode)) {
+       HearthUpdateCheck.Available(manifest)
+     } else {
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthUpdateTrust.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthUpdateTrust.kt
+new file mode 100644
+index 0000000..d46cc8d
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthUpdateTrust.kt
+@@ -0,0 +1,76 @@
++package chat.hearth
++
++/**
++ * Доверие к манифесту обновления.
++ *
++ * # Зачем
++ *
++ * Раньше подлинность манифеста держалась на серверном TLS — то есть на самом узле.
++ * Захват узла раздачи означал власть над тем, что клиент считает свежей версией и
++ * какой файл качает. Прямую подмену сборки Android отверг бы (чужая подпись не
++ * установится), но заморозку — нет: узел мог просто не отдавать обновления и держать
++ * людей на версии с известной дырой.
++ *
++ * Теперь манифест подписан ключом, которого на узле нет. Здесь — решение о доверии:
++ * чистая логика, отделённая от криптографии и от сети, чтобы её можно было прогнать
++ * по таблице случаев на JVM.
++ *
++ * # Почему отсутствие подписи — отказ
++ *
++ * Сборка, в которую вшит открытый ключ, обязана требовать подпись. Иначе достаточно
++ * убрать `.sig` с узла, чтобы вернуться к старому — и вся защита выключается тем,
++ * кого она должна останавливать.
++ */
++object HearthUpdateTrust {
++
++  sealed interface Verdict {
++    data object Allow : Verdict
++    data class Refuse(val reason: String) : Verdict
++  }
++
++  /**
++   * @param hasPinnedKey вшит ли в сборку открытый ключ. Сборки «по QR» его не имеют.
++   * @param signaturePresent лежит ли рядом с манифестом `.sig`.
++   * @param signatureValid сошлась ли подпись (проверяется платформой).
++   * @param issued отметка времени в манифесте, RFC 3339.
++   * @param lastSeenIssued самая свежая отметка, которую этот телефон уже видел.
++   */
++  fun decide(
++    hasPinnedKey: Boolean,
++    signaturePresent: Boolean,
++    signatureValid: Boolean,
++    issued: String?,
++    lastSeenIssued: String?,
++  ): Verdict {
++    if (!hasPinnedKey) {
++      // Сборка без вшитого ключа: проверять нечем. Это честнее, чем делать вид.
++      return Verdict.Allow
++    }
++    if (!signaturePresent) {
++      return Verdict.Refuse("манифест обновления не подписан")
++    }
++    if (!signatureValid) {
++      return Verdict.Refuse("подпись манифеста не сошлась")
++    }
++    if (issued.isNullOrBlank()) {
++      return Verdict.Refuse("в манифесте нет отметки времени")
++    }
++    if (lastSeenIssued != null && issued < lastSeenIssued) {
++      // Откат метаданных: узел показывает манифест старее уже виденного. Так
++      // выглядит попытка удержать телефон на прежней версии.
++      return Verdict.Refuse("манифест старее уже полученного")
++    }
++    return Verdict.Allow
++  }
++
++  /**
++   * Давно ли приходили обновления.
++   *
++   * Захваченный узел не может подсунуть своё, но может молчать. Молчание — тоже
++   * событие, и человек должен о нём узнать, а не считать, что новостей нет.
++   */
++  fun isStale(lastSuccessEpochDays: Long?, todayEpochDays: Long, limitDays: Long = 30): Boolean {
++    if (lastSuccessEpochDays == null) return false
++    return todayEpochDays - lastSuccessEpochDays >= limitDays
++  }
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+index 0d34c37..7658590 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+@@ -161,6 +161,10 @@ class AppPreferences {
+   // bundle сначала проверяется и откладывается, а применяется в первый момент, когда
+   // профиль появился. Значение стирается сразу после применения.
+   val hearthPendingBundle = mkStrPreference(SHARED_PREFS_HEARTH_PENDING_BUNDLE, null)
++  // hearth (ADR 0013): самая свежая отметка времени манифеста обновлений, которую
++  // видел этот телефон. По ней ловится откат метаданных — узел, показывающий
++  // манифест старее уже полученного, пытается удержать телефон на прежней версии.
++  val hearthLastManifestIssued = mkStrPreference(SHARED_PREFS_HEARTH_LAST_MANIFEST_ISSUED, null)
+   val chatArchiveTime = mkDatePreference(SHARED_PREFS_CHAT_ARCHIVE_TIME, null)
+   val chatLastStart = mkDatePreference(SHARED_PREFS_CHAT_LAST_START, null)
+   val chatStopped = mkBoolPreference(SHARED_PREFS_CHAT_STOPPED, false)
+@@ -445,6 +449,7 @@ class AppPreferences {
+     private const val SHARED_PREFS_HEARTH_UPDATE_PORT = "HearthUpdatePort"
+     private const val SHARED_PREFS_HEARTH_UPDATE_TOKEN = "HearthUpdateToken"
+     private const val SHARED_PREFS_HEARTH_PENDING_BUNDLE = "HearthPendingBundle"
++    private const val SHARED_PREFS_HEARTH_LAST_MANIFEST_ISSUED = "hearthLastManifestIssued"
+     private const val SHARED_PREFS_CHAT_ARCHIVE_TIME = "ChatArchiveTime"
+     private const val SHARED_PREFS_APP_LANGUAGE = "AppLanguage"
+     private const val SHARED_PREFS_APP_UPDATE_CHANNEL = "AppUpdateChannel"
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthApkRulesTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthApkRulesTest.kt
+new file mode 100644
+index 0000000..861c80b
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthApkRulesTest.kt
+@@ -0,0 +1,105 @@
++package chat.hearth
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertTrue
++
++/**
++ * Таблица случаев для допуска обновления к установке.
++ *
++ * Проверяет ровно то, ради чего правила вынесены из платформенного кода: что будет,
++ * если узел раздачи захвачен и подсовывает не то. Иначе единственным способом это
++ * узнать была бы установка чужого пакета на живой телефон.
++ */
++class HearthApkRulesTest {
++
++  private val ours = setOf("608e713c")
++
++  private fun facts(
++    packageName: String? = "ru.myhearth.chat",
++    versionCode: Long = 387,
++    installedVersionCode: Long = 386,
++    expectedVersionCode: Long = 387,
++    signatures: Set<String> = ours,
++    installedSignatures: Set<String> = ours,
++  ) = HearthApkRules.Facts(
++    packageName = packageName,
++    ownPackageName = "ru.myhearth.chat",
++    versionCode = versionCode,
++    installedVersionCode = installedVersionCode,
++    expectedVersionCode = expectedVersionCode,
++    signatures = signatures,
++    installedSignatures = installedSignatures,
++  )
++
++  private fun refusalFor(facts: HearthApkRules.Facts): String {
++    val verdict = HearthApkRules.decide(facts)
++    assertTrue(verdict is HearthApkRules.Verdict.Refuse, "ожидался отказ, получено: $verdict")
++    return (verdict as HearthApkRules.Verdict.Refuse).reason
++  }
++
++  @Test
++  fun a_proper_update_is_allowed() {
++    assertEquals(HearthApkRules.Verdict.Allow, HearthApkRules.decide(facts()))
++  }
++
++  @Test
++  fun a_file_that_does_not_parse_is_refused() {
++    assertTrue(refusalFor(facts(packageName = null)).contains("не разбирается"))
++  }
++
++  @Test
++  fun another_application_is_refused() {
++    val reason = refusalFor(facts(packageName = "com.example.other"))
++    assertTrue(reason.contains("другое приложение"), reason)
++  }
++
++  @Test
++  fun a_foreign_signature_is_refused() {
++    // Главный случай: узел захвачен и раздаёт свою сборку.
++    val reason = refusalFor(facts(signatures = setOf("deadbeef")))
++    assertTrue(reason.contains("другим ключом"), reason)
++  }
++
++  @Test
++  fun an_unsigned_file_is_refused() {
++    assertTrue(refusalFor(facts(signatures = emptySet())).contains("нет подписи"))
++  }
++
++  @Test
++  fun an_unreadable_own_signature_is_refused() {
++    // Сравнивать не с чем — это не повод разрешить.
++    val reason = refusalFor(facts(installedSignatures = emptySet()))
++    assertTrue(reason.contains("установленного приложения"), reason)
++  }
++
++  @Test
++  fun a_downgrade_is_refused() {
++    // Откат возвращает уже закрытую дыру, поэтому запрещён даже со своей подписью.
++    val reason = refusalFor(facts(versionCode = 385, expectedVersionCode = 385))
++    assertTrue(reason.contains("не новее"), reason)
++  }
++
++  @Test
++  fun the_same_version_is_refused() {
++    val reason = refusalFor(facts(versionCode = 386, expectedVersionCode = 386))
++    assertTrue(reason.contains("не новее"), reason)
++  }
++
++  @Test
++  fun a_file_that_disagrees_with_the_manifest_is_refused() {
++    // Хеш сошёлся, а содержимое другое: манифест и файл разошлись.
++    val reason = refusalFor(facts(versionCode = 400, expectedVersionCode = 387))
++    assertTrue(reason.contains("не та, что обещал узел"), reason)
++  }
++
++  @Test
++  fun a_node_that_names_no_version_still_gets_the_other_checks() {
++    // expectedVersionCode = 0 — узел не назвал версию; остальные правила в силе.
++    assertEquals(
++      HearthApkRules.Verdict.Allow,
++      HearthApkRules.decide(facts(expectedVersionCode = 0))
++    )
++    assertTrue(refusalFor(facts(expectedVersionCode = 0, versionCode = 300)).contains("не новее"))
++  }
++}
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthTurnPolicyTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthTurnPolicyTest.kt
+new file mode 100644
+index 0000000..a3c6915
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthTurnPolicyTest.kt
+@@ -0,0 +1,63 @@
++package chat.hearth
++
++import kotlin.test.Test
++import kotlin.test.assertTrue
++
++/**
++ * Обновление TURN-кредов проверяется так же строго, как bundle.
++ *
++ * Разница в источнике принципиальна: bundle человек сканирует лично, а креды
++ * приходят от узла по сети — то есть от стороны, которую мы и не считаем доверенной
++ * после захвата. Раньше здесь проверялись только непустота и отсутствие перевода
++ * строки, и захваченный узел мог увести звонки на чужой TURN.
++ */
++class HearthTurnPolicyTest {
++
++  private val host = "relay.myhearth.ru"
++
++  private fun payload(vararg ice: String): String =
++    """{"username":"u","credential":"c","ice":[${ice.joinToString(",") { "\"$it\"" }}]}"""
++
++  @Test
++  fun our_own_turn_is_accepted() {
++    val creds = HearthTurnCredentials
++      .parse(payload("stun:$host:3478", "turn:u:c@$host:3478"), host)
++      .getOrThrow()
++    assertTrue(creds.ice.size == 2)
++  }
++
++  @Test
++  fun a_foreign_turn_is_refused() {
++    // Главный случай: узел захвачен и уводит звонки через чужой сервер, которому
++    // достаются адреса обоих собеседников.
++    val result = HearthTurnCredentials.parse(payload("turn:u:c@evil.example:3478"), host)
++    assertTrue(result.isFailure)
++  }
++
++  @Test
++  fun a_public_stun_is_refused() {
++    val result = HearthTurnCredentials.parse(payload("stun:stun.l.google.com:19302"), host)
++    assertTrue(result.isFailure)
++  }
++
++  @Test
++  fun one_foreign_entry_poisons_the_whole_list() {
++    // Частично чужой список — тот же провал: клиент выберет наилучший маршрут сам.
++    val result = HearthTurnCredentials.parse(
++      payload("stun:$host:3478", "turn:u:c@evil.example:3478"),
++      host,
++    )
++    assertTrue(result.isFailure)
++  }
++
++  @Test
++  fun an_empty_list_is_refused() {
++    assertTrue(HearthTurnCredentials.parse("""{"username":"u","credential":"c","ice":[]}""", host).isFailure)
++  }
++
++  @Test
++  fun without_a_known_host_the_old_behaviour_stays() {
++    // Устройство, не знающее своего узла, не должно терять креды вовсе.
++    assertTrue(HearthTurnCredentials.parse(payload("stun:$host:3478"), null).isSuccess)
++  }
++}
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthUpdateTrustTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthUpdateTrustTest.kt
+new file mode 100644
+index 0000000..58bdd12
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthUpdateTrustTest.kt
+@@ -0,0 +1,132 @@
++package chat.hearth
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertTrue
++
++/**
++ * Доверие к манифесту обновления — таблица случаев.
++ *
++ * Проверяет то, ради чего появилась подпись: что делает клиент, когда узел раздачи
++ * захвачен. Подменить сборку такой узел не может (её нечем подписать), поэтому
++ * остаются два приёма — снять подпись и откатить метаданные. Оба обязаны быть отказом.
++ */
++class HearthUpdateTrustTest {
++
++  private fun refusal(verdict: HearthUpdateTrust.Verdict): String {
++    assertTrue(verdict is HearthUpdateTrust.Verdict.Refuse, "ожидался отказ, получено: $verdict")
++    return (verdict as HearthUpdateTrust.Verdict.Refuse).reason
++  }
++
++  @Test
++  fun a_signed_fresh_manifest_is_allowed() {
++    val verdict = HearthUpdateTrust.decide(
++      hasPinnedKey = true,
++      signaturePresent = true,
++      signatureValid = true,
++      issued = "2026-09-12T08:00:00Z",
++      lastSeenIssued = "2026-09-11T08:00:00Z",
++    )
++    assertEquals(HearthUpdateTrust.Verdict.Allow, verdict)
++  }
++
++  @Test
++  fun a_missing_signature_is_refused() {
++    // Иначе защиту выключает тот, от кого она защищает: достаточно удалить .sig.
++    val reason = refusal(
++      HearthUpdateTrust.decide(
++        hasPinnedKey = true,
++        signaturePresent = false,
++        signatureValid = false,
++        issued = "2026-09-12T08:00:00Z",
++        lastSeenIssued = null,
++      )
++    )
++    assertTrue(reason.contains("не подписан"), reason)
++  }
++
++  @Test
++  fun a_broken_signature_is_refused() {
++    val reason = refusal(
++      HearthUpdateTrust.decide(
++        hasPinnedKey = true,
++        signaturePresent = true,
++        signatureValid = false,
++        issued = "2026-09-12T08:00:00Z",
++        lastSeenIssued = null,
++      )
++    )
++    assertTrue(reason.contains("не сошлась"), reason)
++  }
++
++  @Test
++  fun a_manifest_without_a_timestamp_is_refused() {
++    // Без отметки времени откат метаданных не поймать.
++    val reason = refusal(
++      HearthUpdateTrust.decide(
++        hasPinnedKey = true,
++        signaturePresent = true,
++        signatureValid = true,
++        issued = null,
++        lastSeenIssued = null,
++      )
++    )
++    assertTrue(reason.contains("отметки времени"), reason)
++  }
++
++  @Test
++  fun rolled_back_metadata_is_refused() {
++    // Подпись верна — манифест действительно наш, просто старый. Так выглядит
++    // попытка удержать телефон на версии с известной дырой.
++    val reason = refusal(
++      HearthUpdateTrust.decide(
++        hasPinnedKey = true,
++        signaturePresent = true,
++        signatureValid = true,
++        issued = "2026-09-01T08:00:00Z",
++        lastSeenIssued = "2026-09-11T08:00:00Z",
++      )
++    )
++    assertTrue(reason.contains("старее"), reason)
++  }
++
++  @Test
++  fun the_same_timestamp_is_allowed() {
++    // Повторная проверка обновлений не должна упираться в собственный след.
++    assertEquals(
++      HearthUpdateTrust.Verdict.Allow,
++      HearthUpdateTrust.decide(
++        hasPinnedKey = true,
++        signaturePresent = true,
++        signatureValid = true,
++        issued = "2026-09-11T08:00:00Z",
++        lastSeenIssued = "2026-09-11T08:00:00Z",
++      )
++    )
++  }
++
++  @Test
++  fun a_build_without_a_pinned_key_does_not_pretend_to_check() {
++    // Сборка «по QR» ключа не имеет. Делать вид, что проверка прошла, хуже, чем
++    // честно её не делать.
++    assertEquals(
++      HearthUpdateTrust.Verdict.Allow,
++      HearthUpdateTrust.decide(
++        hasPinnedKey = false,
++        signaturePresent = false,
++        signatureValid = false,
++        issued = null,
++        lastSeenIssued = null,
++      )
++    )
++  }
++
++  @Test
++  fun silence_becomes_visible_after_a_month() {
++    // Захваченный узел не может подсунуть своё, но может молчать. Молчание — тоже
++    // событие, и человек должен о нём узнать.
++    assertTrue(HearthUpdateTrust.isStale(lastSuccessEpochDays = 100, todayEpochDays = 130))
++    assertTrue(!HearthUpdateTrust.isStale(lastSuccessEpochDays = 100, todayEpochDays = 129))
++    assertTrue(!HearthUpdateTrust.isStale(lastSuccessEpochDays = null, todayEpochDays = 500))
++  }
++}
+diff --git a/apps/multiplatform/gradle.properties b/apps/multiplatform/gradle.properties
+index 91b37a0..1e5b8c8 100644
+--- a/apps/multiplatform/gradle.properties
++++ b/apps/multiplatform/gradle.properties
+@@ -26,8 +26,8 @@ kotlin.jvm.target=11
+ 
+ # hearth: своя нумерация поверх тега upstream. versionCode обязан расти
+ # монотонно — по нему приложение решает, новее ли сборка на узле.
+-android.version_name=7.0.1-h15
+-android.version_code=386
++android.version_name=7.0.1-h16
++android.version_code=387
+ 
+ desktop.version_name=7.0.1
+ desktop.version_code=157
