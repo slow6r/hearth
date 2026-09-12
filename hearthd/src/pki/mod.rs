@@ -73,7 +73,7 @@ impl AdminRegistry {
     }
 
     pub fn save(&self) -> Result<()> {
-        store::write_json_atomic(&self.path, self, store::MODE_STATE)
+        store::write_json_atomic_keep_owner(&self.path, self, store::MODE_STATE)
     }
 
     /// Is this certificate allowed to use the admin API right now?
@@ -187,14 +187,14 @@ pub fn init_ca(pki_dir: &Path, node_name: &str, address: IpAddr, force: bool) ->
     set_validity(&mut server_params, SERVER_DAYS);
     let server_cert = server_params.signed_by(&server_key, &issuer)?;
 
-    store::write_atomic(&ca_cert_path, ca_cert.pem().as_bytes(), store::MODE_STATE)?;
-    store::write_secret(pki_dir.join(CA_KEY), ca_key.serialize_pem().trim())?;
-    store::write_atomic(
+    store::write_atomic_keep_owner(&ca_cert_path, ca_cert.pem().as_bytes(), store::MODE_STATE)?;
+    store::write_secret_keep_owner(pki_dir.join(CA_KEY), ca_key.serialize_pem().trim())?;
+    store::write_atomic_keep_owner(
         pki_dir.join(SERVER_CERT),
         server_cert.pem().as_bytes(),
         store::MODE_STATE,
     )?;
-    store::write_secret(pki_dir.join(SERVER_KEY), server_key.serialize_pem().trim())?;
+    store::write_secret_keep_owner(pki_dir.join(SERVER_KEY), server_key.serialize_pem().trim())?;
 
     // Create an empty registry so the API has something to read.
     let registry = AdminRegistry::load(pki_dir)?;
@@ -318,8 +318,8 @@ pub fn issue_device_api_cert(pki_dir: &Path, host: &str) -> Result<PathBuf> {
     let cert = params.signed_by(&key, &issuer)?;
 
     let cert_path = pki_dir.join(DEVICE_API_CERT);
-    store::write_atomic(&cert_path, cert.pem().as_bytes(), store::MODE_STATE)?;
-    store::write_secret(pki_dir.join(DEVICE_API_KEY), key.serialize_pem().trim())?;
+    store::write_atomic_keep_owner(&cert_path, cert.pem().as_bytes(), store::MODE_STATE)?;
+    store::write_secret_keep_owner(pki_dir.join(DEVICE_API_KEY), key.serialize_pem().trim())?;
     Ok(cert_path)
 }
 

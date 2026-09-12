@@ -95,16 +95,49 @@ pub fn write_atomic(path: impl AsRef<Path>, body: &[u8], mode: u32) -> Result<()
 /// Владелец выставляется временному файлу ДО переименования: иначе на мгновение на
 /// месте старого файла лежал бы файл, который служба прочитать не может. Если сменить
 /// владельца нельзя, запись отменяется и старый файл остаётся как был.
+///
+/// Для НОВОГО файла прежнего владельца нет, и берётся владелец каталога. Без этого
+/// `hearthd ca issue` под `sudo` оставлял свежий `auditor.pem` и перезаписанный
+/// `admins.json` с `root:root`: служба под пользователем `hearth` переставала читать
+/// реестр админов и отвергала ВСЕ клиентские сертификаты, включая владельца. Ровно
+/// это и случилось 2026-09-11 — admin API закрылся для всех после выпуска одной новой
+/// личности.
 pub fn write_atomic_keep_owner(path: impl AsRef<Path>, body: &[u8], mode: u32) -> Result<()> {
     let path = path.as_ref();
-    #[cfg(unix)]
-    let owner = {
-        use std::os::unix::fs::MetadataExt as _;
-        std::fs::metadata(path).ok().map(|m| (m.uid(), m.gid()))
-    };
-    #[cfg(not(unix))]
-    let owner = None;
-    write_atomic_owned(path, body, mode, owner)
+    write_atomic_owned(path, body, mode, inherited_owner(path))
+}
+
+/// Владелец, который должен быть у файла: его собственный, иначе — каталога.
+#[cfg(unix)]
+fn inherited_owner(path: &Path) -> Option<(u32, u32)> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(path)
+        .ok()
+        .or_else(|| {
+            path.parent()
+                .and_then(|parent| std::fs::metadata(parent).ok())
+        })
+        .map(|m| (m.uid(), m.gid()))
+}
+
+#[cfg(not(unix))]
+fn inherited_owner(_path: &Path) -> Option<(u32, u32)> {
+    None
+}
+
+/// Как [`write_json_atomic`], но с наследованием владельца.
+pub fn write_json_atomic_keep_owner<T: Serialize>(
+    path: impl AsRef<Path>,
+    value: &T,
+    mode: u32,
+) -> Result<()> {
+    let body = serde_json::to_vec_pretty(value)?;
+    write_atomic_keep_owner(path, &body, mode)
+}
+
+/// Как [`write_secret`], но с наследованием владельца.
+pub fn write_secret_keep_owner(path: impl AsRef<Path>, secret: &str) -> Result<()> {
+    write_atomic_keep_owner(path, format!("{secret}\n").as_bytes(), MODE_SECRET)
 }
 
 fn write_atomic_owned(

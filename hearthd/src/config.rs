@@ -432,6 +432,16 @@ pub struct Devices {
     pub max_enrolls_per_day: usize,
 }
 
+/// Привести отпечаток к каноническому виду: без двоеточий и пробелов, в нижнем
+/// регистре. `openssl x509 -fingerprint` печатает их через двоеточие, и копипаст
+/// оттуда обязан просто работать, а не молча закрывать доступ.
+pub fn normalize_fingerprint(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
 fn d_max_enrolls_per_day() -> usize {
     3
 }
@@ -510,6 +520,19 @@ impl Config {
 
     /// Enforce the invariants that can be checked statically.
     pub fn validate(&self) -> Result<()> {
+        // Пин-список — вторая дверь поверх реестра: сертификат, выписанный нашим CA,
+        // всё равно не пустят, если его отпечатка здесь нет. Поэтому опечатка в нём
+        // означает полную потерю доступа к admin API, и узнать об этом надо сейчас, а
+        // не после перезапуска. Форма OpenSSL (с двоеточиями) и лишние пробелы
+        // допускаются — они нормализуются при загрузке.
+        for (index, pin) in self.api.allowed_admin_fingerprints.iter().enumerate() {
+            let normalized = normalize_fingerprint(pin);
+            if normalized.len() != 64 || !normalized.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(Error::config(format!(
+                    "api.allowed_admin_fingerprints[{index}] `{pin}` — не отпечаток sha256                      (нужны 64 шестнадцатеричных знака)"
+                )));
+            }
+        }
         if self.node.host.trim().is_empty() {
             return Err(Error::config(
                 "node.host must be the public hostname or IP clients connect to",
@@ -810,6 +833,36 @@ mod tests {
     #[test]
     fn reference_config_is_valid() {
         reference().validate().expect("reference config is valid");
+    }
+
+    #[test]
+    fn a_mistyped_fingerprint_is_caught_before_it_locks_everyone_out() {
+        // Пин-список — вторая дверь поверх реестра: опечатка в нём закрывает admin
+        // API для всех, а `hearthd check` раньше отвечал «config is valid».
+        let mut config = reference();
+        config.api.allowed_admin_fingerprints = vec!["AA:BB:CC".to_string()];
+        assert!(config.validate().is_err());
+
+        config.api.allowed_admin_fingerprints = vec!["a".repeat(63)];
+        assert!(config.validate().is_err(), "63 знака — не отпечаток");
+
+        config.api.allowed_admin_fingerprints = vec!["z".repeat(64)];
+        assert!(config.validate().is_err(), "не шестнадцатеричные знаки");
+    }
+
+    #[test]
+    fn a_fingerprint_copied_from_openssl_just_works() {
+        // `openssl x509 -fingerprint` печатает через двоеточие и в верхнем регистре.
+        let raw = "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:\n              AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99";
+        let normalized = normalize_fingerprint(raw);
+        assert_eq!(normalized.len(), 64);
+        assert_eq!(normalized, normalized.to_lowercase());
+
+        let mut config = reference();
+        config.api.allowed_admin_fingerprints = vec![raw.to_string()];
+        config
+            .validate()
+            .expect("форма OpenSSL обязана приниматься");
     }
 
     #[test]
