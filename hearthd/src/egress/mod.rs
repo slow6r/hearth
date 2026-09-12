@@ -25,6 +25,7 @@ use std::time::Duration;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::error::Result;
 use crate::model::alert::Alert;
 use crate::model::health::{EgressIncident, ForeignSocket, HealthState};
 use crate::state::AppState;
@@ -37,6 +38,15 @@ struct Baseline {
     egress: nft::Counter,
     input: nft::Counter,
     incidents_total: u64,
+    /// Когда случился инцидент, который человек ещё не подтвердил.
+    ///
+    /// Раньше красный статус жил только в памяти: в 02:00 релей пытался выйти
+    /// наружу, в 03:00 hearthd перезапускался — по таймеру systemd, при обновлении
+    /// или потому, что оператор сам перезапустил, увидев красное, — и утром
+    /// `/egress` показывал `ok`. Единственным следом оставалась строчка «incidents
+    /// ever», которую никто не читает.
+    #[serde(default, with = "crate::model::rfc3339::option")]
+    unresolved_since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// How many incidents `GET /egress` returns inline.
@@ -103,6 +113,7 @@ impl EgressWatchdog {
 
     /// Read the nft counters and turn any growth into an incident.
     pub async fn poll_counters(&mut self) {
+        self.refresh_unresolved();
         let cfg = self.state.config.egress.clone();
         let counters =
             match nft::list_counters(&self.state.sys, &cfg.nft_family, &cfg.nft_table).await {
@@ -214,6 +225,7 @@ impl EgressWatchdog {
             snapshot.foreign_sockets.len(),
             snapshot.counters_readable,
             snapshot.scanner_ok,
+            self.baseline.unresolved_since.is_some(),
         );
     }
 
@@ -237,6 +249,7 @@ impl EgressWatchdog {
                         0,
                         snapshot.counters_readable,
                         false,
+                        self.baseline.unresolved_since.is_some(),
                     );
                 }
                 if !self.scan_alerted {
@@ -320,11 +333,15 @@ impl EgressWatchdog {
             snapshot.foreign_sockets.len(),
             snapshot.counters_readable,
             snapshot.scanner_ok,
+            self.baseline.unresolved_since.is_some(),
         );
     }
 
     async fn record_incident(&mut self, incident: &EgressIncident) {
         self.baseline.incidents_total = self.baseline.incidents_total.saturating_add(1);
+        if self.baseline.unresolved_since.is_none() {
+            self.baseline.unresolved_since = Some(Utc::now());
+        }
         self.persist_baseline();
         if let Ok(line) = serde_json::to_string(incident) {
             if let Err(e) =
@@ -357,6 +374,19 @@ impl EgressWatchdog {
                     .with_details(serde_json::json!({ "reason": reason })),
                 )
                 .await;
+        }
+    }
+
+    /// Перечитать с диска отметку о неподтверждённом инциденте.
+    ///
+    /// Подтверждает его человек — через admin API, то есть из другого процесса
+    /// относительно этой задачи. Читать раз в опрос дешевле и честнее, чем городить
+    /// канал: файл маленький, интервал секунды.
+    fn refresh_unresolved(&mut self) {
+        if let Ok(Some(persisted)) =
+            store::read_json::<Baseline>(self.state.config.paths.egress_state_file())
+        {
+            self.baseline.unresolved_since = persisted.unresolved_since;
         }
     }
 
@@ -444,6 +474,20 @@ fn scanner_can_see_relays(sockets: &[ss::SocketEntry], listening_ports: &[u16]) 
     }
 }
 
+/// Подтвердить инцидент: человек его увидел и разобрался.
+///
+/// Снимается только так. Молчаливое «следующий опрос чистый — значит всё хорошо» и
+/// было причиной того, что красный статус исчезал сам при перезапуске демона.
+pub fn acknowledge_incident(
+    config: &crate::config::Config,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+    let path = config.paths.egress_state_file();
+    let mut baseline: Baseline = store::read_json(&path)?.unwrap_or_default();
+    let was = baseline.unresolved_since.take();
+    store::write_json_atomic(&path, &baseline, store::MODE_STATE)?;
+    Ok(was)
+}
+
 /// Any drop or any foreign socket is critical; ТЗ §5.4 allows no grey zone.
 ///
 /// Отдельно — случай «проверить не удалось». Раньше он давал `Ok`: недоступный nft
@@ -456,8 +500,9 @@ fn verdict(
     foreign: usize,
     counters_readable: bool,
     scanner_ok: bool,
+    unresolved_incident: bool,
 ) -> HealthState {
-    if egress_delta > 0 || foreign > 0 {
+    if egress_delta > 0 || foreign > 0 || unresolved_incident {
         HealthState::Down
     } else if !counters_readable || !scanner_ok {
         HealthState::Degraded
@@ -577,6 +622,41 @@ ESTAB  0 0 203.0.113.10:38000 142.250.185.78:443 users:((\"smp-server\",pid=812,
     }
 
     #[tokio::test]
+    async fn an_unacknowledged_incident_survives_a_restart() {
+        // Сценарий: ночью релей пытался выйти наружу, утром демон перезапустился по
+        // таймеру. Раньше красный статус исчезал вместе с памятью процесса.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = crate::state::tests::test_config(dir.path());
+        let path = config.paths.egress_state_file();
+        crate::store::ensure_dir(path.parent().expect("parent")).expect("dir");
+
+        let baseline = Baseline {
+            egress: Default::default(),
+            input: Default::default(),
+            incidents_total: 1,
+            unresolved_since: Some(Utc::now()),
+        };
+        crate::store::write_json_atomic(&path, &baseline, crate::store::MODE_STATE).expect("write");
+
+        let restored: Baseline = crate::store::read_json(&path).expect("read").expect("some");
+        assert!(
+            restored.unresolved_since.is_some(),
+            "неподтверждённый инцидент обязан пережить перезапуск"
+        );
+        assert_eq!(
+            verdict(0, 0, true, true, restored.unresolved_since.is_some()),
+            HealthState::Down,
+            "пока инцидент не подтверждён, статус остаётся красным"
+        );
+
+        let was = acknowledge_incident(&config).expect("acknowledge");
+        assert!(was.is_some());
+        let after: Baseline = crate::store::read_json(&path).expect("read").expect("some");
+        assert!(after.unresolved_since.is_none());
+        assert_eq!(after.incidents_total, 1, "история инцидентов не стирается");
+    }
+
+    #[tokio::test]
     async fn a_corrupt_baseline_is_reported_not_silently_reset() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = crate::state::tests::test_config(dir.path());
@@ -599,14 +679,17 @@ ESTAB  0 0 203.0.113.10:38000 142.250.185.78:443 users:((\"smp-server\",pid=812,
 
     #[test]
     fn verdict_is_binary() {
-        assert_eq!(verdict(0, 0, true, true), HealthState::Ok);
-        assert_eq!(verdict(1, 0, true, true), HealthState::Down);
-        assert_eq!(verdict(0, 1, true, true), HealthState::Down);
+        assert_eq!(verdict(0, 0, true, true, false), HealthState::Ok);
+        assert_eq!(verdict(1, 0, true, true, false), HealthState::Down);
+        assert_eq!(verdict(0, 1, true, true, false), HealthState::Down);
         // Ослепший сторож не имеет права отвечать «всё хорошо».
-        assert_eq!(verdict(0, 0, false, true), HealthState::Degraded);
-        assert_eq!(verdict(0, 0, true, false), HealthState::Degraded);
+        assert_eq!(verdict(0, 0, false, true, false), HealthState::Degraded);
+        assert_eq!(verdict(0, 0, true, false, false), HealthState::Degraded);
         // Но настоящая утечка важнее неизвестности.
-        assert_eq!(verdict(1, 0, false, false), HealthState::Down);
+        assert_eq!(verdict(1, 0, false, false, false), HealthState::Down);
+        // Неподтверждённый инцидент держит красное, даже когда сейчас всё чисто:
+        // иначе перезапуск демона стирал бы след утечки.
+        assert_eq!(verdict(0, 0, true, true, true), HealthState::Down);
     }
 
     #[tokio::test]

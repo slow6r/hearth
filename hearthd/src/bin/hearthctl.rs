@@ -66,6 +66,13 @@ enum Command {
         incidents: bool,
         #[arg(long, default_value_t = 50)]
         limit: usize,
+        /// Подтвердить инцидент: вы его увидели и разобрались.
+        ///
+        /// До подтверждения статус остаётся красным даже после перезапуска демона —
+        /// иначе единственное событие, ради которого сторож существует, стиралось бы
+        /// рестартом.
+        #[arg(long)]
+        acknowledge: bool,
     },
     /// Device registry and bundles (ТЗ §10.3, §10.4).
     #[command(subcommand)]
@@ -585,8 +592,18 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Command::Egress { incidents, limit } => {
-            if incidents {
+        Command::Egress {
+            incidents,
+            limit,
+            acknowledge,
+        } => {
+            if acknowledge {
+                let result: serde_json::Value = api.post_json("/egress/acknowledge", None).await?;
+                match result.get("acknowledged").and_then(|v| v.as_str()) {
+                    Some(since) => println!("инцидент от {since} подтверждён"),
+                    None => println!("неподтверждённых инцидентов не было"),
+                }
+            } else if incidents {
                 let history: Vec<hearthd::model::alert::Alert> = api
                     .get_json(&format!("/egress/incidents?limit={limit}"))
                     .await?;

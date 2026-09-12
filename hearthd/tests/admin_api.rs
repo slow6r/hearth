@@ -117,6 +117,26 @@ async fn start() -> Harness {
 }
 
 #[tokio::test]
+async fn a_revoked_certificate_stops_working_immediately() {
+    // Раньше допуск проверялся один раз на соединение: отозванный админ продолжал
+    // работать внутри уже открытого keep-alive до таймаута. Окно было
+    // детерминированным и выбиралось атакующим — за него проходит и выписка
+    // приглашения себе, и снятие карантина, и восстановление из бэкапа.
+    let harness = start().await;
+    let _: HealthSnapshot = harness.client.get_json("/health").await.expect("до отзыва");
+
+    let mut registry = pki::AdminRegistry::load(&harness.state.config.api.pki_dir)
+        .expect("реестр администраторов");
+    registry.revoke("owner").expect("отзыв");
+
+    let after: Result<HealthSnapshot, _> = harness.client.get_json("/health").await;
+    assert!(
+        after.is_err(),
+        "отозванный сертификат обязан перестать работать сразу, а не по таймауту"
+    );
+}
+
+#[tokio::test]
 async fn health_is_served_over_mutual_tls() {
     let harness = start().await;
     let health: HealthSnapshot = harness.client.get_json("/health").await.expect("health");

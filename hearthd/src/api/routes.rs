@@ -42,6 +42,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/alerts", get(alerts))
         .route("/egress", get(egress))
         .route("/egress/incidents", get(egress_incidents))
+        .route("/egress/acknowledge", post(acknowledge_egress))
         .route("/devices", get(list_devices).post(add_device))
         .route("/devices/{id}", get(get_device))
         .route("/devices/{id}/revoke", post(revoke_device))
@@ -181,6 +182,27 @@ struct NewInvite {
     ttl_days: Option<i64>,
     #[serde(default)]
     note: Option<String>,
+}
+
+/// Подтвердить инцидент егресса: человек его увидел.
+///
+/// До подтверждения статус остаётся красным даже после перезапуска демона — иначе
+/// единственное событие, ради которого сторож существует, стиралось бы рестартом.
+async fn acknowledge_egress(State(state): State<Arc<AppState>>) -> ApiResult<impl IntoResponse> {
+    let was = crate::egress::acknowledge_incident(&state.config)?;
+    if let Some(since) = was {
+        state
+            .alerts
+            .emit(crate::model::alert::Alert::warning(
+                "egress",
+                format!(
+                    "инцидент от {} подтверждён оператором",
+                    crate::model::fmt_ts(since)
+                ),
+            ))
+            .await;
+    }
+    Ok(Json(serde_json::json!({ "acknowledged": was })))
 }
 
 /// Текущий режим узла: почему остановлены релеи и с какого момента.

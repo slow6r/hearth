@@ -130,7 +130,18 @@ async fn handle_connection(
     let admin = authorize(&state, &fingerprint, peer)?;
     tracing::info!(%peer, admin = %admin.name, "admin session");
 
-    let service = TowerToHyperService::new(app.layer(axum::Extension(admin)));
+    // Допуск проверяется ЗАНОВО на каждом запросе, а не только при рукопожатии.
+    // Иначе отзыв не мгновенен: атакующий с украденным сертификатом держит одно
+    // keep-alive соединение и работает до CONNECTION_TIMEOUT — окно детерминированное
+    // и выбирается им самим. За эти минуты успевает пройти всё: выписать себе
+    // приглашение, снять карантин, запустить восстановление из бэкапа.
+    let service = TowerToHyperService::new(
+        app.layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_active_admin,
+        ))
+        .layer(axum::Extension(admin)),
+    );
     // `backup now` and `migrate export` can legitimately take minutes (a large archive,
     // then an rsync), so the cap is generous — it exists to reap stuck connections,
     // not to bound honest work.
@@ -144,6 +155,38 @@ async fn handle_connection(
     Ok(())
 }
 
+/// Перепроверить допуск на каждом запросе внутри уже открытого соединения.
+async fn require_active_admin(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> std::result::Result<axum::response::Response, axum::http::StatusCode> {
+    let admin = request
+        .extensions()
+        .get::<Admin>()
+        .cloned()
+        .ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+
+    match authorize(&state, &admin.fingerprint, admin.peer) {
+        Ok(_) => Ok(next.run(request).await),
+        Err(e) => {
+            // Отказ внутри живого соединения означает, что сертификат отозвали прямо
+            // сейчас. Это событие для владельца, а не строчка в journald.
+            state
+                .alerts
+                .emit(crate::model::alert::Alert::warning(
+                    "api",
+                    format!(
+                        "отказ в admin API для `{}` с {}: {e}",
+                        admin.name, admin.peer
+                    ),
+                ))
+                .await;
+            Err(axum::http::StatusCode::UNAUTHORIZED)
+        }
+    }
+}
+
 /// Check the presented certificate against `admins.json` and the optional pin list.
 fn authorize(
     state: &Arc<AppState>,
@@ -151,12 +194,13 @@ fn authorize(
     peer: std::net::SocketAddr,
 ) -> Result<Admin> {
     let config = &state.config;
+    let presented = crate::config::normalize_fingerprint(fingerprint);
     if !config.api.allowed_admin_fingerprints.is_empty()
         && !config
             .api
             .allowed_admin_fingerprints
             .iter()
-            .any(|pin| pin.eq_ignore_ascii_case(fingerprint))
+            .any(|pin| crate::config::normalize_fingerprint(pin) == presented)
     {
         tracing::warn!(%peer, fingerprint, "rejected: not in allowed_admin_fingerprints");
         return Err(Error::Unauthorized("certificate is not pinned".into()));
