@@ -125,6 +125,72 @@ fn inherited_owner(_path: &Path) -> Option<(u32, u32)> {
     None
 }
 
+/// Выполнить «прочитать → изменить → записать» под эксклюзивной блокировкой.
+///
+/// # Зачем
+///
+/// Реестры (`admins.json`, `devices.json`) правятся двумя путями: демоном и
+/// командами `hearthd`/`hearthctl`, которые человек запускает из другой сессии. Обе
+/// стороны читают файл целиком, меняют и пишут обратно. Если `ca issue` загрузил
+/// реестр до того, как `ca revoke` успел записать свой, запись issue вернёт файл к
+/// состоянию без отметки об отзыве — и отозванный сертификат снова начнёт пускать.
+/// Обе команды при этом отрапортуют успех.
+///
+/// Блокировка — отдельный файл, создаваемый эксклюзивно. Это работает и на том
+/// единственном классе систем, который нас интересует, и не требует держать открытый
+/// дескриптор между процессами.
+///
+/// Зависшая блокировка снимается по возрасту: процесс, убитый в середине операции,
+/// не должен закрывать доступ навсегда.
+pub fn with_lock<T>(path: impl AsRef<Path>, body: impl FnOnce() -> Result<T>) -> Result<T> {
+    let lock_path = path.as_ref().with_extension("lock");
+    let deadline = std::time::Instant::now() + LOCK_TIMEOUT;
+    loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Чужая блокировка. Если она старше таймаута — процесс, взявший её,
+                // умер, и держать из-за него узел неуправляемым нельзя.
+                let stale = std::fs::metadata(&lock_path)
+                    .and_then(|m| m.modified())
+                    .map(|m| m.elapsed().unwrap_or_default() > LOCK_STALE_AFTER)
+                    .unwrap_or(false);
+                if stale {
+                    let _ = std::fs::remove_file(&lock_path);
+                    continue;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(Error::Conflict(format!(
+                        "{} занят другой операцией",
+                        path.as_ref().display()
+                    )));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            Err(e) => return Err(Error::io(&lock_path, e)),
+        }
+    }
+    let result = body();
+    let _ = std::fs::remove_file(&lock_path);
+    result
+}
+
+/// Сколько ждать чужую блокировку, прежде чем отказать.
+const LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// С какого возраста блокировка считается брошенной.
+///
+/// Заметно больше времени ожидания, и это не запас «на всякий случай»: если пороги
+/// равны, то через время ожидания блокировка УГОНЯЕТСЯ у живого процесса, который
+/// просто выполняет долгую операцию, — и обе стороны снова пишут файл одновременно.
+/// Пять минут — это больше, чем занимает любая операция с реестром, и меньше, чем
+/// человек готов ждать после падения процесса.
+const LOCK_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Как [`write_json_atomic`], но с наследованием владельца.
 pub fn write_json_atomic_keep_owner<T: Serialize>(
     path: impl AsRef<Path>,
@@ -378,6 +444,60 @@ mod tests {
         assert_eq!(read_secret(&path).expect("read"), "s3cret");
         write_atomic(&path, b"   \n", MODE_SECRET).expect("write empty");
         assert!(read_secret(&path).is_err());
+    }
+
+    #[test]
+    fn a_lock_serialises_read_modify_write() {
+        // Без блокировки вторая команда загружает файл до записи первой и затирает
+        // её изменение — обе при этом отчитываются об успехе.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        write_atomic(&path, b"0", MODE_STATE).unwrap();
+
+        let counter = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let path = path.clone();
+                let counter = counter.clone();
+                scope.spawn(move || {
+                    with_lock(&path, || {
+                        // Чтение и запись внутри блокировки: снаружи они разъезжаются.
+                        let current: u32 = std::fs::read_to_string(&path)
+                            .unwrap()
+                            .trim()
+                            .parse()
+                            .unwrap();
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        write_atomic(&path, (current + 1).to_string().as_bytes(), MODE_STATE)?;
+                        *counter.lock().unwrap() += 1;
+                        Ok(())
+                    })
+                    .expect("lock");
+                });
+            }
+        });
+
+        let final_value: u32 = std::fs::read_to_string(&path).unwrap().trim().parse().unwrap();
+        assert_eq!(*counter.lock().unwrap(), 8);
+        assert_eq!(final_value, 8, "ни одно изменение не должно потеряться");
+    }
+
+    #[test]
+    fn a_busy_lock_gives_up_instead_of_hanging() {
+        // Чужая блокировка не должна вешать команду навсегда: через таймаут человек
+        // получает внятный отказ, а не молчащий терминал.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let lock = path.with_extension("lock");
+        std::fs::write(&lock, b"").unwrap();
+
+        let started = std::time::Instant::now();
+        let outcome = with_lock(&path, || Ok(42));
+        assert!(outcome.is_err(), "занятая блокировка обязана быть отказом");
+        assert!(
+            started.elapsed() >= LOCK_TIMEOUT,
+            "отказ не должен приходить раньше таймаута ожидания"
+        );
     }
 
     #[test]

@@ -144,6 +144,13 @@ if [[ -n "$NODE_PATH" ]]; then
     NODE_RES="$(unzip -p "$APK" "$NODE_PATH" 2>/dev/null || true)"
 fi
 check check_node_resource "$NODE_RES"
+# Ключ подписи манифестов (ADR 0014). Без него сборка не умеет отличить наш
+# манифест обновления от подсунутого захваченным узлом.
+if grep -q 'raw/hearth_release_key' <<<"$RES_TABLE"; then
+    pass "ключ подписи манифестов вшит"
+else
+    fail "нет ресурса raw/hearth_release_key — обновления не проверяются (ADR 0014)"
+fi
 if grep -q 'raw/hearth_invite' <<<"$RES_TABLE"; then
     fail "остался ресурс raw/hearth_invite — это вшитый секрет (ADR 0012)"
 else

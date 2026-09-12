@@ -76,6 +76,23 @@ impl AdminRegistry {
         store::write_json_atomic_keep_owner(&self.path, self, store::MODE_STATE)
     }
 
+    /// Изменить реестр целиком под блокировкой: загрузить, применить, сохранить.
+    ///
+    /// Единственный правильный способ его менять из команд. Загрузка ВНУТРИ
+    /// блокировки — в этом весь смысл: иначе между чтением и записью успевает
+    /// вклиниться вторая команда, и её изменение теряется (см. `store::with_lock`).
+    pub fn update<T>(
+        pki_dir: &Path,
+        change: impl FnOnce(&mut AdminRegistry) -> Result<T>,
+    ) -> Result<T> {
+        let path = pki_dir.join(ADMINS);
+        store::with_lock(&path, || {
+            let mut registry = AdminRegistry::load(pki_dir)?;
+            let result = change(&mut registry)?;
+            Ok(result)
+        })
+    }
+
     /// Is this certificate allowed to use the admin API right now?
     pub fn authorize(&self, fingerprint: &str, now: DateTime<Utc>) -> Option<&AdminCert> {
         self.admins

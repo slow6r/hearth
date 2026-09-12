@@ -74,7 +74,33 @@ impl BackupJob {
             status.last_error = None;
         }
 
-        let result = self.create_and_push(started).await;
+        let mut result = self.create_and_push(started).await;
+
+        // Пропущенный обязательный путь — это провал, а не успех с замечанием.
+        // Архив без состояния узла не является резервной копией: восстановиться из
+        // него нельзя, а статус при этом показывал бы зелёное до самой попытки.
+        if let Ok(info) = &result {
+            let missed: Vec<String> = self
+                .state
+                .config
+                .backup
+                .required_paths
+                .iter()
+                .filter(|required| {
+                    let required = required.to_string_lossy();
+                    info.unreadable
+                        .iter()
+                        .any(|skipped| skipped.contains(required.as_ref()))
+                })
+                .map(|p| p.display().to_string())
+                .collect();
+            if !missed.is_empty() {
+                result = Err(crate::error::Error::invalid(format!(
+                    "в архив не попали обязательные пути: {}",
+                    missed.join(", ")
+                )));
+            }
+        }
 
         match &result {
             Ok(info) => {

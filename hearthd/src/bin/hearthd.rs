@@ -186,16 +186,13 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Ca(CaCommand::Revoke { name, fingerprint }) => {
-            let mut registry = pki::AdminRegistry::load(&config.api.pki_dir)?;
-            let revoked = match (name, fingerprint) {
-                (_, Some(fingerprint)) => vec![registry.revoke_by_fingerprint(&fingerprint)?],
-                (Some(name), None) => registry.revoke(&name)?,
-                (None, None) => {
-                    return Err(hearthd::error::Error::invalid(
-                        "нужно имя администратора или --fingerprint",
-                    ))
-                }
-            };
+            let revoked = pki::AdminRegistry::update(&config.api.pki_dir, |registry| match (name, fingerprint) {
+                (_, Some(fingerprint)) => Ok(vec![registry.revoke_by_fingerprint(&fingerprint)?]),
+                (Some(name), None) => registry.revoke(&name),
+                (None, None) => Err(hearthd::error::Error::invalid(
+                    "нужно имя администратора или --fingerprint",
+                )),
+            })?;
             for admin in &revoked {
                 println!("revoked `{}` ({})", admin.name, admin.fingerprint);
             }

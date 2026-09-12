@@ -25,7 +25,14 @@ private object PrefsIceSink : HearthIceSink {
 actual suspend fun hearthRefreshIceServers() {
   val context = chat.simplex.common.platform.androidAppContext
   val transport = HearthAndroidUpdateTransport.fromPrefs(context)
-  val refresher = HearthTurnRefresher(transport?.let(::AndroidTurnTransport), PrefsIceSink)
+  // Хост берём из настроек устройства — из уже применённого bundle, — а не из
+  // ответа, который собираемся проверять: иначе проверка подтверждала бы сама себя.
+  val trustedHost = ChatController.appPrefs.hearthUpdateHost.get()?.ifBlank { null }
+  val refresher = HearthTurnRefresher(
+    transport?.let(::AndroidTurnTransport),
+    PrefsIceSink,
+    trustedHost,
+  )
   when (val result = refresher.refresh()) {
     is HearthTurnRefresh.Updated ->
       Log.d("hearth", "ICE обновлены с узла: ${result.count} записей")

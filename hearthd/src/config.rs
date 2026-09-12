@@ -362,6 +362,14 @@ pub struct Backup {
     pub recipients: Vec<String>,
     #[serde(default = "d_retention")]
     pub retention_days: u64,
+    /// Пути, без которых архив бессмысленен.
+    ///
+    /// Если такой путь не прочитался, запуск считается ПРОВАЛЕННЫМ, а не «успешным с
+    /// замечанием»: восстановление из архива без состояния узла — это не
+    /// восстановление. Пустой список означает «любой архив сойдёт» и задаётся
+    /// осознанно.
+    #[serde(default)]
+    pub required_paths: Vec<PathBuf>,
     #[serde(default)]
     pub remote: Option<BackupRemote>,
 }

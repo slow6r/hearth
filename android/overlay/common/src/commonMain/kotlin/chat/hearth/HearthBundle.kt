@@ -137,7 +137,7 @@ private fun requireServerUri(uri: String, scheme: String, expectedHost: String) 
  * built-in **public** STUN/TURN. A malformed entry would therefore not break calls
  * loudly — it would quietly route them through a third party.
  */
-private fun requireIceEntry(entry: String, expectedHost: String) {
+internal fun requireIceEntry(entry: String, expectedHost: String) {
   val scheme = entry.substringBefore(':', "")
   require(scheme in setOf("stun", "stuns", "turn", "turns")) {
     "unsupported ICE scheme: $entry"

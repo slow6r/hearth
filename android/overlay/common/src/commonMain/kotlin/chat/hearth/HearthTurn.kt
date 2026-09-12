@@ -41,14 +41,29 @@ data class HearthTurnCredentials(
       isLenient = false
     }
 
-    fun parse(payload: String): Result<HearthTurnCredentials> = runCatching {
-      val creds = json.decodeFromString(serializer(), payload)
-      require(creds.ice.isNotEmpty()) { "узел вернул пустой список ICE" }
-      // Пустой список записать в настройки хуже, чем не трогать их вовсе: старые
-      // креды хотя бы могут быть ещё живы, а пустой ICE — гарантированная тишина.
-      require(creds.ice.none { it.contains("\n") }) { "в строке ICE перевод строки" }
-      creds
-    }
+    /**
+     * @param expectedHost хост узла, которому это устройство доверяет.
+     *
+     * Проверка та же, что у bundle, и это принципиально. Bundle человек сканирует
+     * лично, а креды приходят от узла по сети — то есть от стороны, которую мы как
+     * раз и не считаем доверенной после захвата. Раньше здесь проверялись только
+     * непустота и отсутствие перевода строки: узел мог вернуть ICE, указывающий на
+     * ЧУЖОЙ TURN, звонки пошли бы через него, и адреса собеседников достались бы
+     * третьей стороне. Шифрование содержимого это не ломает — ломает ровно то
+     * свойство, ради которого свой TURN и поднимали.
+     */
+    fun parse(payload: String, expectedHost: String? = null): Result<HearthTurnCredentials> =
+      runCatching {
+        val creds = json.decodeFromString(serializer(), payload)
+        require(creds.ice.isNotEmpty()) { "узел вернул пустой список ICE" }
+        // Пустой список записать в настройки хуже, чем не трогать их вовсе: старые
+        // креды хотя бы могут быть ещё живы, а пустой ICE — гарантированная тишина.
+        require(creds.ice.none { it.contains("\n") }) { "в строке ICE перевод строки" }
+        if (expectedHost != null) {
+          creds.ice.forEach { requireIceEntry(it, expectedHost) }
+        }
+        creds
+      }
   }
 }
 
@@ -80,13 +95,21 @@ sealed interface HearthTurnRefresh {
 class HearthTurnRefresher(
   private val transport: HearthTurnTransport?,
   private val sink: HearthIceSink,
+  /**
+   * Хост узла, которому это устройство доверяет.
+   *
+   * Берётся из уже применённого bundle — то есть из того, что человек сканировал или
+   * получил по коду доступа, — а не из ответа, который мы сейчас проверяем. Иначе
+   * проверка была бы самоподтверждающейся.
+   */
+  private val expectedHost: String? = null,
 ) {
   suspend fun refresh(): HearthTurnRefresh {
     val transport = transport ?: return HearthTurnRefresh.NotConfigured
     val payload = transport.turnCredentials().getOrElse { e ->
       return HearthTurnRefresh.Failed(e.message ?: "узел недоступен")
     }
-    val creds = HearthTurnCredentials.parse(payload).getOrElse { e ->
+    val creds = HearthTurnCredentials.parse(payload, expectedHost).getOrElse { e ->
       return HearthTurnRefresh.Failed(e.message ?: "ответ узла не разобран")
     }
     return runCatching {
