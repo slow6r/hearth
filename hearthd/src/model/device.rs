@@ -70,6 +70,21 @@ pub struct Device {
     pub last_bundle: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Ключ установки приложения.
+    ///
+    /// Приложение генерирует его один раз и присылает при заведении. Нужен для
+    /// идемпотентности: если ответ узла потерялся в мобильной сети и телефон
+    /// повторил запрос, повтор обязан вернуть тот же bundle, а не завести второе
+    /// устройство и не съесть второе использование одноразового кода.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_id: Option<String>,
+    /// Кто завёл это устройство через `/enroll`.
+    ///
+    /// Нужен не для истории, а для отзыва: раньше телефон, заведённый с чужого
+    /// устройства, переживал отзыв того устройства, и связь между ними существовала
+    /// только текстом в `note`. Теперь отзыв гасит и потомков.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrolled_by: Option<String>,
     /// Секрет устройства для device API (обновления и свежие TURN-креды).
     ///
     /// Отдельный от пароля релея намеренно: пароль релея один на всю семью и внутри
@@ -159,6 +174,8 @@ impl DeviceRegistry {
             bundles_issued: 0,
             last_bundle: None,
             note,
+            install_id: None,
+            enrolled_by: None,
             // Свой секрет на устройство. 32 байта: подбирать нечего, а короче делать
             // незачем — он едет в QR, который человек всё равно не набирает руками.
             token: Some(crate::store::random_hex(32)),
@@ -168,15 +185,88 @@ impl DeviceRegistry {
         Ok(device)
     }
 
-    /// Mark a device revoked (ТЗ §10.4 п.2). Idempotent.
-    pub fn revoke(&mut self, id: &str) -> Result<Device> {
+    /// Найти устройство по ключу установки.
+    pub fn by_install_id(&self, install_id: &str) -> Option<&Device> {
+        self.devices
+            .iter()
+            .find(|d| d.install_id.as_deref() == Some(install_id) && d.revoked.is_none())
+    }
+
+    /// Запомнить ключ установки за устройством.
+    pub fn note_install_id(&mut self, id: &str, install_id: &str) -> Result<()> {
         let device = self
             .get_mut(id)
             .ok_or_else(|| Error::NotFound(format!("device `{id}`")))?;
-        if device.revoked.is_none() {
-            device.revoked = Some(Utc::now());
+        device.install_id = Some(install_id.to_string());
+        self.save()
+    }
+
+    /// Записать, кто завёл это устройство.
+    pub fn note_enrolled_by(&mut self, id: &str, parent: &str) -> Result<()> {
+        let device = self
+            .get_mut(id)
+            .ok_or_else(|| Error::NotFound(format!("device `{id}`")))?;
+        device.enrolled_by = Some(parent.to_string());
+        self.save()
+    }
+
+    /// Физически убрать запись.
+    ///
+    /// Нужен только для отката: если после `add` заведение сорвалось, запись-призрак
+    /// навсегда занимает и слот `max_devices`, и имя. Отзыв для этого не годится —
+    /// отозванное устройство остаётся в реестре и продолжает занимать имя.
+    pub fn remove(&mut self, id: &str) -> Result<()> {
+        let before = self.devices.len();
+        self.devices.retain(|d| d.id != id);
+        if self.devices.len() != before {
+            self.save()?;
         }
-        let device = device.clone();
+        Ok(())
+    }
+
+    /// Сколько устройств завело это устройство начиная с указанного момента.
+    pub fn children_since(&self, parent: &str, since: DateTime<Utc>) -> usize {
+        self.devices
+            .iter()
+            .filter(|d| d.enrolled_by.as_deref() == Some(parent) && d.created >= since)
+            .count()
+    }
+
+    /// Mark a device revoked (ТЗ §10.4 п.2). Idempotent.
+    ///
+    /// Отзыв транзитивен: гаснут и устройства, заведённые этим устройством через
+    /// `/enroll`, и их потомки. Иначе один потерянный телефон оставался бы станком
+    /// по выпуску устройств, переживающим собственный отзыв.
+    pub fn revoke(&mut self, id: &str) -> Result<Device> {
+        if self.get(id).is_none() {
+            return Err(Error::NotFound(format!("device `{id}`")));
+        }
+        let now = Utc::now();
+        // Обход в ширину: список устройств короткий (десятки), рекурсия не нужна.
+        let mut queue = vec![id.to_string()];
+        let mut seen: Vec<String> = Vec::new();
+        while let Some(current) = queue.pop() {
+            if seen.contains(&current) {
+                continue;
+            }
+            seen.push(current.clone());
+            let children: Vec<String> = self
+                .devices
+                .iter()
+                .filter(|d| d.enrolled_by.as_deref() == Some(current.as_str()))
+                .map(|d| d.id.clone())
+                .collect();
+            queue.extend(children);
+            if let Some(device) = self.get_mut(&current) {
+                if device.revoked.is_none() {
+                    device.revoked = Some(now);
+                }
+            }
+        }
+        let device = self
+            .get(id)
+            .cloned()
+            .ok_or_else(|| Error::NotFound(format!("device `{id}`")))?;
         self.save()?;
         Ok(device)
     }
@@ -201,6 +291,83 @@ impl DeviceRegistry {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn revoking_a_device_revokes_what_it_enrolled() {
+        // Иначе потерянный телефон переживает собственный отзыв: заведённые им
+        // устройства продолжают работать, и связь с ними видна только текстом.
+        let (_dir, mut reg) = registry();
+        let parent = reg.add("Родитель", Platform::Android, None, 10).unwrap();
+        let child = reg.add("Ребёнок", Platform::Android, None, 10).unwrap();
+        let grandchild = reg.add("Внук", Platform::Android, None, 10).unwrap();
+        reg.note_enrolled_by(&child.id, &parent.id).unwrap();
+        reg.note_enrolled_by(&grandchild.id, &child.id).unwrap();
+
+        reg.revoke(&parent.id).unwrap();
+
+        for id in [&parent.id, &child.id, &grandchild.id] {
+            assert!(
+                reg.get(id).unwrap().revoked.is_some(),
+                "устройство {id} обязано быть отозвано вместе с родителем"
+            );
+        }
+    }
+
+    #[test]
+    fn revoking_a_child_leaves_the_parent_alone() {
+        let (_dir, mut reg) = registry();
+        let parent = reg.add("Родитель", Platform::Android, None, 10).unwrap();
+        let child = reg.add("Ребёнок", Platform::Android, None, 10).unwrap();
+        reg.note_enrolled_by(&child.id, &parent.id).unwrap();
+
+        reg.revoke(&child.id).unwrap();
+
+        assert!(reg.get(&child.id).unwrap().revoked.is_some());
+        assert!(reg.get(&parent.id).unwrap().revoked.is_none());
+    }
+
+    #[test]
+    fn removing_frees_the_name_and_the_slot() {
+        // Откат после сорвавшегося заведения: отзыв для этого не годится — имя
+        // остаётся занятым, и телефон получает 409 навсегда.
+        let (_dir, mut reg) = registry();
+        let device = reg.add("Телефон", Platform::Android, None, 1).unwrap();
+        reg.remove(&device.id).unwrap();
+
+        assert!(reg.get(&device.id).is_none());
+        assert!(
+            reg.add("Телефон", Platform::Android, None, 1).is_ok(),
+            "имя обязано освободиться"
+        );
+    }
+
+    #[test]
+    fn an_install_id_finds_its_device() {
+        let (_dir, mut reg) = registry();
+        let device = reg.add("Телефон", Platform::Android, None, 10).unwrap();
+        reg.note_install_id(&device.id, "install-1").unwrap();
+
+        assert_eq!(reg.by_install_id("install-1").unwrap().id, device.id);
+        assert!(reg.by_install_id("install-2").is_none());
+
+        reg.revoke(&device.id).unwrap();
+        assert!(
+            reg.by_install_id("install-1").is_none(),
+            "отозванное устройство не должно отвечать на повтор"
+        );
+    }
+
+    #[test]
+    fn the_daily_budget_counts_only_recent_children() {
+        let (_dir, mut reg) = registry();
+        let parent = reg.add("Родитель", Platform::Android, None, 10).unwrap();
+        let child = reg.add("Ребёнок", Platform::Android, None, 10).unwrap();
+        reg.note_enrolled_by(&child.id, &parent.id).unwrap();
+
+        let day_ago = Utc::now() - chrono::Duration::days(1);
+        assert_eq!(reg.children_since(&parent.id, day_ago), 1);
+        let tomorrow = Utc::now() + chrono::Duration::days(1);
+        assert_eq!(reg.children_since(&parent.id, tomorrow), 0);
+    }
     use super::*;
 
     fn registry() -> (tempfile::TempDir, DeviceRegistry) {

@@ -174,6 +174,59 @@ impl InviteRegistry {
         found
     }
 
+    /// Занять использование одним неделимым действием.
+    ///
+    /// Раньше проверка (`find_usable` под read-lock) и списание (`note_claim` под
+    /// write-lock) были двумя операциями, и между ними существовало окно. Десять
+    /// одновременных запросов с одним одноразовым кодом проходили проверку все
+    /// десять раз: код, выписанный «на одно устройство», заводил столько устройств,
+    /// сколько запросов успело войти в окно. Здесь проверка и списание происходят
+    /// под одним `&mut self`, поэтому окна нет.
+    ///
+    /// Если дальнейшие шаги заведения не удались, использование возвращается
+    /// через [`release`](Self::release) — иначе честная попытка съедала бы код.
+    pub fn reserve(&mut self, token: &str, now: DateTime<Utc>) -> Result<Invite> {
+        let typed = token.trim();
+        let canonical = crate::model::code::normalize(typed);
+        // Проход по всем без раннего выхода — та же причина, что и в find_usable:
+        // время ответа не должно рассказывать, есть ли такой код и где он лежит.
+        let mut found: Option<usize> = None;
+        for (index, invite) in self.invites.iter().enumerate() {
+            let matches = crate::deviceapi::ct_eq(&invite.token, typed)
+                | crate::deviceapi::ct_eq(&invite.token, &canonical);
+            if matches && invite.is_usable_at(now) {
+                found = Some(index);
+            }
+        }
+        let index = found.ok_or_else(|| Error::NotFound("invite".to_string()))?;
+        self.invites[index].uses += 1;
+        self.save()?;
+        Ok(self.invites[index].clone())
+    }
+
+    /// Вернуть занятое использование: заведение не состоялось.
+    pub fn release(&mut self, id: &str) -> Result<()> {
+        if let Some(invite) = self.invites.iter_mut().find(|i| i.id == id) {
+            invite.uses = invite.uses.saturating_sub(1);
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    /// Привязать заведённое устройство к приглашению.
+    ///
+    /// Отдельно от списания: списание обязано произойти до заведения (иначе гонка),
+    /// а id устройства появляется только после него.
+    pub fn note_device(&mut self, id: &str, device_id: &str) -> Result<()> {
+        let invite = self
+            .invites
+            .iter_mut()
+            .find(|i| i.id == id)
+            .ok_or_else(|| Error::NotFound(format!("invite `{id}`")))?;
+        invite.claimed.push(device_id.to_string());
+        self.save()
+    }
+
     /// Отметить использование. Возвращает обновлённое приглашение.
     pub fn note_claim(&mut self, id: &str, device_id: &str) -> Result<Invite> {
         let invite = self
@@ -276,6 +329,63 @@ mod tests {
         invite.token = store::random_hex(32);
         reg.invites[0] = invite.clone();
         assert!(reg.find_usable(&invite.token, Utc::now()).is_some());
+    }
+
+    #[test]
+    fn a_single_use_code_can_be_reserved_only_once() {
+        // Ровно тот случай, ради которого появился reserve: раньше проверка и
+        // списание были двумя операциями, и одновременные запросы проходили обе.
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = registry(&dir);
+        let invite = reg.create(1, 0, None).unwrap();
+        let now = Utc::now();
+
+        assert!(reg.reserve(&invite.token, now).is_ok());
+        assert!(
+            reg.reserve(&invite.token, now).is_err(),
+            "второе списание одноразового кода обязано быть отказом"
+        );
+        assert_eq!(reg.get(&invite.id).unwrap().uses, 1);
+    }
+
+    #[test]
+    fn a_released_use_comes_back() {
+        // Заведение сорвалось — код не должен быть потрачен.
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = registry(&dir);
+        let invite = reg.create(1, 0, None).unwrap();
+        let now = Utc::now();
+
+        reg.reserve(&invite.token, now).unwrap();
+        reg.release(&invite.id).unwrap();
+
+        assert_eq!(reg.get(&invite.id).unwrap().uses, 0);
+        assert!(
+            reg.reserve(&invite.token, now).is_ok(),
+            "после отката код обязан снова работать"
+        );
+    }
+
+    #[test]
+    fn a_reservation_survives_a_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = registry(&dir);
+        let invite = reg.create(1, 0, None).unwrap();
+        reg.reserve(&invite.token, Utc::now()).unwrap();
+
+        let reloaded = InviteRegistry::load(dir.path().join("invites.json")).unwrap();
+        assert_eq!(reloaded.get(&invite.id).unwrap().uses, 1);
+        assert!(reloaded.find_usable(&invite.token, Utc::now()).is_none());
+    }
+
+    #[test]
+    fn a_device_is_recorded_against_the_invite() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = registry(&dir);
+        let invite = reg.create(0, 0, None).unwrap();
+        reg.reserve(&invite.token, Utc::now()).unwrap();
+        reg.note_device(&invite.id, "pixel-8").unwrap();
+        assert_eq!(reg.get(&invite.id).unwrap().claimed, vec!["pixel-8"]);
     }
 
     #[test]

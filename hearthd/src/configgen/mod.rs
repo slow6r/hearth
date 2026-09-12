@@ -193,6 +193,8 @@ mod tests {
             bundles_issued: 0,
             last_bundle: None,
             note: None,
+            install_id: None,
+            enrolled_by: None,
             token: None,
         }
     }

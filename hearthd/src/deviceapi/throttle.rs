@@ -100,9 +100,24 @@ impl ClaimThrottle {
         false
     }
 
-    /// Код подошёл — забываем про адрес совсем.
-    pub fn note_success(&self, ip: IpAddr) {
-        self.lock().remove(&ip);
+    /// Код подошёл — забываем накопленные неудачи.
+    ///
+    /// Но НЕ снимаем блокировку: иначе обладатель одного действующего кода
+    /// перебирал бы чужие, вставляя между каждыми четырьмя попытками один успешный
+    /// вход, и дверь не закрывалась бы никогда.
+    pub fn note_success(&self, ip: IpAddr, now: Instant) {
+        let mut entries = self.lock();
+        if let Some(entry) = entries.get_mut(&ip) {
+            match entry.blocked_until {
+                Some(until) if until > now => {
+                    entry.failures = 0;
+                    entry.window_started = now;
+                }
+                _ => {
+                    entries.remove(&ip);
+                }
+            }
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<IpAddr, Entry>> {
@@ -184,9 +199,26 @@ mod tests {
         for _ in 0..MAX_FAILURES - 1 {
             throttle.note_failure(ip(1), now);
         }
-        throttle.note_success(ip(1));
+        throttle.note_success(ip(1), now);
         // Счёт начат заново: следующая неудача не должна закрывать дверь.
         assert!(!throttle.note_failure(ip(1), now));
+    }
+
+    #[test]
+    fn a_right_code_does_not_open_a_closed_door() {
+        // Иначе перебор чужих кодов идёт бесконечно: четыре промаха, один свой код,
+        // снова четыре промаха — и MAX_FAILURES недостижимо никогда.
+        let throttle = ClaimThrottle::new();
+        let now = Instant::now();
+        for _ in 0..MAX_FAILURES {
+            throttle.note_failure(ip(1), now);
+        }
+        assert!(matches!(throttle.check(ip(1), now), Verdict::Blocked(_)));
+        throttle.note_success(ip(1), now);
+        assert!(
+            matches!(throttle.check(ip(1), now), Verdict::Blocked(_)),
+            "предъявление валидного кода не должно снимать блокировку"
+        );
     }
 
     #[test]

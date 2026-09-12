@@ -395,9 +395,38 @@ async fn enroll(
 ) -> ApiResult<Response> {
     let inviter = authorize(&state, &headers).await?;
 
+    // Поверхность включается осознанно. Пока она открыта, ЛЮБОЙ действующий токен
+    // устройства плодит новые устройства, каждое из которых умеет то же самое, —
+    // то есть один потерянный телефон становится бессрочным станком.
+    if !state.config.devices.allow_device_enroll {
+        tracing::warn!(%inviter, "device api: enroll refused, disabled by configuration");
+        return Err(ApiError(StatusCode::FORBIDDEN, "enrolment is disabled"));
+    }
+
     let name = req.name.trim();
     if name.is_empty() || name.chars().count() > 64 {
         return Err(ApiError(StatusCode::BAD_REQUEST, "bad device name"));
+    }
+
+    // Бюджет на сутки: даже включённая поверхность не должна давать одному токену
+    // исчерпать max_devices за минуту.
+    let since = Utc::now() - chrono::Duration::days(1);
+    let recent = state.devices.read().await.children_since(&inviter, since);
+    if recent >= state.config.devices.max_enrolls_per_day {
+        tracing::warn!(%inviter, recent, "device api: enroll budget exhausted");
+        state
+            .alerts
+            .emit(crate::model::alert::Alert::warning(
+                "deviceapi",
+                format!(
+                    "устройство `{inviter}` завело за сутки {recent} устройств — предел исчерпан"
+                ),
+            ))
+            .await;
+        return Err(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many devices enrolled today",
+        ));
     }
 
     let device = state
@@ -415,6 +444,21 @@ async fn enroll(
             // Лимит устройств и повтор имени — это не ошибка сервера, а ответ ему.
             ApiError(StatusCode::CONFLICT, "cannot add the device")
         })?;
+
+    // Родство записываем сразу: по нему работает транзитивный отзыв.
+    if let Err(e) = state
+        .devices
+        .write()
+        .await
+        .note_enrolled_by(&device.id, &inviter)
+    {
+        tracing::error!(%inviter, error = %e, "device api: cannot record the parent");
+        let _ = state.devices.write().await.remove(&device.id);
+        return Err(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot record the device",
+        ));
+    }
 
     let bundle = crate::configgen::build_bundle(&state.config, &device).map_err(|e| {
         tracing::error!(%inviter, error = %e, "device api: cannot build a bundle");
@@ -446,6 +490,11 @@ async fn enroll(
 
 #[derive(Debug, Deserialize)]
 struct ClaimRequest {
+    /// Ключ установки: один и тот же при повторе после обрыва.
+    ///
+    /// Необязателен — старые сборки его не присылают, и для них поведение прежнее.
+    #[serde(default)]
+    install_id: Option<String>,
     /// Как назвать устройство в реестре. Приложение подставляет модель телефона —
     /// человек в этот момент ничего не вводит, в этом и смысл.
     name: String,
@@ -503,34 +552,63 @@ async fn claim(
     }
 
     let now = Utc::now();
-    let invite_id = {
-        let invites = state.invites.read().await;
-        match invites.find_usable(&token, now) {
-            Some(invite) => invite.id.clone(),
-            None => {
-                // Просроченное, исчерпанное и вовсе несуществующее приглашение
-                // отвечают одинаково: по ответу нельзя узнать, было ли оно.
-                tracing::warn!("device api: rejected an unusable invite token");
-                if let Some(ip) = peer_ip {
-                    if state.claim_throttle.note_failure(ip, at) {
-                        state
-                            .alerts
-                            .emit(crate::model::alert::Alert::warning(
-                                "deviceapi",
-                                format!(
-                                    "с адреса {ip} подбирали код доступа — вход с него закрыт на час"
-                                ),
-                            ))
-                            .await;
-                    }
-                }
-                return Err(ApiError(StatusCode::UNAUTHORIZED, "unknown invite"));
+
+    // Повтор после потерянного ответа. Телефон в мобильной сети отправил claim, узел
+    // его завёл, ответ не доехал — и повтор не должен ни съедать второе
+    // использование одноразового кода, ни плодить второе устройство. Проверяем ДО
+    // списания: у идемпотентного повтора нет права тратить код.
+    let install_id = req
+        .install_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(install_id) = install_id {
+        let existing = state
+            .devices
+            .read()
+            .await
+            .by_install_id(install_id)
+            .cloned();
+        if let Some(device) = existing {
+            let bundle = crate::configgen::build_bundle(&state.config, &device).map_err(|e| {
+                tracing::error!(device = %device.id, error = %e, "device api: cannot rebuild a bundle");
+                ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot build a bundle")
+            })?;
+            let _ = state.devices.write().await.note_bundle_issued(&device.id);
+            if let Some(ip) = peer_ip {
+                state.claim_throttle.note_success(ip, at);
             }
+            tracing::info!(device = %device.id, "device api: claim repeated, bundle re-issued");
+            return Ok(Json(bundle).into_response());
+        }
+    }
+
+    // Списание неделимо: проверка и `uses += 1` происходят под одним `&mut`.
+    // Раньше между ними было окно, и десять одновременных запросов с одним
+    // одноразовым кодом заводили десять устройств.
+    let invite = match state.invites.write().await.reserve(&token, now) {
+        Ok(invite) => invite,
+        Err(_) => {
+            // Просроченное, исчерпанное и вовсе несуществующее приглашение
+            // отвечают одинаково: по ответу нельзя узнать, было ли оно.
+            tracing::warn!("device api: rejected an unusable invite token");
+            if let Some(ip) = peer_ip {
+                if state.claim_throttle.note_failure(ip, at) {
+                    state
+                        .alerts
+                        .emit(crate::model::alert::Alert::warning(
+                            "deviceapi",
+                            format!(
+                                "с адреса {ip} подбирали код доступа — вход с него закрыт на час"
+                            ),
+                        ))
+                        .await;
+                }
+            }
+            return Err(ApiError(StatusCode::UNAUTHORIZED, "unknown invite"));
         }
     };
-    if let Some(ip) = peer_ip {
-        state.claim_throttle.note_success(ip);
-    }
+    let invite_id = invite.id.clone();
 
     let requested = req.name.trim();
     if requested.chars().count() > 64 {
@@ -567,29 +645,69 @@ async fn claim(
                 }
                 Err(e) => {
                     tracing::warn!(%invite_id, error = %e, "device api: claim refused");
+                    // Заведение не состоялось — использование возвращаем, иначе
+                    // честная попытка съедает код.
+                    let _ = state.invites.write().await.release(&invite_id);
                     return Err(ApiError(StatusCode::CONFLICT, "cannot add the device"));
                 }
             }
         }
     };
 
-    let bundle = crate::configgen::build_bundle(&state.config, &device).map_err(|e| {
-        tracing::error!(%invite_id, error = %e, "device api: cannot build a bundle");
-        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot build a bundle")
-    })?;
+    // Дальше любая неудача обязана откатить И запись устройства, И использование:
+    // иначе недоступный TURN-секрет превращает каждую попытку в запись-призрак,
+    // которая навсегда занимает слот и имя.
+    let bundle = match crate::configgen::build_bundle(&state.config, &device) {
+        Ok(bundle) => bundle,
+        Err(e) => {
+            tracing::error!(%invite_id, error = %e, "device api: cannot build a bundle");
+            let _ = state.devices.write().await.remove(&device.id);
+            let _ = state.invites.write().await.release(&invite_id);
+            return Err(ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot build a bundle",
+            ));
+        }
+    };
 
-    // Счётчик приглашения поднимаем ПОСЛЕ того, как bundle собран: иначе неудачная
-    // сборка съедала бы использование, и человек с единственным приглашением
-    // оставался бы ни с чем.
+    // Привязку устройства к приглашению записываем ДО выдачи bundle. Если запись не
+    // удалась (диск полон, state_dir перемонтирован в ro), отдавать пароли релеев
+    // нельзя: на диске не останется ни счётчика, ни следа, кого этот код впустил, и
+    // после перезапуска одноразовый код снова окажется свежим.
     if let Err(e) = state
         .invites
         .write()
         .await
-        .note_claim(&invite_id, &device.id)
+        .note_device(&invite_id, &device.id)
     {
         tracing::error!(%invite_id, error = %e, "device api: cannot record the claim");
+        let _ = state.devices.write().await.remove(&device.id);
+        let _ = state.invites.write().await.release(&invite_id);
+        state
+            .alerts
+            .emit(crate::model::alert::Alert::critical(
+                "deviceapi",
+                format!("не удалось записать использование приглашения `{invite_id}`: {e}"),
+            ))
+            .await;
+        return Err(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot record the claim",
+        ));
+    }
+    if let Some(install_id) = install_id {
+        let _ = state
+            .devices
+            .write()
+            .await
+            .note_install_id(&device.id, install_id);
     }
     let _ = state.devices.write().await.note_bundle_issued(&device.id);
+    // Счётчик неудач сбрасываем только здесь: неудавшийся claim не должен обнулять
+    // историю перебора.
+    if let Some(ip) = peer_ip {
+        state.claim_throttle.note_success(ip, at);
+    }
 
     tracing::warn!(
         %invite_id,

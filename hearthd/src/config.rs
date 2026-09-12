@@ -420,12 +420,28 @@ pub struct Devices {
     /// not mention it keeps the original promise.
     #[serde(default = "d_max_devices")]
     pub max_devices: usize,
+    /// Может ли уже заведённое устройство заводить новые через `/enroll`.
+    ///
+    /// По умолчанию нет. Иначе один потерянный телефон — бессрочный станок по
+    /// выпуску устройств: его токен плодит новые записи, каждая из которых умеет то
+    /// же самое. Включать стоит осознанно и вместе с `max_enrolls_per_day`.
+    #[serde(default)]
+    pub allow_device_enroll: bool,
+    /// Сколько устройств одно устройство может завести за сутки.
+    #[serde(default = "d_max_enrolls_per_day")]
+    pub max_enrolls_per_day: usize,
+}
+
+fn d_max_enrolls_per_day() -> usize {
+    3
 }
 
 impl Default for Devices {
     fn default() -> Self {
         Self {
             max_devices: d_max_devices(),
+            allow_device_enroll: false,
+            max_enrolls_per_day: d_max_enrolls_per_day(),
         }
     }
 }
