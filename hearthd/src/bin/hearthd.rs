@@ -229,7 +229,40 @@ fn serve(config: Config, dry_run: bool) -> Result<()> {
         let api_listen = config.api.listen;
         let state = AppState::new(config, sys)?;
 
-        preflight(&state)?;
+        // Провал preflight обязан быть fail-closed по отношению к релеям, а не
+        // только к демону. Иначе получается худшее сочетание: контрольный контур
+        // мёртв (нет проверки целостности, нет надзора, нет сторожа утечки, нет
+        // алертов), а мессенджер продолжает работать — и отказ незаметен. Именно так
+        // выглядела бы потеря прав на manifest.toml.
+        if let Err(e) = preflight(&state) {
+            tracing::error!(error = %e, "preflight failed; останавливаю релеи");
+            let reason = format!("проверка при старте не прошла: {e}");
+            if let Err(mode_err) = state
+                .set_mode(
+                    hearthd::model::mode::NodeMode::Quarantine,
+                    reason.clone(),
+                    Vec::new(),
+                )
+                .await
+            {
+                tracing::error!(error = %mode_err, "карантин не записан на диск");
+            }
+            for relay in state.config.relays() {
+                if !relay.enabled {
+                    continue;
+                }
+                if let Err(stop_err) =
+                    hearthd::sys::systemd::stop(&state.sys, &relay.unit).await
+                {
+                    tracing::error!(unit = %relay.unit, error = %stop_err, "не удалось остановить релей");
+                }
+            }
+            state
+                .alerts
+                .emit(Alert::critical("hearthd", reason).sticky(true))
+                .await;
+            return Err(e);
+        }
 
         state
             .alerts

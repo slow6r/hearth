@@ -153,10 +153,12 @@ impl EgressWatchdog {
         if delta.packets > 0 {
             // Something tried to leave the home network. Find out where to.
             let since = format!("-{}s", cfg.poll_interval_secs.saturating_mul(3).max(60));
-            let events = journal::read_drops(&self.state.sys, &since, &cfg.journal_prefix)
-                .await
-                .unwrap_or_default();
-            let destinations = journal::aggregate(&events);
+            let read = journal::read_drops(&self.state.sys, &since, &cfg.journal_prefix).await;
+            let destinations_known = read.is_ok();
+            if let Err(e) = &read {
+                tracing::warn!(error = %e, "журнал ядра недоступен: инцидент останется без адресатов");
+            }
+            let destinations = journal::aggregate(&read.unwrap_or_default());
 
             let incident = EgressIncident {
                 ts: Utc::now(),
@@ -165,6 +167,7 @@ impl EgressWatchdog {
                 bytes: delta.bytes,
                 destinations: destinations.clone(),
                 sockets: Vec::new(),
+                destinations_known,
             };
             self.record_incident(&incident).await;
             incidents.push(incident);
@@ -297,6 +300,7 @@ impl EgressWatchdog {
                 bytes: 0,
                 destinations: Vec::new(),
                 sockets: foreign.clone(),
+                destinations_known: true,
             };
             self.record_incident(&incident).await;
             self.state
@@ -729,6 +733,7 @@ ESTAB  0 0 203.0.113.10:38000 142.250.185.78:443 users:((\"smp-server\",pid=812,
                     packets: 3,
                 }],
                 sockets: Vec::new(),
+                destinations_known: true,
             },
             EgressIncident {
                 ts: Utc::now(),
@@ -742,6 +747,7 @@ ESTAB  0 0 203.0.113.10:38000 142.250.185.78:443 users:((\"smp-server\",pid=812,
                     peer: "142.250.185.78:443".into(),
                     state: "ESTAB".into(),
                 }],
+                destinations_known: true,
             },
         ];
         let summary = summarize_history(&incidents);
