@@ -23,7 +23,6 @@ import SectionDividerSpaced
 import SectionItemView
 import SectionTextFooter
 import SectionView
-import chat.simplex.common.views.newchat.QRCode
 import kotlinx.coroutines.launch
 
 @Composable
@@ -129,7 +128,7 @@ actual fun HearthNodeSettingsView() {
     val bundle = inviteBundle.value
     if (bundle != null) {
       Spacer(Modifier.height(DEFAULT_PADDING))
-      QRCode(connReq = bundle, withLogo = false)
+      HearthSecretQR(payload = bundle)
       Text(
         "QR содержит пароли релеев. Показывайте лично, не пересылайте и не сохраняйте " +
           "в галерею.",

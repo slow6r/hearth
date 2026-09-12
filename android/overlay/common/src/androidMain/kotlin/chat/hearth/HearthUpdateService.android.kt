@@ -58,6 +58,7 @@ class HearthUpdateService : Service() {
     val file = intent?.getStringExtra(EXTRA_FILE)
     val sha256 = intent?.getStringExtra(EXTRA_SHA256)
     val version = intent?.getStringExtra(EXTRA_VERSION) ?: "?"
+    val versionCode = intent?.getIntExtra(EXTRA_VERSION_CODE, 0)?.toLong() ?: 0L
     if (file == null || sha256 == null) {
       stopSelf()
       return START_NOT_STICKY
@@ -89,7 +90,26 @@ class HearthUpdateService : Service() {
       }
 
       when (result) {
-        is HearthDownloadResult.Ready -> notify(doneNotification(readyText(version), result.path))
+        is HearthDownloadResult.Ready -> {
+          // Осмотр ДО того, как человеку предложат установку. Android и сам отвергнет
+          // чужую подпись — но уже после системного диалога, на который человек,
+          // которому приложение само предложило обновиться, нажмёт «Установить».
+          // Здесь же отбрасываются случаи, которые система пропустила бы молча:
+          // другой пакет, версия не та, что обещал узел, откат на старую.
+          val apk = java.io.File(result.path)
+          when (val verdict = HearthApkGuard.inspect(applicationContext, apk, versionCode)) {
+            is HearthApkRules.Verdict.Allow ->
+              notify(doneNotification(readyText(version), result.path))
+
+            is HearthApkRules.Verdict.Refuse -> {
+              // Файл удаляем: он не должен остаться лежать и однажды быть установлен
+              // руками из «Загрузок».
+              apk.delete()
+              notify(doneNotification(refusedText(verdict.reason), null))
+            }
+          }
+        }
+
         is HearthDownloadResult.Failed -> notify(doneNotification(failedText(result.reason), null))
       }
       stopForeground(STOP_FOREGROUND_DETACH)
@@ -169,6 +189,10 @@ class HearthUpdateService : Service() {
     "Версия $version скачана. Нажмите, чтобы установить — Android покажет свой диалог, " +
       "приложение при этом перезапустится."
 
+  /** Обновление отвергнуто проверкой — это не сетевая ошибка, и текст другой. */
+  private fun refusedText(reason: String): String =
+    "Обновление отклонено: $reason. Файл удалён. Возьмите сборку у администратора."
+
   private fun failedText(reason: String) = "Обновление не скачалось: $reason"
 
   companion object {
@@ -178,6 +202,7 @@ class HearthUpdateService : Service() {
     private const val EXTRA_FILE = "file"
     private const val EXTRA_SHA256 = "sha256"
     private const val EXTRA_VERSION = "version"
+    private const val EXTRA_VERSION_CODE = "versionCode"
     private const val NO_NODE =
       "Узел не настроен: сначала отсканируйте QR настроек узла."
 
@@ -187,6 +212,7 @@ class HearthUpdateService : Service() {
         .putExtra(EXTRA_FILE, manifest.file)
         .putExtra(EXTRA_SHA256, manifest.sha256)
         .putExtra(EXTRA_VERSION, manifest.versionName)
+        .putExtra(EXTRA_VERSION_CODE, manifest.versionCode)
       androidx.core.content.ContextCompat.startForegroundService(context, intent)
     }
 
