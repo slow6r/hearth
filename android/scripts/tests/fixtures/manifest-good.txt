@@ -1,0 +1,11 @@
+N: android=http://schemas.android.com/apk/res/android
+  E: manifest (line=2)
+    A: http://schemas.android.com/apk/res/android:versionCode(0x0101021b)=(type 0x10)0x182
+    A: http://schemas.android.com/apk/res/android:versionName(0x0101021c)="7.0.1-h15" (Raw: "7.0.1-h15")
+    A: package="ru.myhearth.chat" (Raw: "ru.myhearth.chat")
+    E: application (line=60)
+      A: http://schemas.android.com/apk/res/android:label(0x01010001)=@0x7f130002
+      A: http://schemas.android.com/apk/res/android:allowBackup(0x0101000b)=(type 0x12)0x0
+      A: http://schemas.android.com/apk/res/android:dataExtractionRules(0x01010563)=@0x7f160001
+      A: http://schemas.android.com/apk/res/android:networkSecurityConfig(0x01010527)=@0x7f160002
+      A: http://schemas.android.com/apk/res/android:usesCleartextTraffic(0x01010392)=(type 0x12)0x0

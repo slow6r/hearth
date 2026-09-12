@@ -1,0 +1,4 @@
+Signer #1 certificate DN: CN=Hearth, OU=, O=, L=, ST=, C=
+Signer #1 certificate SHA-256 digest: 1111111111111111111111111111111111111111111111111111111111111111
+Signer #1 certificate SHA-1 digest: 0000000000000000000000000000000000000000
+Verified using v2 scheme (APK Signature Scheme v2): true

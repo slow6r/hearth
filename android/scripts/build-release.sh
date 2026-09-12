@@ -11,6 +11,39 @@ FORK_DIR="${FORK_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../simplex-chat" && p
 # синхронизации — значит собрать сборку без части правок и не заметить этого.
 bash "$(dirname "${BASH_SOURCE[0]}")/sync-overlay.sh"
 
+# Дерево форка обязано быть чистым ПОСЛЕ раскладки overlay и вшивания адреса узла.
+#
+# Именно этого гейта не хватило при выпуске 7.0.1-h15: sync-overlay.sh разложил
+# правки в рабочее дерево, сборка ушла людям, а в git форка исходников не было —
+# указатель на коммит описывал предыдущую версию. Аудит нашёл это первым же
+# вопросом «из чего собран APK», и ответить было нечем.
+#
+# Проверка намеренно стоит ПОСЛЕ sync-overlay: она требует, чтобы разложенное
+# совпадало с закоммиченным, то есть чтобы overlay и форк не разъезжались.
+if git -C "$FORK_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    DIRTY="$(git -C "$FORK_DIR" status --porcelain)"
+    if [ -n "$DIRTY" ]; then
+        echo "== дерево форка изменено после sync-overlay:" >&2
+        printf '%s\n' "$DIRTY" >&2
+        if [ "${HEARTH_ALLOW_DIRTY:-0}" = "1" ]; then
+            echo "ВНИМАНИЕ: HEARTH_ALLOW_DIRTY=1 — собираю из изменённого дерева." >&2
+            echo "Такую сборку НЕЛЬЗЯ раздавать: её нечем сопоставить с исходниками." >&2
+        else
+            echo >&2
+            echo "Закоммитьте изменения в форке, затем перевыпустите патчи:" >&2
+            echo "  git -C $FORK_DIR add -A apps/multiplatform && git -C $FORK_DIR commit" >&2
+            echo "  android/scripts/export-fork-patches.sh" >&2
+            echo "Для заведомо черновой сборки: HEARTH_ALLOW_DIRTY=1 ./build-release.sh" >&2
+            exit 1
+        fi
+    fi
+    FORK_COMMIT="$(git -C "$FORK_DIR" rev-parse HEAD)"
+    echo "== Коммит форка: $FORK_COMMIT"
+else
+    echo "ВНИМАНИЕ: $FORK_DIR не git-репозиторий — сборку не с чем сопоставить." >&2
+    FORK_COMMIT="unknown"
+fi
+
 cd "$FORK_DIR/apps/multiplatform"
 
 # Нативное ядро на Haskell мы не собираем (android/README.md, раздел «Стратегия»):
@@ -45,6 +78,22 @@ APK="$(find android/build/outputs/apk -name '*-release*.apk' | head -1)"
 [ -n "$APK" ] || { echo "APK не найден в android/build/outputs/apk" >&2; exit 1; }
 echo "== Собрано: $APK"
 sha256sum "$APK"
+
+# Паспорт сборки: по нему сборка сопоставляется с исходниками без переписки.
+BUILD_INFO="${APK%.apk}.build-info.txt"
+{
+    echo "fork_commit=$FORK_COMMIT"
+    echo "version_name=$(grep -E '^android.version_name=' gradle.properties | cut -d= -f2)"
+    echo "version_code=$(grep -E '^android.version_code=' gradle.properties | cut -d= -f2)"
+    echo "apk_sha256=$(sha256sum "$APK" | cut -d' ' -f1)"
+    for lib in "$LIBS_DIR"/*.so; do
+        echo "native_$(basename "$lib")=$(sha256sum "$lib" | cut -d' ' -f1)"
+    done
+    echo "java=$(java -version 2>&1 | head -1)"
+    echo "gradle=$(./gradlew --version | grep -E '^Gradle' | head -1)"
+} > "$BUILD_INFO"
+echo "== Паспорт сборки: $BUILD_INFO"
+cat "$BUILD_INFO"
 
 cat <<'NEXT'
 
