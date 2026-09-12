@@ -88,6 +88,42 @@ enum Command {
     /// Режим узла: карантин, обслуживание, перенос.
     #[command(subcommand)]
     Mode(ModeCommand),
+    /// Подпись манифеста обновлений (ключ на рабочей станции, не на узле).
+    #[command(subcommand)]
+    Release(ReleaseCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum ReleaseCommand {
+    /// Выписать пару ключей для подписи манифестов.
+    ///
+    /// Закрытый ключ кладите туда же, где лежит ключ подписи APK, и НИКОГДА не
+    /// копируйте на узел: весь смысл подписи в том, что захваченный узел не может
+    /// её поставить. Открытый вшивается в сборку (bake-node.sh).
+    Keygen {
+        /// Куда положить `release-sign.key` и `release-sign.pub`.
+        #[arg(long)]
+        out: PathBuf,
+        /// Перезаписать существующую пару.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Подписать файл манифеста. Рядом появится `<файл>.sig`.
+    Sign {
+        /// Файл манифеста (`manifest.json`).
+        manifest: PathBuf,
+        /// Закрытый ключ подписи.
+        #[arg(long)]
+        key: PathBuf,
+    },
+    /// Проверить подпись — тем же способом, что и приложение.
+    Verify {
+        manifest: PathBuf,
+        #[arg(long)]
+        sig: Option<PathBuf>,
+        #[arg(long)]
+        pubkey: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -342,6 +378,77 @@ async fn run(cli: Cli) -> Result<()> {
                     println!("  {}. {step}", i + 1);
                 }
             }
+            return Ok(());
+        }
+        Command::Release(ReleaseCommand::Keygen { out, force }) => {
+            let key_path = out.join("release-sign.key");
+            let pub_path = out.join("release-sign.pub");
+            if key_path.exists() && !force {
+                return Err(Error::Conflict(format!(
+                    "{} уже существует; --force перезапишет и сделает НЕПРОВЕРЯЕМЫМИ все \
+                     сборки, в которые вшит прежний открытый ключ",
+                    key_path.display()
+                )));
+            }
+            hearthd::store::ensure_dir(out)?;
+            let (private, public) = hearthd::release::generate()?;
+            hearthd::store::write_secret(&key_path, &hearthd::release::encode_base64(&private))?;
+            hearthd::store::write_atomic(
+                &pub_path,
+                hearthd::release::encode_base64(&public).as_bytes(),
+                hearthd::store::MODE_STATE,
+            )?;
+            println!("ключ подписи манифестов выписан");
+            println!("  закрытый: {} (0600)", key_path.display());
+            println!("  открытый: {}", pub_path.display());
+            println!();
+            println!("Закрытый ключ НЕ копируйте на узел: захваченный узел не должен");
+            println!("уметь подписать манифест. Открытый вшивается в сборку:");
+            println!("  android/scripts/bake-node.sh <host> <port>");
+            return Ok(());
+        }
+        Command::Release(ReleaseCommand::Sign { manifest, key }) => {
+            let body = std::fs::read(manifest).map_err(|e| Error::io(manifest, e))?;
+            let private = hearthd::release::load_key(key)?;
+            let signature = hearthd::release::sign(&private, &body)?;
+            let sig_path = manifest.with_extension(
+                manifest
+                    .extension()
+                    .map(|e| format!("{}.sig", e.to_string_lossy()))
+                    .unwrap_or_else(|| "sig".to_string()),
+            );
+            hearthd::store::write_atomic(
+                &sig_path,
+                hearthd::release::encode_base64(&signature).as_bytes(),
+                hearthd::store::MODE_STATE,
+            )?;
+            println!("подписано: {}", sig_path.display());
+            println!("Положите рядом с манифестом в updates_dir — клиент качает оба файла.");
+            return Ok(());
+        }
+        Command::Release(ReleaseCommand::Verify {
+            manifest,
+            sig,
+            pubkey,
+        }) => {
+            let body = std::fs::read(manifest).map_err(|e| Error::io(manifest, e))?;
+            let sig_path = sig.clone().unwrap_or_else(|| {
+                manifest.with_extension(
+                    manifest
+                        .extension()
+                        .map(|e| format!("{}.sig", e.to_string_lossy()))
+                        .unwrap_or_else(|| "sig".to_string()),
+                )
+            });
+            let sig_raw =
+                std::fs::read_to_string(&sig_path).map_err(|e| Error::io(&sig_path, e))?;
+            let signature = hearthd::release::decode_base64(sig_raw.trim())
+                .ok_or_else(|| Error::invalid("подпись не является base64"))?;
+            let public_raw = std::fs::read_to_string(pubkey).map_err(|e| Error::io(pubkey, e))?;
+            let public = hearthd::release::decode_base64(public_raw.trim())
+                .ok_or_else(|| Error::invalid("открытый ключ не является base64"))?;
+            hearthd::release::verify(&public, &body, &signature)?;
+            println!("подпись верна: {}", manifest.display());
             return Ok(());
         }
         Command::Manifest(ManifestCommand::Verify) => {
@@ -783,7 +890,7 @@ async fn run(cli: Cli) -> Result<()> {
             print_json(&status)?;
         }
         // Handled above, before the client was built.
-        Command::Backup(_) | Command::Migrate(_) | Command::Manifest(_) => {}
+        Command::Backup(_) | Command::Migrate(_) | Command::Manifest(_) | Command::Release(_) => {}
     }
     Ok(())
 }

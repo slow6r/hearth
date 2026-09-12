@@ -27,11 +27,13 @@ FORK="${FORK_DIR:-$HERE/simplex-chat}"
 ANDROID_RES="$FORK/apps/multiplatform/android/src/main/res/raw/hearth_node.json"
 DESKTOP_RES="$FORK/apps/multiplatform/common/src/desktopMain/resources/hearth_node.json"
 ANDROID_CA="$FORK/apps/multiplatform/android/src/main/res/raw/hearth_ca.pem"
+RELEASE_PUB="$HERE/../keys/admin/release-sign.pub"
+ANDROID_RELEASE_KEY="$FORK/apps/multiplatform/android/src/main/res/raw/hearth_release_key.pub"
 DESKTOP_CA="$FORK/apps/multiplatform/common/src/desktopMain/resources/hearth_ca.pem"
 
 if [ "${1:-}" = "--remove" ]; then
     removed=0
-    for res in "$ANDROID_RES" "$DESKTOP_RES" "$DESKTOP_CA"; do
+    for res in "$ANDROID_RES" "$DESKTOP_RES" "$DESKTOP_CA" "$ANDROID_RELEASE_KEY"; do
         if [ -f "$res" ]; then rm -f "$res"; removed=$((removed + 1)); fi
     done
     echo "адрес узла убран из дерева сборки (файлов: $removed)"
@@ -55,6 +57,17 @@ done
 # платформа через network security config, а на JVM такого механизма нет: узел
 # подписан своим CA, и без этого файла соединение упало бы на проверке цепочки.
 # Это не секрет — корневой сертификат, его видно в каждом рукопожатии.
+# Открытый ключ подписи манифестов обновления. Не секрет: секретна закрытая
+# половина, и она остаётся на рабочей станции. Без этого файла сборка не умеет
+# проверить, что манифест выпустили мы, — и захваченный узел смог бы подсунуть свой.
+if [ -f "$RELEASE_PUB" ]; then
+    cp "$RELEASE_PUB" "$ANDROID_RELEASE_KEY"
+    echo "ключ подписи манифестов вшит"
+else
+    echo "ВНИМАНИЕ: нет $RELEASE_PUB — сборка не сможет проверить подпись манифеста" >&2
+    echo "          выпустите: hearthctl release keygen --out keys/admin" >&2
+fi
+
 if [ -f "$ANDROID_CA" ]; then
     cp "$ANDROID_CA" "$DESKTOP_CA"
     echo "сертификат узла скопирован в ресурсы desktop"

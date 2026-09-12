@@ -981,6 +981,7 @@ dependencies = [
  "qrcode",
  "rand 0.9.5",
  "rcgen",
+ "ring",
  "rustls",
  "rustls-pemfile",
  "rustls-pki-types",

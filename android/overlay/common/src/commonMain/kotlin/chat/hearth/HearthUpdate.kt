@@ -45,6 +45,13 @@ data class HearthUpdateManifest(
   /** Путь к APK относительно того же эндпоинта. Абсолютные URL запрещены — см. validate. */
   val file: String,
   val notes: String = "",
+  /**
+   * Когда манифест выпущен, RFC 3339.
+   *
+   * Нужна не для красоты: по ней ловится откат метаданных — узел, показывающий
+   * манифест старее уже виденного, пытается удержать телефон на прежней версии.
+   */
+  val issued: String = "",
 ) {
   companion object {
     const val SUPPORTED_VERSION = 1
@@ -110,6 +117,14 @@ interface HearthUpdateTransport {
   suspend fun fetchManifest(): Result<String>
 
   /**
+   * GET подписи манифеста (`manifest.json.sig`, base64 DER).
+   *
+   * `null` — подписи на узле нет. Для сборки со вшитым ключом это отказ, а не
+   * повод продолжить: иначе достаточно удалить файл, чтобы выключить проверку.
+   */
+  suspend fun fetchManifestSignature(): Result<String?>
+
+  /**
    * Скачать файл, сообщая прогресс. Реализация обязана быть докачиваемой и жить в
    * foreground-сервисе: пользователь свернёт приложение, и загрузка не должна умирать.
    */
@@ -132,14 +147,46 @@ interface HearthUpdateTransport {
 class HearthUpdateChecker(
   private val transport: HearthUpdateTransport,
   private val installedVersionCode: Int,
+  /** Открытый ключ подписи манифестов из сборки; `null` — сборка без него. */
+  private val pinnedKey: String? = null,
+  /** Проверка подписи. Платформенная: на Android — штатный SHA256withECDSA. */
+  private val verify: (ByteArray, String, String) -> Boolean = { _, _, _ -> false },
+  /** Самая свежая отметка времени, которую этот телефон уже видел. */
+  private val lastSeenIssued: String? = null,
+  /** Куда запомнить отметку принятого манифеста. */
+  private val rememberIssued: (String) -> Unit = {},
 ) {
   suspend fun check(): HearthUpdateCheck {
     val payload = transport.fetchManifest().getOrElse { e ->
       return HearthUpdateCheck.Failed(e.message ?: "узел недоступен")
     }
+    // Подпись запрашивается всегда, когда в сборке есть ключ: её отсутствие — такой
+    // же отказ, как несовпадение.
+    val signature = if (pinnedKey != null) {
+      transport.fetchManifestSignature().getOrElse { e ->
+        return HearthUpdateCheck.Failed(e.message ?: "подпись манифеста не получена")
+      }
+    } else {
+      null
+    }
+
     val manifest = HearthUpdateManifest.parse(payload).getOrElse { e ->
       return HearthUpdateCheck.Failed(e.message ?: "манифест не разобран")
     }
+
+    val verdict = HearthUpdateTrust.decide(
+      hasPinnedKey = pinnedKey != null,
+      signaturePresent = signature != null,
+      signatureValid = signature != null && pinnedKey != null &&
+        verify(payload.encodeToByteArray(), signature, pinnedKey),
+      issued = manifest.issued.ifBlank { null },
+      lastSeenIssued = lastSeenIssued,
+    )
+    if (verdict is HearthUpdateTrust.Verdict.Refuse) {
+      return HearthUpdateCheck.Failed(verdict.reason)
+    }
+    if (manifest.issued.isNotBlank()) rememberIssued(manifest.issued)
+
     return if (manifest.isNewerThan(installedVersionCode)) {
       HearthUpdateCheck.Available(manifest)
     } else {

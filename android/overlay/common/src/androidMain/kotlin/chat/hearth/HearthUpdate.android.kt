@@ -40,6 +40,23 @@ class HearthAndroidUpdateTransport(
     }
   }
 
+  override suspend fun fetchManifestSignature(): Result<String?> = withContext(Dispatchers.IO) {
+    runCatching {
+      val conn = open("$BASE/manifest.json.sig")
+      try {
+        when (val code = conn.responseCode) {
+          200 -> conn.inputStream.use { it.readBoundedText(MANIFEST_LIMIT_BYTES) }.trim()
+          // Подписи на узле нет. Решение об этом принимает HearthUpdateTrust: для
+          // сборки со вшитым ключом это отказ, а не повод продолжить.
+          404 -> null
+          else -> throw IllegalStateException("узел ответил $code")
+        }
+      } finally {
+        conn.disconnect()
+      }
+    }
+  }
+
   override suspend fun download(
     file: String,
     expectedSha256: String,

@@ -48,6 +48,7 @@ pub mod model;
 pub mod net;
 pub mod pki;
 pub mod qr;
+pub mod release;
 pub mod state;
 pub mod store;
 pub mod supervisor;

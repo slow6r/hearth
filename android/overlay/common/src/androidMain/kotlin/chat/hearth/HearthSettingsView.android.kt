@@ -62,7 +62,15 @@ actual fun HearthNodeSettingsView() {
             return@launch
           }
           val installed = installedVersionCode(context)
-          when (val r = HearthUpdateChecker(transport, installed).check()) {
+          val checker = HearthUpdateChecker(
+            transport = transport,
+            installedVersionCode = installed,
+            pinnedKey = HearthReleaseKey.pinned(context),
+            verify = HearthReleaseKey::verify,
+            lastSeenIssued = ChatController.appPrefs.hearthLastManifestIssued.get()?.ifBlank { null },
+            rememberIssued = { ChatController.appPrefs.hearthLastManifestIssued.set(it) },
+          )
+          when (val r = checker.check()) {
             is HearthUpdateCheck.UpToDate ->
               status.value = "установлена последняя версия ($installed)"
             is HearthUpdateCheck.Failed ->
