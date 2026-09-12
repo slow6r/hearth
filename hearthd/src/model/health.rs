@@ -166,6 +166,13 @@ pub struct IntegritySnapshot {
 /// Persisted backup status (`/var/lib/hearth/backup-status.json`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupStatus {
+    /// Пути, которые демон не смог прочитать и которые поэтому НЕ попали в архив.
+    ///
+    /// Раньше этот список выбрасывался: каждый ночной архив по построению неполон
+    /// (ключ admin CA намеренно недоступен демону), а экран статуса показывал
+    /// безоговорочный успех. Оператор узнавал о дыре при восстановлении.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<String>,
     #[serde(default, with = "crate::model::rfc3339::option")]
     pub last_run: Option<DateTime<Utc>>,
     #[serde(default, with = "crate::model::rfc3339::option")]

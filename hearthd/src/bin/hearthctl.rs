@@ -924,6 +924,14 @@ fn print_status(status: &NodeStatus) {
         status.backup.remote_ok,
         status.backup.archives_kept
     );
+    if !status.backup.unreadable.is_empty() {
+        // Неполный архив — не успех. Ключ admin CA недоступен демону намеренно, и
+        // оператор обязан знать, что хранит его отдельно, а не полагаться на копию.
+        println!("  В архив НЕ попали ({}):", status.backup.unreadable.len());
+        for path in &status.backup.unreadable {
+            println!("    {path}");
+        }
+    }
     if let Some(error) = &status.backup.last_error {
         println!("  last error: {error}");
     }

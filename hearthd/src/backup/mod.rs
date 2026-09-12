@@ -89,6 +89,22 @@ impl BackupJob {
                     status.last_size_bytes = info.size_bytes;
                     status.last_sha256 = Some(info.sha256.clone());
                     status.archives_kept = kept;
+                    status.unreadable = info.unreadable.clone();
+                }
+                if !info.unreadable.is_empty() {
+                    self.state
+                        .alerts
+                        .emit(
+                            Alert::warning(
+                                "backup",
+                                format!(
+                                    "архив создан, но {} пут(и) в него не попали",
+                                    info.unreadable.len()
+                                ),
+                            )
+                            .with_details(serde_json::json!({ "paths": info.unreadable })),
+                        )
+                        .await;
                 }
                 tracing::info!(
                     archive = %info.path.display(),

@@ -268,8 +268,14 @@ fn classify(
         return (HealthState::Down, Some(msg.into()));
     }
     if unit.active_state == "unknown" {
-        // No systemd available (dev box / container): the socket probe is authoritative.
-        return (HealthState::Ok, Some("systemd state unavailable".into()));
+        // Раньше здесь возвращался Ok: отвалившийся dbus, переименованный юнит или
+        // отобранное право спрашивать systemctl давали зелёный экран при единственном
+        // подтверждении — что TCP-порт отвечает. Это ровно то состояние, в котором
+        // подменённая служба выглядит здоровой. Неизвестность — Degraded.
+        return (
+            HealthState::Degraded,
+            Some("systemd state unavailable".into()),
+        );
     }
     if !unit.is_active() {
         return (
@@ -472,9 +478,14 @@ mod tests {
     }
 
     #[test]
-    fn without_systemd_the_socket_probe_decides() {
-        let (state, _) = classify(&UnitState::unknown(), true, None, true);
-        assert_eq!(state, HealthState::Ok);
+    fn an_unavailable_systemd_is_not_reported_as_ok() {
+        // Тест раньше закреплял обратное: при недоступном systemd состояние считалось
+        // Ok, если отвечает порт. Но отвечающий порт — единственное подтверждение,
+        // и ровно так выглядит подменённая служба. Неизвестность обязана быть видна.
+        let (state, msg) = classify(&UnitState::unknown(), true, None, true);
+        assert_eq!(state, HealthState::Degraded);
+        assert!(msg.expect("message").contains("systemd"));
+        // Молчащий порт по-прежнему важнее неизвестности.
         let (state, _) = classify(&UnitState::unknown(), false, None, true);
         assert_eq!(state, HealthState::Down);
     }

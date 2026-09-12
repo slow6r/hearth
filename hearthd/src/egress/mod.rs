@@ -49,6 +49,8 @@ pub struct EgressWatchdog {
     baseline: Baseline,
     /// Whether we already alerted that the counters cannot be read.
     blind_alerted: bool,
+    /// То же для сканера сокетов: шумим один раз, пока он не заработает.
+    scan_alerted: bool,
     /// Set when the persisted baseline existed but could not be parsed; reported on
     /// the first poll, once.
     baseline_lost: Option<String>,
@@ -72,6 +74,7 @@ impl EgressWatchdog {
             state,
             baseline,
             blind_alerted: false,
+            scan_alerted: false,
             baseline_lost,
         }
     }
@@ -206,7 +209,12 @@ impl EgressWatchdog {
                 .saturating_sub(RECENT_INCIDENTS);
             snapshot.recent_incidents.drain(..overflow);
         }
-        snapshot.state = verdict(snapshot.egress_drop_delta, snapshot.foreign_sockets.len());
+        snapshot.state = verdict(
+            snapshot.egress_drop_delta,
+            snapshot.foreign_sockets.len(),
+            snapshot.counters_readable,
+            snapshot.scanner_ok,
+        );
     }
 
     /// List sockets and flag any relay connection leaving the home networks.
@@ -215,10 +223,36 @@ impl EgressWatchdog {
         let sockets = match ss::list_tcp(&self.state.sys).await {
             Ok(sockets) => sockets,
             Err(e) => {
+                // Ранний выход оставлял в снимке протухшие scanner_ok=true и пустой
+                // список сокетов со временем последнего УДАЧНОГО скана: экран
+                // утверждал, что проверка прошла и чиста, хотя её не было.
                 tracing::warn!(error = %e, "ss unavailable, socket scan skipped");
+                {
+                    let mut snapshot = self.state.egress.write().await;
+                    snapshot.checked = Utc::now();
+                    snapshot.scanner_ok = false;
+                    snapshot.foreign_sockets.clear();
+                    snapshot.state = verdict(
+                        snapshot.egress_drop_delta,
+                        0,
+                        snapshot.counters_readable,
+                        false,
+                    );
+                }
+                if !self.scan_alerted {
+                    self.scan_alerted = true;
+                    self.state
+                        .alerts
+                        .emit(Alert::warning(
+                            "egress",
+                            format!("сокеты не перечисляются ({e}); второй сигнал утечки мёртв"),
+                        ))
+                        .await;
+                }
                 return;
             }
         };
+        self.scan_alerted = false;
         // Ports we publish. A relay socket on one of them is an accepted connection —
         // a family member connecting in — not a leak.
         let mut listening_ports: Vec<u16> = Vec::new();
@@ -281,7 +315,12 @@ impl EgressWatchdog {
         snapshot.foreign_sockets = foreign;
         snapshot.scanner_ok = can_see;
         snapshot.incidents_total = self.baseline.incidents_total;
-        snapshot.state = verdict(snapshot.egress_drop_delta, snapshot.foreign_sockets.len());
+        snapshot.state = verdict(
+            snapshot.egress_drop_delta,
+            snapshot.foreign_sockets.len(),
+            snapshot.counters_readable,
+            snapshot.scanner_ok,
+        );
     }
 
     async fn record_incident(&mut self, incident: &EgressIncident) {
@@ -406,9 +445,22 @@ fn scanner_can_see_relays(sockets: &[ss::SocketEntry], listening_ports: &[u16]) 
 }
 
 /// Any drop or any foreign socket is critical; ТЗ §5.4 allows no grey zone.
-fn verdict(egress_delta: u64, foreign: usize) -> HealthState {
+///
+/// Отдельно — случай «проверить не удалось». Раньше он давал `Ok`: недоступный nft
+/// или отсутствующий `ss` означали, что сторож ослеп, а `GET /egress` при этом
+/// отдавал state:"ok" и `hearthctl egress` завершался нулём. Внешний контроль видел
+/// зелёное там, где не было никакой проверки. Неизвестность — это Degraded, и она
+/// обязана отличаться и от «всё чисто», и от «есть утечка».
+fn verdict(
+    egress_delta: u64,
+    foreign: usize,
+    counters_readable: bool,
+    scanner_ok: bool,
+) -> HealthState {
     if egress_delta > 0 || foreign > 0 {
         HealthState::Down
+    } else if !counters_readable || !scanner_ok {
+        HealthState::Degraded
     } else {
         HealthState::Ok
     }
@@ -547,9 +599,14 @@ ESTAB  0 0 203.0.113.10:38000 142.250.185.78:443 users:((\"smp-server\",pid=812,
 
     #[test]
     fn verdict_is_binary() {
-        assert_eq!(verdict(0, 0), HealthState::Ok);
-        assert_eq!(verdict(1, 0), HealthState::Down);
-        assert_eq!(verdict(0, 1), HealthState::Down);
+        assert_eq!(verdict(0, 0, true, true), HealthState::Ok);
+        assert_eq!(verdict(1, 0, true, true), HealthState::Down);
+        assert_eq!(verdict(0, 1, true, true), HealthState::Down);
+        // Ослепший сторож не имеет права отвечать «всё хорошо».
+        assert_eq!(verdict(0, 0, false, true), HealthState::Degraded);
+        assert_eq!(verdict(0, 0, true, false), HealthState::Degraded);
+        // Но настоящая утечка важнее неизвестности.
+        assert_eq!(verdict(1, 0, false, false), HealthState::Down);
     }
 
     #[tokio::test]
