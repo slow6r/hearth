@@ -663,7 +663,7 @@ accept` открывало релею весь интернет на этих п
 
 1. *Переводы строк.* `.gitattributes` не было, при `core.autocrlf=true` рабочее дерево
    получало CRLF — 29 файлов из 49. Следствия: `bash` падал на первой строке
-   (`set -euo pipefail` -> «set: pipefail: invalid option name»), так не запускались
+   (`set -euo pipefail` -> «set: pipefail: invalid option name»), так не запускались
    `install.sh`, `init-ntf.sh` и `build-ntf-server.sh`; а `diff` ветки с узлом показывал
    различие в каждой строке, и настоящие отличия в этом шуме были не видны.
 2. *`install.sh`.* `/srv/hearth` принадлежал `fels:fels` — каталог лежит вне `/etc` и
