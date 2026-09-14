@@ -59,3 +59,9 @@ __pycache__/
 # Нативные библиотеки Windows из релиза upstream: 258 МБ, восстанавливаются
 # по инструкции в android/README.md с проверкой хеша.
 /android/desktop-runtime/
+
+# Результат relays/ntf/build-ntf-server.sh: бинарь ntf-server весит 50 МБ. В git ему
+# делать нечего — из истории такой объект потом не выкинуть. Связь бинаря с исходниками
+# держится не файлом, а манифестом узла: sha256 пиннится через `hearthctl manifest pin`,
+# а версия, коммит simplexmq и хеш патча записаны в docs/deploy-fels-2026-09-09.md.
+relays/ntf/dist/
