@@ -40,6 +40,29 @@ object HearthAccessCode {
   fun isValid(canonical: String): Boolean =
     canonical.length == LENGTH && canonical.all { ALPHABET.contains(it) }
 
+  /**
+   * Где окажется знак с позиции `offset` после расстановки дефисов.
+   *
+   * Нужно для поля ввода: там код хранится без дефисов, а показывается с ними, и без
+   * пересчёта позиции курсор прыгает после каждой правки — приходится тыкать вручную,
+   * чтобы продолжить набор. Пересчёт делается здесь, чистой арифметикой, и проверяется
+   * тестом, а не глазами на телефоне.
+   */
+  fun displayOffset(offset: Int): Int {
+    val o = offset.coerceIn(0, LENGTH)
+    return o + (if (o > GROUP) 1 else 0) + (if (o > GROUP * 2) 1 else 0)
+  }
+
+  /** Обратное преобразование: позиция в показанной строке — в позицию в коде. */
+  fun codeOffset(displayed: Int): Int {
+    val d = displayed.coerceIn(0, LENGTH + 2)
+    return when {
+      d <= GROUP -> d
+      d <= GROUP * 2 + 1 -> d - 1
+      else -> d - 2
+    }.coerceIn(0, LENGTH)
+  }
+
   /** Разбить на группы для показа: `H7K4-P9QX-M3TV`. */
   fun formatGroups(canonical: String): String =
     canonical.chunked(GROUP).joinToString("-")

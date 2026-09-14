@@ -1,0 +1,575 @@
+From 8d3fc5a2800a04cf5c7f8016552b8e66eb4f3ce1 Mon Sep 17 00:00:00 2001
+From: slow6r <lodikovf@gmail.com>
+Date: Mon, 14 Sep 2026 13:02:27 +0300
+Subject: [PATCH 26/26] =?UTF-8?q?0027:=20=D1=8D=D0=BA=D1=80=D0=B0=D0=BD?=
+ =?UTF-8?q?=D1=8B=20QR=20=D1=83=D0=B1=D1=80=D0=B0=D0=BD=D1=8B,=20=D0=BF?=
+ =?UTF-8?q?=D1=80=D0=B8=D0=BD=D1=83=D0=B6=D0=B4=D0=B5=D0=BD=D0=B8=D0=B5=20?=
+ =?UTF-8?q?=D1=81=D0=B2=D0=BE=D0=B8=D1=85=20=D1=81=D0=B5=D1=80=D0=B2=D0=B5?=
+ =?UTF-8?q?=D1=80=D0=BE=D0=B2=20=D0=BF=D1=80=D0=B8=20=D0=BB=D1=8E=D0=B1?=
+ =?UTF-8?q?=D0=BE=D0=BC=20=D1=81=D1=82=D0=B0=D1=80=D1=82=D0=B5=20=D1=87?=
+ =?UTF-8?q?=D0=B0=D1=82=D0=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Экран «Настройка узла» со сканером удалён совсем, вместе с ним — QR приглашения
+устройства из настроек: он отдавал пароли релеев картинкой, и одно касание
+отправляло их во внешнее приложение. Вкладка «Инструменты разработчика» вырезана
+из раздаваемой сборки.
+
+Главное: приведение к своему узлу переехало из одной ветки Core.kt в
+ChatController.startChat — точку, общую для обычного запуска и ручного включения
+чата. Раньше при остановленном чате первый же вызов отвечал chatNotStarted,
+исключение обрывало всю цепочку, и приложение оставалось на публичных серверах
+SimpleX, молча создавая приглашения вида smp11.simplex.im. Каждый шаг теперь
+защищён отдельно, сетевые шаги ушли в фон.
+
+Поле ввода кода: дефисы добавляются при отрисовке, с пересчётом позиции курсора —
+раньше он уезжал после каждой правки.
+---
+ .../chat/hearth/HearthSettingsView.android.kt | 62 ++++-----------
+ .../usersettings/SettingsView.android.kt      |  8 +-
+ .../kotlin/chat/hearth/HearthAccessCode.kt    | 23 ++++++
+ .../kotlin/chat/hearth/HearthCodeField.kt     | 48 ++++++++++++
+ .../kotlin/chat/hearth/HearthImportView.kt    | 44 ++++-------
+ .../kotlin/chat/hearth/HearthOnboarding.kt    | 11 +++
+ .../kotlin/chat/hearth/HearthStartup.kt       | 77 +++++++++++++++++++
+ .../chat/simplex/common/model/SimpleXAPI.kt   |  6 ++
+ .../chat/simplex/common/platform/Core.kt      | 29 +++----
+ .../common/views/database/DatabaseView.kt     |  3 +
+ .../kotlin/chat/hearth/HearthCodeFieldTest.kt | 55 +++++++++++++
+ apps/multiplatform/gradle.properties          |  4 +-
+ 12 files changed, 266 insertions(+), 104 deletions(-)
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthCodeField.kt
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthStartup.kt
+ create mode 100644 apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthCodeFieldTest.kt
+
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt
+index 6d5b17d..ae8c588 100644
+--- a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt
+@@ -95,57 +95,23 @@ actual fun HearthNodeSettingsView() {
+     )
+     SectionDividerSpaced()
+ 
+-    // --- приглашение --------------------------------------------------------------
++    // --- новое устройство ----------------------------------------------------------
++    //
++    // Здесь была кнопка «Пригласить устройство»: узел заводил запись и отдавал QR с
++    // паролями релеев. Этот путь отменён (ADR 0012) по двум причинам. Первая — QR
++    // содержал самый ценный секрет контура, и одно случайное касание отправляло его
++    // в галерею или облако. Вторая — заведение с чужого устройства обходило учёт:
++    // любой действующий телефон бессрочно плодил новые, и отзыв исходного их не гасил.
++    //
++    // Новое устройство заводится кодом доступа, который выдают лично.
+     SectionView("НОВОЕ УСТРОЙСТВО") {
+-      OutlinedTextField(
+-        value = inviteName.value,
+-        onValueChange = { inviteName.value = it },
+-        label = { Text("Имя, например «Брат — Redmi»") },
+-        singleLine = true,
+-        modifier = Modifier.fillMaxWidth().padding(horizontal = DEFAULT_PADDING),
+-      )
+-      SectionItemView(click = {
+-        val name = inviteName.value.trim()
+-        if (busy.value || name.isEmpty()) return@SectionItemView
+-        busy.value = true
+-        status.value = "просим узел завести устройство…"
+-        scope.launch {
+-          val transport = HearthAndroidUpdateTransport.fromPrefs(context)
+-          if (transport == null) {
+-            status.value = "узел не настроен"
+-            busy.value = false
+-            return@launch
+-          }
+-          transport.enroll(name)
+-            .onSuccess {
+-              inviteBundle.value = it
+-              status.value = "готово: покажите QR новому телефону"
+-            }
+-            .onFailure { status.value = "не вышло: ${it.message}" }
+-          busy.value = false
+-        }
+-      }) {
+-        Text("Пригласить устройство", color = MaterialTheme.colors.primary)
+-      }
+-    }
+-    SectionTextFooter(
+-      "Узел заведёт отдельную запись со своим ключом, поэтому потерянный телефон " +
+-        "можно будет отозвать, не трогая остальные."
+-    )
+-
+-    val bundle = inviteBundle.value
+-    if (bundle != null) {
+-      Spacer(Modifier.height(DEFAULT_PADDING))
+-      HearthSecretQR(payload = bundle)
+-      Text(
+-        "QR содержит пароли релеев. Показывайте лично, не пересылайте и не сохраняйте " +
+-          "в галерею.",
+-        style = MaterialTheme.typography.body2,
+-        color = MaterialTheme.colors.error,
+-        textAlign = TextAlign.Center,
+-        modifier = Modifier.fillMaxWidth().padding(horizontal = DEFAULT_PADDING),
++      SectionTextFooter(
++        "Новый телефон или компьютер заводится кодом доступа: поставьте на нём " +
++          "приложение и введите код при первом запуске. Код выдаёт владелец узла — " +
++          "по одному на устройство."
+       )
+     }
++    SectionDividerSpaced()
+ 
+     val text = status.value
+     if (text != null) {
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.android.kt
+index 5e9706d..c56e362 100644
+--- a/apps/multiplatform/common/src/androidMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.android.kt
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.android.kt
+@@ -23,9 +23,11 @@ actual fun AdvancedSettingsAppSection(
+   showSettingsModal: (@Composable (ChatModel) -> Unit) -> (() -> Unit),
+   withAuth: (title: String, desc: String, block: () -> Unit) -> Unit,
+ ) {
+-  SectionView {
+-    SettingsActionItem(painterResource(MR.images.ic_code), stringResource(MR.strings.settings_developer_tools), showSettingsModal { DeveloperView(withAuth) })
+-  }
++  // hearth: раздел «Инструменты разработчика» убран из сборки, которую раздают
++  // людям. Он открывает доступ к внутренностям ядра, идентификаторам базы и
++  // отладочным переключателям — в приложении для своего круга это лишняя
++  // поверхность, а не удобство. Функция остаётся пустой: она `actual`, и её
++  // удаление сломало бы объявление в общем коде.
+ }
+ 
+ @Composable
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthAccessCode.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthAccessCode.kt
+index 4b6397c..0397dff 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthAccessCode.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthAccessCode.kt
+@@ -40,6 +40,29 @@ object HearthAccessCode {
+   fun isValid(canonical: String): Boolean =
+     canonical.length == LENGTH && canonical.all { ALPHABET.contains(it) }
+ 
++  /**
++   * Где окажется знак с позиции `offset` после расстановки дефисов.
++   *
++   * Нужно для поля ввода: там код хранится без дефисов, а показывается с ними, и без
++   * пересчёта позиции курсор прыгает после каждой правки — приходится тыкать вручную,
++   * чтобы продолжить набор. Пересчёт делается здесь, чистой арифметикой, и проверяется
++   * тестом, а не глазами на телефоне.
++   */
++  fun displayOffset(offset: Int): Int {
++    val o = offset.coerceIn(0, LENGTH)
++    return o + (if (o > GROUP) 1 else 0) + (if (o > GROUP * 2) 1 else 0)
++  }
++
++  /** Обратное преобразование: позиция в показанной строке — в позицию в коде. */
++  fun codeOffset(displayed: Int): Int {
++    val d = displayed.coerceIn(0, LENGTH + 2)
++    return when {
++      d <= GROUP -> d
++      d <= GROUP * 2 + 1 -> d - 1
++      else -> d - 2
++    }.coerceIn(0, LENGTH)
++  }
++
+   /** Разбить на группы для показа: `H7K4-P9QX-M3TV`. */
+   fun formatGroups(canonical: String): String =
+     canonical.chunked(GROUP).joinToString("-")
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthCodeField.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthCodeField.kt
+new file mode 100644
+index 0000000..602f5a9
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthCodeField.kt
+@@ -0,0 +1,48 @@
++package chat.hearth
++
++import androidx.compose.ui.text.AnnotatedString
++import androidx.compose.ui.text.input.OffsetMapping
++import androidx.compose.ui.text.input.TransformedText
++import androidx.compose.ui.text.input.VisualTransformation
++
++/**
++ * Показ кода доступа группами по четыре, без вмешательства в сам код.
++ *
++ * # Зачем
++ *
++ * Сначала поле хранило код без дефисов, а показывало с ними — значение форматировалось
++ * прямо при отрисовке. Выглядело правильно, работало отвратительно: после каждой
++ * правки курсор уезжал не туда, знаки вставлялись не в том порядке, и человеку
++ * приходилось тыкать в строку, чтобы продолжить набор. Ровно на том экране, который
++ * он видит один раз в жизни и где ошибаться нельзя.
++ *
++ * Причина простая: когда показанный текст длиннее хранимого, система не знает, куда
++ * ставить курсор, — а мы ей не сказали.
++ *
++ * # Как правильно
++ *
++ * Поле хранит ровно то, что ввёл человек, — двенадцать знаков без дефисов. Дефисы
++ * добавляются только при отображении, вместе с пересчётом позиции курсора в обе
++ * стороны. Арифметика вынесена в [HearthAccessCode] и покрыта тестами: проверять её
++ * на телефоне пальцами — то же самое, что не проверять.
++ */
++object HearthCodeTransformation : VisualTransformation {
++
++  override fun filter(text: AnnotatedString): TransformedText {
++    val code = text.text.take(HearthAccessCode.LENGTH)
++    return TransformedText(
++      AnnotatedString(HearthAccessCode.formatGroups(code)),
++      object : OffsetMapping {
++        /** Где знак из кода окажется в показанной строке. */
++        override fun originalToTransformed(offset: Int): Int =
++          HearthAccessCode.displayOffset(offset).coerceAtMost(
++            HearthAccessCode.formatGroups(code).length
++          )
++
++        /** И обратно — куда попадёт курсор, поставленный в показанной строке. */
++        override fun transformedToOriginal(offset: Int): Int =
++          HearthAccessCode.codeOffset(offset).coerceAtMost(code.length)
++      },
++    )
++  }
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt
+index 3c8d1ef..5614daf 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthImportView.kt
+@@ -18,7 +18,6 @@ import androidx.compose.ui.text.style.TextAlign
+ import androidx.compose.ui.unit.dp
+ import chat.simplex.common.model.ChatController
+ import chat.simplex.common.ui.theme.DEFAULT_PADDING
+-import chat.simplex.common.views.newchat.QRCodeScanner
+ import chat.simplex.common.views.onboarding.OnboardingStage
+ import kotlinx.coroutines.launch
+ 
+@@ -46,7 +45,6 @@ fun HearthImportView() {
+   val node = remember { hearthBakedNode() }
+   val error = remember { mutableStateOf<String?>(null) }
+   val busy = remember { mutableStateOf(false) }
+-  val showScanner = remember { mutableStateOf(true) }
+   val code = remember { mutableStateOf("") }
+   val scope = rememberCoroutineScope()
+ 
+@@ -59,7 +57,7 @@ fun HearthImportView() {
+   ) {
+     Spacer(Modifier.height(DEFAULT_PADDING * 2))
+     Text(
+-      if (node == null) HearthOnboardingText.TITLE else HearthOnboardingText.CODE_TITLE,
++      HearthOnboardingText.CODE_TITLE,
+       style = MaterialTheme.typography.h1,
+       textAlign = TextAlign.Center,
+     )
+@@ -76,7 +74,11 @@ fun HearthImportView() {
+       OutlinedTextField(
+         // В поле всегда канонический код, разбитый по четыре: человек сверяет его с
+         // бумажкой, и группы для этого и нужны. Лишние знаки просто не появляются.
+-        value = HearthAccessCode.formatGroups(code.value),
++        // В поле — ровно то, что набрал человек. Дефисы добавляет
++        // HearthCodeTransformation при отрисовке, вместе с пересчётом позиции
++        // курсора: раньше значение форматировалось прямо здесь, и курсор уезжал
++        // после каждой правки.
++        value = code.value,
+         onValueChange = { typed ->
+           if (!busy.value) {
+             code.value = HearthAccessCode.normalize(typed).take(HearthAccessCode.LENGTH)
+@@ -85,6 +87,7 @@ fun HearthImportView() {
+         },
+         singleLine = true,
+         enabled = !busy.value,
++        visualTransformation = HearthCodeTransformation,
+         keyboardOptions = KeyboardOptions(
+           capitalization = KeyboardCapitalization.Characters,
+           autoCorrect = false,
+@@ -139,37 +142,16 @@ fun HearthImportView() {
+         }
+       }
+     } else {
++      // Сборка без вшитого адреса узла. Раньше здесь показывался сканер QR — и это
++      // был единственный путь, которым экран «Настройка узла» вообще мог появиться
++      // на глаза человеку. Сканера больше нет: настройка по QR отменена в пользу
++      // кода доступа (ADR 0012), а показывать камеру на экране, который человек
++      // видит один раз в жизни и не понимает, — худший из возможных ответов.
+       Text(
+-        HearthOnboardingText.BODY,
++        HearthOnboardingText.INCOMPLETE_BUILD,
+         style = MaterialTheme.typography.body1,
+         textAlign = TextAlign.Center,
+       )
+-      Spacer(Modifier.height(DEFAULT_PADDING))
+-
+-      QRCodeScanner(showScanner) { payload ->
+-        // Повторные срабатывания сканера при уже идущем импорте игнорируем: applier
+-        // не идемпотентен, а камера отдаёт один и тот же код несколько раз подряд.
+-        if (busy.value) return@QRCodeScanner false
+-        busy.value = true
+-        error.value = null
+-
+-        when (val result = hearthAcceptBundle(payload)) {
+-          is HearthImportResult.Applied -> {
+-            showScanner.value = false
+-            ChatController.appPrefs.onboardingStage.set(OnboardingStage.Step1_SimpleXInfo)
+-            true
+-          }
+-
+-          is HearthImportResult.Rejected -> {
+-            // Ошибку показываем на экране, а не всплывающим окном: человек стоит с
+-            // телефоном перед чужим QR, и текст должен остаться на виду, пока он
+-            // разбирается. Сканер оставляем включённым — можно сразу сканировать снова.
+-            error.value = result.reason
+-            busy.value = false
+-            false
+-          }
+-        }
+-      }
+     }
+ 
+     val message = error.value
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
+index d8d9f13..f02a500 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthOnboarding.kt
+@@ -84,6 +84,17 @@ object HearthOnboardingText {
+   // --- Код доступа (ADR 0012) ---
+ 
+   const val CODE_TITLE = "Код доступа"
++
++  /**
++   * Сборка без вшитого адреса узла.
++   *
++   * Раньше в этом случае показывался сканер QR. Его больше нет: настройка по QR
++   * отменена в пользу кода доступа, и человеку честнее сказать, что сборка неполная,
++   * чем включать камеру на экране, который он видит один раз и не понимает.
++   */
++  const val INCOMPLETE_BUILD =
++    "Эта сборка неполная: в ней нет адреса узла. Возьмите установочный файл у того, " +
++      "кто вас пригласил, — вместе с кодом доступа."
+   const val CODE_BODY =
+     "Введите код, который вам дали лично. Двенадцать знаков, вводится один раз — " +
+       "дальше приложение настроится само."
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthStartup.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthStartup.kt
+new file mode 100644
+index 0000000..4087ce3
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthStartup.kt
+@@ -0,0 +1,77 @@
++package chat.hearth
++
++import chat.simplex.common.platform.Log
++
++/**
++ * Приведение приложения к своему узлу — после того, как чат стал рабочим.
++ *
++ * # Зачем отдельный файл
++ *
++ * Раньше эти шаги стояли подряд в одной ветке запуска (`Core.kt`), ничем не
++ * защищённые. Любая осечка на первом из них обрывала **все** остальные: не
++ * применялись настройки узла, не выключались операторы SimpleX, не заменялись
++ * адреса. Приложение оставалось на публичных серверах и спокойно создавало
++ * приглашение вида `smp11.simplex.im` — молча, без следа в интерфейсе.
++ *
++ * Ровно это и случилось: чат был остановлен, первый же вызов ответил
++ * `chatNotStarted`, исключение улетело наружу, и защита не сработала целиком.
++ *
++ * # Что изменилось
++ *
++ * Каждый шаг защищён сам по себе: падение одного не отменяет соседей. И вызывается
++ * всё это не из одной ветки запуска, а из той точки, где чат ДЕЙСТВИТЕЛЬНО стал
++ * рабочим, — значит срабатывает и при обычном старте приложения, и при ручном
++ * включении чата из настроек базы данных, откуда раньше не срабатывало вовсе.
++ */
++object HearthStartup {
++
++  /**
++   * Отработало ли приведение в этом процессе.
++   *
++   * Чат может запускаться несколько раз за жизнь процесса (остановили и включили),
++   * а переписывать серверы каждый раз незачем: это лишние вызовы ядра на пути, где
++   * человек ждёт появления списка чатов.
++   */
++  private var done = false
++
++  /** Сбрасывается, когда чат остановлен: следующий запуск снова всё проверит. */
++  fun reset() {
++    done = false
++    }
++
++  fun shouldRun(): Boolean = !done
++
++  fun markDone() {
++    done = true
++  }
++}
++
++/**
++ * Привести приложение к своему узлу. Вызывается из `startChat`.
++ *
++ * Сетевых вызовов здесь нет намеренно: обновление TURN-кредов и удаление чужих
++ * ссылок ходят в сеть, а на пути запуска это означает ожидание до сорока пяти секунд
++ * при нестабильном соединении — с вечным «загрузка чатов» на экране. Они запускаются
++ * отдельно, в фоне.
++ */
++suspend fun hearthAfterChatStarted() {
++  if (!HearthStartup.shouldRun()) return
++  HearthStartup.markDone()
++
++  hearthStep("настройки узла") { hearthApplyPendingBundle() }
++  hearthStep("свои серверы") { hearthEnforceOwnServers() }
++  hearthStep("порт релея") { hearthMigrateRelayToWebPort() }
++  hearthStep("карточки-пресеты") { hearthRemovePresetContactCards() }
++}
++
++/**
++ * Один шаг приведения.
++ *
++ * Неудача пишется в журнал и НЕ прерывает остальные: защита, которая выключается
++ * целиком от одной осечки, хуже, чем её отсутствие, — потому что человек уверен, что
++ * она работает.
++ */
++private suspend fun hearthStep(name: String, body: suspend () -> Unit) {
++  runCatching { body() }
++    .onFailure { e -> Log.e("hearth", "шаг «$name» не выполнен: ${e.message}") }
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+index 7658590..e977d25 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+@@ -628,6 +628,12 @@ object ChatController {
+       }
+       apiStartChat()
+       appPrefs.chatStopped.set(false)
++      // hearth: приведение к своему узлу — ЗДЕСЬ, а не в одной ветке запуска.
++      // Раньше цепочка стояла в Core.kt и выполнялась только при обычном старте;
++      // при ручном включении чата из настроек базы она не срабатывала вовсе, и
++      // приложение оставалось на публичных серверах SimpleX, молча создавая
++      // приглашения вида smp11.simplex.im. См. HearthStartup.kt.
++      chat.hearth.hearthAfterChatStarted()
+     } catch (e: Throwable) {
+       Log.e(TAG, "failed starting chat $e")
+       throw e
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
+index fb97a46..c3e1e5f 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/platform/Core.kt
+@@ -173,26 +173,15 @@ suspend fun initChatController(useKey: String? = null, confirmMigrations: Migrat
+       }
+       chatController.startChat(user)
+       platform.androidChatInitializedAndStarted()
+-      // hearth (ADR 0011): если bundle приняли, но применить не успели — приложение
+-      // закрыли между экраном узла и созданием профиля, — доводим дело здесь.
+-      chat.hearth.hearthApplyPendingBundle()
+-      // hearth: операторы SimpleX могли включиться обратно — экраном условий на старой
+-      // сборке или иначе. На каждом запуске выключаем: см. HearthServers.kt.
+-      chat.hearth.hearthEnforceOwnServers()
+-      // hearth: свой релей на порт 443 — нестандартный 5223 режут офисные и публичные
+-      // сети. Локально, без узла: см. HearthRelayPort.kt.
+-      chat.hearth.hearthMigrateRelayToWebPort()
+-      // hearth: адрес и незавершённые приглашения, созданные до исправления на серверах
+-      // SimpleX, заменяются своими. В фоне: удаление ходит в сеть.
+-      withBGApi { chat.hearth.hearthCleanUpForeignLinks() }
+-      // hearth: ядро заводит карточку «Ask SimpleX Team» на каждый новый профиль.
+-      // Стираем — см. HearthPresetCards.kt.
+-      chat.hearth.hearthRemovePresetContactCards()
+-      // hearth (ADR 0010): креды TURN — подпись с датой, они протухают по календарю.
+-      // Обновляем их здесь, а не по кнопке в настройках: тот экран человек может не
+-      // открыть ни разу за год, а звонки должны работать всё это время. Операция
+-      // тихая — неудача ничего не ломает, старые креды могут быть ещё живы.
+-      chat.hearth.hearthRefreshIceServers()
++      // hearth: приведение к своему узлу переехало в ChatController.startChat —
++      // единственную точку, общую для обычного запуска и ручного включения чата.
++      // Здесь остаются только шаги, которые ходят в сеть: на пути запуска они
++      // означали бы ожидание до сорока пяти секунд при нестабильном соединении, с
++      // вечной «загрузкой чатов» на экране.
++      withBGApi {
++        chat.hearth.hearthCleanUpForeignLinks()
++        chat.hearth.hearthRefreshIceServers()
++      }
+     } else {
+       chatController.getUserChatData(null)
+       chatModel.localUserCreated.value = currentUser.value != null
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/database/DatabaseView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/database/DatabaseView.kt
+index 3204a8d..4b8c1a3 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/database/DatabaseView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/database/DatabaseView.kt
+@@ -510,6 +510,9 @@ suspend fun stopChatAsync(m: ChatModel) {
+   m.controller.apiStopChat()
+   m.chatRunning.value = false
+   controller.appPrefs.chatStopped.set(true)
++  // hearth: следующий запуск чата должен заново проверить серверы — состояние
++  // могло измениться, пока чат стоял.
++  chat.hearth.HearthStartup.reset()
+ }
+ 
+ fun stopChatRunBlockStartChat(
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthCodeFieldTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthCodeFieldTest.kt
+new file mode 100644
+index 0000000..79b1575
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthCodeFieldTest.kt
+@@ -0,0 +1,55 @@
++package chat.hearth
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++
++/**
++ * Пересчёт позиции курсора в поле ввода кода.
++ *
++ * Поле хранит двенадцать знаков без дефисов, а показывает их группами по четыре.
++ * Если не пересчитывать позицию, курсор уезжает после каждой правки и знаки
++ * встают не в том порядке — человеку приходится тыкать в строку руками. Проверять
++ * это пальцами на телефоне бессмысленно: здесь чистая арифметика, и её место в тесте.
++ */
++class HearthCodeFieldTest {
++
++  @Test
++  fun offsets_skip_over_the_dashes() {
++    // H7K4-P9QX-M3TV: дефисы стоят после 4-го и 8-го знака.
++    assertEquals(0, HearthAccessCode.displayOffset(0))
++    assertEquals(4, HearthAccessCode.displayOffset(4))
++    assertEquals(6, HearthAccessCode.displayOffset(5))
++    assertEquals(9, HearthAccessCode.displayOffset(8))
++    assertEquals(11, HearthAccessCode.displayOffset(9))
++    assertEquals(14, HearthAccessCode.displayOffset(12))
++  }
++
++  @Test
++  fun a_cursor_in_the_shown_string_maps_back_to_the_code() {
++    assertEquals(0, HearthAccessCode.codeOffset(0))
++    assertEquals(4, HearthAccessCode.codeOffset(4))
++    assertEquals(4, HearthAccessCode.codeOffset(5))
++    assertEquals(8, HearthAccessCode.codeOffset(9))
++    assertEquals(8, HearthAccessCode.codeOffset(10))
++    assertEquals(12, HearthAccessCode.codeOffset(14))
++  }
++
++  @Test
++  fun the_mapping_round_trips_for_every_position() {
++    for (offset in 0..HearthAccessCode.LENGTH) {
++      assertEquals(
++        offset,
++        HearthAccessCode.codeOffset(HearthAccessCode.displayOffset(offset)),
++        "позиция $offset не вернулась к себе"
++      )
++    }
++  }
++
++  @Test
++  fun offsets_never_leave_the_string() {
++    assertEquals(0, HearthAccessCode.displayOffset(-5))
++    assertEquals(14, HearthAccessCode.displayOffset(99))
++    assertEquals(0, HearthAccessCode.codeOffset(-5))
++    assertEquals(HearthAccessCode.LENGTH, HearthAccessCode.codeOffset(99))
++  }
++}
+diff --git a/apps/multiplatform/gradle.properties b/apps/multiplatform/gradle.properties
+index 1e5b8c8..0beca92 100644
+--- a/apps/multiplatform/gradle.properties
++++ b/apps/multiplatform/gradle.properties
+@@ -26,8 +26,8 @@ kotlin.jvm.target=11
+ 
+ # hearth: своя нумерация поверх тега upstream. versionCode обязан расти
+ # монотонно — по нему приложение решает, новее ли сборка на узле.
+-android.version_name=7.0.1-h16
+-android.version_code=387
++android.version_name=7.0.1-h17
++android.version_code=388
+ 
+ desktop.version_name=7.0.1
+ desktop.version_code=157

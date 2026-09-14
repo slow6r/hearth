@@ -18,7 +18,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import chat.simplex.common.model.ChatController
 import chat.simplex.common.ui.theme.DEFAULT_PADDING
-import chat.simplex.common.views.newchat.QRCodeScanner
 import chat.simplex.common.views.onboarding.OnboardingStage
 import kotlinx.coroutines.launch
 
@@ -46,7 +45,6 @@ fun HearthImportView() {
   val node = remember { hearthBakedNode() }
   val error = remember { mutableStateOf<String?>(null) }
   val busy = remember { mutableStateOf(false) }
-  val showScanner = remember { mutableStateOf(true) }
   val code = remember { mutableStateOf("") }
   val scope = rememberCoroutineScope()
 
@@ -59,7 +57,7 @@ fun HearthImportView() {
   ) {
     Spacer(Modifier.height(DEFAULT_PADDING * 2))
     Text(
-      if (node == null) HearthOnboardingText.TITLE else HearthOnboardingText.CODE_TITLE,
+      HearthOnboardingText.CODE_TITLE,
       style = MaterialTheme.typography.h1,
       textAlign = TextAlign.Center,
     )
@@ -76,7 +74,11 @@ fun HearthImportView() {
       OutlinedTextField(
         // В поле всегда канонический код, разбитый по четыре: человек сверяет его с
         // бумажкой, и группы для этого и нужны. Лишние знаки просто не появляются.
-        value = HearthAccessCode.formatGroups(code.value),
+        // В поле — ровно то, что набрал человек. Дефисы добавляет
+        // HearthCodeTransformation при отрисовке, вместе с пересчётом позиции
+        // курсора: раньше значение форматировалось прямо здесь, и курсор уезжал
+        // после каждой правки.
+        value = code.value,
         onValueChange = { typed ->
           if (!busy.value) {
             code.value = HearthAccessCode.normalize(typed).take(HearthAccessCode.LENGTH)
@@ -85,6 +87,7 @@ fun HearthImportView() {
         },
         singleLine = true,
         enabled = !busy.value,
+        visualTransformation = HearthCodeTransformation,
         keyboardOptions = KeyboardOptions(
           capitalization = KeyboardCapitalization.Characters,
           autoCorrect = false,
@@ -139,37 +142,16 @@ fun HearthImportView() {
         }
       }
     } else {
+      // Сборка без вшитого адреса узла. Раньше здесь показывался сканер QR — и это
+      // был единственный путь, которым экран «Настройка узла» вообще мог появиться
+      // на глаза человеку. Сканера больше нет: настройка по QR отменена в пользу
+      // кода доступа (ADR 0012), а показывать камеру на экране, который человек
+      // видит один раз в жизни и не понимает, — худший из возможных ответов.
       Text(
-        HearthOnboardingText.BODY,
+        HearthOnboardingText.INCOMPLETE_BUILD,
         style = MaterialTheme.typography.body1,
         textAlign = TextAlign.Center,
       )
-      Spacer(Modifier.height(DEFAULT_PADDING))
-
-      QRCodeScanner(showScanner) { payload ->
-        // Повторные срабатывания сканера при уже идущем импорте игнорируем: applier
-        // не идемпотентен, а камера отдаёт один и тот же код несколько раз подряд.
-        if (busy.value) return@QRCodeScanner false
-        busy.value = true
-        error.value = null
-
-        when (val result = hearthAcceptBundle(payload)) {
-          is HearthImportResult.Applied -> {
-            showScanner.value = false
-            ChatController.appPrefs.onboardingStage.set(OnboardingStage.Step1_SimpleXInfo)
-            true
-          }
-
-          is HearthImportResult.Rejected -> {
-            // Ошибку показываем на экране, а не всплывающим окном: человек стоит с
-            // телефоном перед чужим QR, и текст должен остаться на виду, пока он
-            // разбирается. Сканер оставляем включённым — можно сразу сканировать снова.
-            error.value = result.reason
-            busy.value = false
-            false
-          }
-        }
-      }
     }
 
     val message = error.value

@@ -95,57 +95,23 @@ actual fun HearthNodeSettingsView() {
     )
     SectionDividerSpaced()
 
-    // --- приглашение --------------------------------------------------------------
+    // --- новое устройство ----------------------------------------------------------
+    //
+    // Здесь была кнопка «Пригласить устройство»: узел заводил запись и отдавал QR с
+    // паролями релеев. Этот путь отменён (ADR 0012) по двум причинам. Первая — QR
+    // содержал самый ценный секрет контура, и одно случайное касание отправляло его
+    // в галерею или облако. Вторая — заведение с чужого устройства обходило учёт:
+    // любой действующий телефон бессрочно плодил новые, и отзыв исходного их не гасил.
+    //
+    // Новое устройство заводится кодом доступа, который выдают лично.
     SectionView("НОВОЕ УСТРОЙСТВО") {
-      OutlinedTextField(
-        value = inviteName.value,
-        onValueChange = { inviteName.value = it },
-        label = { Text("Имя, например «Брат — Redmi»") },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = DEFAULT_PADDING),
-      )
-      SectionItemView(click = {
-        val name = inviteName.value.trim()
-        if (busy.value || name.isEmpty()) return@SectionItemView
-        busy.value = true
-        status.value = "просим узел завести устройство…"
-        scope.launch {
-          val transport = HearthAndroidUpdateTransport.fromPrefs(context)
-          if (transport == null) {
-            status.value = "узел не настроен"
-            busy.value = false
-            return@launch
-          }
-          transport.enroll(name)
-            .onSuccess {
-              inviteBundle.value = it
-              status.value = "готово: покажите QR новому телефону"
-            }
-            .onFailure { status.value = "не вышло: ${it.message}" }
-          busy.value = false
-        }
-      }) {
-        Text("Пригласить устройство", color = MaterialTheme.colors.primary)
-      }
-    }
-    SectionTextFooter(
-      "Узел заведёт отдельную запись со своим ключом, поэтому потерянный телефон " +
-        "можно будет отозвать, не трогая остальные."
-    )
-
-    val bundle = inviteBundle.value
-    if (bundle != null) {
-      Spacer(Modifier.height(DEFAULT_PADDING))
-      HearthSecretQR(payload = bundle)
-      Text(
-        "QR содержит пароли релеев. Показывайте лично, не пересылайте и не сохраняйте " +
-          "в галерею.",
-        style = MaterialTheme.typography.body2,
-        color = MaterialTheme.colors.error,
-        textAlign = TextAlign.Center,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = DEFAULT_PADDING),
+      SectionTextFooter(
+        "Новый телефон или компьютер заводится кодом доступа: поставьте на нём " +
+          "приложение и введите код при первом запуске. Код выдаёт владелец узла — " +
+          "по одному на устройство."
       )
     }
+    SectionDividerSpaced()
 
     val text = status.value
     if (text != null) {
