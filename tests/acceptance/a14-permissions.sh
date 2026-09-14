@@ -137,7 +137,14 @@ fi
 shopt -s nullglob
 for f in /etc/hearth/pki/*.key; do
     base="$(basename "$f")"
-    [[ "$base" == "ca.key" || "$base" == "server.key" ]] && continue
+    # device-api.key — TLS-ключ device API, который демон отдаёт телефонам на 7444.
+    # Он обязан лежать на узле ровно по той же причине, что и server.key выше: без
+    # приватного ключа TLS-сервер не поднимется, и обновления с TURN-кредами перестанут
+    # раздаваться. Имя задано в hearthd/src/pki/mod.rs (DEVICE_API_KEY).
+    #
+    # Список исключений написан до появления device API, поэтому тест считал штатный
+    # файл забытым админским ключом и падал на каждом прогоне.
+    [[ "$base" == "ca.key" || "$base" == "server.key" || "$base" == "device-api.key" ]] && continue
     echo "  !!   $f — приватный ключ админа на узле. Перенесите на рабочую станцию."
     status=1
 done
