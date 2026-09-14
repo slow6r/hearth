@@ -59,7 +59,13 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 echo "== 1. simplexmq $TAG"
-git clone --quiet --depth 1 --branch "$TAG" "$REPO" "$WORK/simplexmq"
+# --recurse-submodules ОБЯЗАТЕЛЕН. simplexmq вендорит blst (библиотека подписей BLS)
+# подмодулем в cbits/blst, и cabal собирает её C-исходники как часть пакета. Без
+# подмодуля сборка идёт восемь минут и падает в самом конце:
+#   <command line>: does not exist: cbits/blst/src/server.c
+#   Error: [Cabal-7125] Failed to build simplexmq-7.0.1.0
+# --shallow-submodules — чтобы не тянуть всю историю blst следом за --depth 1.
+git clone --quiet --depth 1 --recurse-submodules --shallow-submodules     --branch "$TAG" "$REPO" "$WORK/simplexmq"
 ACTUAL="$(git -C "$WORK/simplexmq" rev-parse HEAD)"
 if [[ "$ACTUAL" != "$COMMIT" ]]; then
     echo "!! тег $TAG указывает на $ACTUAL, а не на $COMMIT." >&2
