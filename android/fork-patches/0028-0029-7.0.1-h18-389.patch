@@ -1,0 +1,32 @@
+From b596955433b9749296cbfde2c516de2b82908dfa Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Mon, 14 Sep 2026 17:32:46 +0300
+Subject: [PATCH 28/28] =?UTF-8?q?0029:=20=D0=B2=D0=B5=D1=80=D1=81=D0=B8?=
+ =?UTF-8?q?=D1=8F=207.0.1-h18=20(389)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Выпуск с внешним именем «Очаг» (0028).
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rFCpGgTKkXuYYaCC7Zsew
+---
+ apps/multiplatform/gradle.properties | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/apps/multiplatform/gradle.properties b/apps/multiplatform/gradle.properties
+index 0beca92..a37efc8 100644
+--- a/apps/multiplatform/gradle.properties
++++ b/apps/multiplatform/gradle.properties
+@@ -26,8 +26,8 @@ kotlin.jvm.target=11
+ 
+ # hearth: своя нумерация поверх тега upstream. versionCode обязан расти
+ # монотонно — по нему приложение решает, новее ли сборка на узле.
+-android.version_name=7.0.1-h17
+-android.version_code=388
++android.version_name=7.0.1-h18
++android.version_code=389
+ 
+ desktop.version_name=7.0.1
+ desktop.version_code=157

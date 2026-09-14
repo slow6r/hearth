@@ -130,7 +130,7 @@ class HearthUpdateService : Service() {
     val mgr = getSystemService(NotificationManager::class.java)
     if (mgr.getNotificationChannel(CHANNEL) != null) return
     mgr.createNotificationChannel(
-      NotificationChannel(CHANNEL, "Обновление Hearth", NotificationManager.IMPORTANCE_LOW).apply {
+      NotificationChannel(CHANNEL, "Обновление Очага", NotificationManager.IMPORTANCE_LOW).apply {
         description = "Загрузка новой версии приложения с домашнего узла"
         setShowBadge(false)
       }
@@ -151,7 +151,7 @@ class HearthUpdateService : Service() {
       PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
     return base()
-      .setContentTitle("Загрузка Hearth $version")
+      .setContentTitle("Загрузка Очага $version")
       .setContentText(
         if (total > 0) "${pct}% из ${total / 1024 / 1024} МБ" else "соединяемся с узлом…"
       )
@@ -164,7 +164,7 @@ class HearthUpdateService : Service() {
   private fun doneNotification(text: String, path: String?): Notification {
     val b = base()
       .setSmallIcon(android.R.drawable.stat_sys_download_done)
-      .setContentTitle("Hearth")
+      .setContentTitle("Очаг")
       .setContentText(text)
       .setStyle(NotificationCompat.BigTextStyle().bigText(text))
       .setAutoCancel(true)
