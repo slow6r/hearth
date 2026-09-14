@@ -1,0 +1,39 @@
+# Эталон намерений для /etc/opt/simplex-ntf/ntf-server.ini (simplexmq v7.0.1).
+#
+# Как у smp/ и xftp/: источник истины — файл, который пишет `ntf-server init`
+# пинованного тега, а здесь то, каким он должен стать после init-ntf.sh. Сверка:
+#   ./verify-ini-keys.sh /etc/opt/simplex-ntf/ntf-server.ini ntf/ntf-server.ini.example
+# Значения REPLACE_WITH_* сверка не сравнивает: они у каждого узла свои.
+
+[STORE_LOG]
+# В v7.0.1 это не store log: токены и подписки ntf-server хранит в PostgreSQL, а путь
+# store log по исходникам только печатается при старте.
+enable = on
+# Локальный сокет, peer-аутентификация: роль названа как системный пользователь службы.
+db_connection = postgresql://simplex-ntf@/ntf_server_store
+db_schema = ntf_server
+# Суточная статистика в CSV — это метаданные. Не нужна.
+log_stats = off
+# Метрики для node_exporter (deploy/monitoring).
+prometheus_interval = 60
+
+[AUTH]
+# init оставляет оба ключа закомментированными — control port принимал бы команды без
+# пароля. Он на loopback, но незачем.
+control_port_admin_password = REPLACE_WITH_RANDOM
+control_port_user_password = REPLACE_WITH_RANDOM
+
+[TRANSPORT]
+host = REPLACE_WITH_NODE_HOST
+# НЕ 443 (дефолт init) и НЕ 5223: провайдер узла выбрасывает там TLS-приветствие
+# SimpleX (docs/deploy-fels-2026-09-09.md). 2053 — из двадцати проверенных портов.
+port = 2053
+# В TLS-ошибки попадают адреса клиентов.
+log_tls_errors = off
+websockets = off
+# hearthd проверяет его (ntf.control в hearthd.toml). Дефолт init — закомментированный 5227.
+control_port = 5227
+
+[INACTIVE_CLIENTS]
+# Телефон в энергосбережении молчит часами — отключать его незачем (как в smp).
+disconnect = off

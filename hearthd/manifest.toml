@@ -54,3 +54,22 @@ path = "/usr/local/bin/hearthd"
 version = "0.1.0"
 sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 source = "built-from-source"
+
+# Push server for the iOS app (ADR 0016) — ONLY on a node with [ntf] enabled.
+#
+# Commented out on purpose. An unfilled entry for a binary the node does not have is
+# `Missing` on every check, i.e. quarantine on every node that never set up push. After
+# enabling [ntf], uncomment the block and pin it:
+#   hearthctl manifest pin --name ntf-server --version v7.0.1+hearth.1
+# Forgetting is not possible: hearthd treats an enabled relay with no manifest entry as
+# an integrity failure, exactly like a foreign hash.
+#
+# There is no usable upstream release binary: the released ntf-server is hardwired to
+# the SimpleX app. It is built from source with our patch: relays/ntf/build-ntf-server.sh.
+#
+# [[binary]]
+# name = "ntf-server"
+# path = "/usr/local/bin/ntf-server"
+# version = "v7.0.1+hearth.1"
+# sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+# source = "built-from-source: simplexmq v7.0.1 + relays/ntf/patches"

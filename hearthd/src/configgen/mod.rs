@@ -81,11 +81,16 @@ fn server_uri(config: &Config, relay: &Relay) -> Result<ServerUri> {
             relay.scheme
         ))
     })?;
-    let password = store::read_secret(&relay.password_file)?;
+    // Config::validate требует пароль у smp и xftp; у ntf его не бывает вовсе.
+    let password = relay
+        .password_file
+        .as_ref()
+        .map(store::read_secret)
+        .transpose()?;
     ServerUri::new(
         &relay.scheme,
         &fingerprint,
-        Some(&password),
+        password.as_deref(),
         &config.node.host,
         relay.port,
     )
@@ -115,6 +120,19 @@ pub fn manual_checklist(device: &Device, bundle: &Bundle) -> String {
     } else {
         bundle.ice.join("\n     ")
     };
+    // On iOS both Instant and Periodic mean the SimpleX push server — a third party.
+    // Only Android and desktop keep a background connection without one.
+    let notifications = match device.platform {
+        Platform::Ios => {
+            "Notifications: No push server (Off). Instant и Periodic на iOS идут через\n\
+             push-сервер SimpleX — третью сторону. Цена: о новом сообщении узнаёте,\n\
+             только открыв приложение."
+        }
+        Platform::Desktop | Platform::Android => {
+            "Notifications: Instant. Push/Periodic не использовать — сервера уведомлений\n\
+             в контуре нет."
+        }
+    };
 
     format!(
         "Ручная настройка устройства: {name} [{id}]\n\
@@ -143,8 +161,7 @@ pub fn manual_checklist(device: &Device, bundle: &Bundle) -> String {
             список и молча вернётся на публичные серверы.\n\
          \n\
          5. Private message routing: Always.\n\
-            Notifications: Instant. Push/Periodic не использовать — сервера уведомлений\n\
-            в контуре нет.\n\
+            {notifications}\n\
          \n\
          6. Отключить облачный бэкап приложения (iCloud / Google Backup) и включить\n\
             блокировку приложения (Face ID / код).\n\
@@ -168,9 +185,9 @@ mod tests {
         let raw = include_str!("../../deploy/hearthd.toml");
         let mut config: Config = toml::from_str(raw).expect("reference config");
         config.smp.fingerprint_file = dir.join("smp-fingerprint");
-        config.smp.password_file = dir.join("smp-password");
+        config.smp.password_file = Some(dir.join("smp-password"));
         config.xftp.fingerprint_file = dir.join("xftp-fingerprint");
-        config.xftp.password_file = dir.join("xftp-password");
+        config.xftp.password_file = Some(dir.join("xftp-password"));
         config.turn.secret_file = dir.join("turn-secret");
         config
     }
@@ -261,7 +278,9 @@ mod tests {
         assert!(text.contains("smp://"));
         assert!(text.contains("xftp://"));
         assert!(text.contains(&format!("stun:{}:3478", config.node.host)));
-        assert!(text.contains("Instant"));
+        // Instant on iOS is the SimpleX push server, so iOS must be told to turn push off.
+        assert!(text.contains("No push server"));
+        assert!(!text.contains("Notifications: Instant"));
         // The ICE lines must be pasted verbatim; the checklist has to say so, because
         // one malformed line makes the client fall back to public servers.
         assert!(text.contains("как есть"));

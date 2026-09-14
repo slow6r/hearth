@@ -9,11 +9,13 @@ ExecStart=/usr/local/sbin/hearth-relay-metrics
 # Читает файлы, которые пишет simplex, кладёт результат в каталог node_exporter.
 User=prometheus
 Group=prometheus
-SupplementaryGroups=simplex
+# simplex-ntf: метрики push-сервера (ADR 0016). Группу install.sh заводит на любом узле.
+SupplementaryGroups=simplex simplex-ntf
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 ReadWritePaths=/var/lib/node_exporter/textfile
-ReadOnlyPaths=/var/opt/simplex /var/opt/simplex-xftp
+# `-`: каталога push-сервера на узле может не быть.
+ReadOnlyPaths=/var/opt/simplex /var/opt/simplex-xftp -/var/opt/simplex-ntf
 SyslogIdentifier=hearth-relay-metrics

@@ -141,28 +141,75 @@ pub async fn export(state: &Arc<AppState>) -> Result<ExportReport> {
         members: info.members,
         relays_stopped: stopped,
         copied_to,
-        next_steps: next_steps_after_export(&config.node.host),
+        next_steps: next_steps_after_export(&config),
     })
+}
+
+/// Everything the router has to forward to this node, as one readable list.
+///
+/// Built from the configuration rather than written out: the hard-coded list here had
+/// already lost 8443 and 7444, and a move that forgets a port looks like a broken phone,
+/// not a broken router.
+fn forwarded_ports(config: &crate::config::Config) -> String {
+    let mut tcp: Vec<u16> = config
+        .relays()
+        .into_iter()
+        .filter(|relay| relay.enabled)
+        .flat_map(|relay| relay.all_ports())
+        .collect();
+    if config.device_api.enabled {
+        tcp.push(config.device_api.public_port);
+    }
+    tcp.sort_unstable();
+    tcp.dedup();
+    let mut parts: Vec<String> = tcp.iter().map(|port| format!("{port}/tcp")).collect();
+    if config.turn.enabled {
+        parts.push(format!("{}/udp+tcp", config.turn.port));
+        parts.push(format!(
+            "{}-{}/udp",
+            config.turn.relay_min_port, config.turn.relay_max_port
+        ));
+    }
+    parts.join(", ")
 }
 
 /// Steps the operator still owns after an export — printed by `hearthctl`, so they
 /// cannot be forgotten halfway through an evening's move.
-fn next_steps_after_export(address: &str) -> Vec<String> {
-    vec![
+fn next_steps_after_export(config: &crate::config::Config) -> Vec<String> {
+    let mut steps = vec![
         format!(
-            "Point the router's port forwarding for {address} (5223, 443, 5443, 3478, \
-             49160-49200/udp) at the mini-PC — while the old node is still running."
+            "Point the router's port forwarding for {} ({}) at the mini-PC — while the \
+             old node is still running.",
+            config.node.host,
+            forwarded_ports(config)
         ),
         "Copy the archive to the mini-PC (hearth-backup or a USB stick).".into(),
-        "On the mini-PC: hearthctl migrate import <archive> --identity <age key>.".into(),
-        "Verify the sha256 printed above on the destination before importing.".into(),
+    ];
+    if config.ntf.as_ref().is_some_and(|ntf| ntf.enabled) {
+        // Каталоги push-сервера в архиве, его база — нет: это PostgreSQL, а ночной дамп
+        // устарел ровно на время с последней ночи. Сейчас ntf-server уже остановлен,
+        // и свежий дамп будет согласованным.
+        steps.push(
+            "ntf-server keeps device tokens in PostgreSQL, which this archive does not \
+             contain: take a fresh dump now and restore it on the mini-PC \
+             (docs/runbook-ntf.md, «Перенос узла»). The APNs key in /etc/credstore is \
+             not archived either — bring it from its offline copy."
+                .into(),
+        );
+    }
+    steps.push("On the mini-PC: hearthctl migrate import <archive> --identity <age key>.".into());
+    steps.push("Verify the sha256 printed above on the destination before importing.".into());
+    steps.push(
         "Do NOT start the relays on this machine again: two nodes with one CA and one \
          address is a split brain (ТЗ §10.2 п.5)."
             .into(),
+    );
+    steps.push(
         "After the new node is verified: cryptsetup luksErase (or destroy) this disk \
          (ТЗ §10.2 п.7)."
             .into(),
-    ]
+    );
+    steps
 }
 
 /// Restore an exported archive onto this machine (ТЗ §10.2 п.4).
@@ -210,20 +257,56 @@ pub async fn import(
     }
     state.save_migrate_status().await?;
 
+    // Службы — из конфигурации, а не списком в тексте: иначе узел с push-сервером
+    // переезжал бы без него. Архив проверяется тоже — конфиг этого узла мог ещё не знать
+    // про [ntf], а в архиве его каталоги уже есть.
+    let config = &state.config;
+    let archived_ntf = restored
+        .iter()
+        .any(|path| path.to_string_lossy().contains("simplex-ntf"));
+    let ntf = archived_ntf || config.ntf.as_ref().is_some_and(|ntf| ntf.enabled);
+    let mut units: Vec<&str> = config
+        .relays()
+        .into_iter()
+        .filter(|relay| relay.enabled)
+        .map(|relay| relay.unit.trim_end_matches(".service"))
+        .collect();
+    if ntf && !units.contains(&"ntf-server") {
+        units.push("ntf-server");
+    }
+    if config.turn.enabled {
+        units.push(config.turn.unit.trim_end_matches(".service"));
+    }
+    let mut next_steps =
+        vec!["Load the nftables ruleset: nft -f /etc/hearth/nftables/hearth.nft".to_string()];
+    if ntf {
+        next_steps.push(
+            "Before starting ntf-server: create its PostgreSQL role and database, restore \
+             the dump and put the APNs key back into /etc/credstore \
+             (docs/runbook-ntf.md, «Перенос узла»). Do NOT run init-ntf.sh: a new \
+             fingerprint breaks push in every installed iOS build."
+                .into(),
+        );
+    }
+    next_steps.push(format!(
+        "systemctl enable --now {} hearthd",
+        units.join(" ")
+    ));
+    next_steps.push("hearthctl health — every service must be ok".into());
+    next_steps.push(
+        "Send one message from a phone; the client must not notice anything \
+         (ТЗ §10.2 п.6)."
+            .into(),
+    );
+    next_steps
+        .push("Confirm the old node is powered off and will not come back with these keys.".into());
+
     Ok(ImportReport {
         restored,
         destination: destination.to_path_buf(),
         integrity_ok,
         integrity_notes,
-        next_steps: vec![
-            "Load the nftables ruleset: nft -f /etc/hearth/nftables/hearth.nft".into(),
-            "systemctl enable --now smp-server xftp-server coturn hearthd".into(),
-            "hearthctl health — every service must be ok".into(),
-            "Send one message from a phone; the client must not notice anything \
-             (ТЗ §10.2 п.6)."
-                .into(),
-            "Confirm the old node is powered off and will not come back with these keys.".into(),
-        ],
+        next_steps,
     })
 }
 
@@ -428,6 +511,32 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("decrypt"), "got {err}");
+    }
+
+    #[test]
+    fn next_steps_follow_the_configuration() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = crate::state::tests::test_config(dir.path());
+        let steps = next_steps_after_export(&config).join("\n");
+        // Порты — из конфигурации: вписанный руками список уже терял 8443.
+        assert!(steps.contains("8443/tcp"), "got {steps}");
+        assert!(
+            !steps.contains("2053/tcp"),
+            "push is off in the reference config"
+        );
+        assert!(!steps.contains("PostgreSQL"));
+
+        config
+            .ntf
+            .as_mut()
+            .expect("the reference config carries [ntf]")
+            .enabled = true;
+        let steps = next_steps_after_export(&config).join("\n");
+        assert!(steps.contains("2053/tcp"), "got {steps}");
+        assert!(
+            steps.contains("PostgreSQL"),
+            "the push server's database is not in the archive, and the operator must hear it"
+        );
     }
 
     #[test]

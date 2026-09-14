@@ -130,6 +130,12 @@ fn run(cli: Cli) -> Result<()> {
                 config.smp.all_ports(),
                 config.xftp.all_ports()
             );
+            if let Some(ntf) = config.ntf.as_ref().filter(|ntf| ntf.enabled) {
+                println!(
+                    "  ntf:         {:?}  (push server, ADR 0016)",
+                    ntf.all_ports()
+                );
+            }
             println!(
                 "  turn:        {} (relay {}-{})",
                 config.turn.port, config.turn.relay_min_port, config.turn.relay_max_port

@@ -10,9 +10,10 @@ use std::time::Duration;
 
 use chrono::Utc;
 
+use crate::config::Config;
 use crate::model::alert::Alert;
 use crate::model::health::{HealthState, IntegritySnapshot};
-use crate::model::manifest::{IntegrityStatus, Manifest};
+use crate::model::manifest::{IntegrityFinding, IntegrityStatus, Manifest};
 use crate::state::AppState;
 use crate::sys::systemd;
 
@@ -55,7 +56,8 @@ impl IntegrityChecker {
         let manifest_path = &self.state.config.paths.manifest;
         let snapshot = match Manifest::load(manifest_path) {
             Ok(manifest) => {
-                let findings = manifest.verify_all();
+                let mut findings = manifest.verify_all();
+                findings.extend(unpinned_relays(&self.state.config, &manifest));
                 let bad: Vec<_> = findings
                     .iter()
                     .filter(|f| f.status != IntegrityStatus::Ok)
@@ -196,6 +198,28 @@ impl IntegrityChecker {
     }
 }
 
+/// Включённый релей, бинаря которого нет в манифесте.
+///
+/// Для smp и xftp это было невозможно: они стоят в поставляемом манифесте всегда.
+/// Push-сервер там закомментирован — он есть не на каждом узле, а незаполненная запись
+/// для несуществующего бинаря отправляла бы в карантин всех, кто его не заводил. Цена
+/// такой поставки — возможность включить `[ntf]` и забыть запинить бинарь. Эта проверка
+/// её снимает: запущенный, но ничем не подтверждённый бинарь — то же, что чужой хеш.
+fn unpinned_relays(config: &Config, manifest: &Manifest) -> Vec<IntegrityFinding> {
+    config
+        .relays()
+        .into_iter()
+        .filter(|relay| relay.enabled && manifest.binary(&relay.process).is_none())
+        .map(|relay| IntegrityFinding {
+            name: relay.process.clone(),
+            path: config.paths.manifest.clone(),
+            expected: "an entry in the manifest".into(),
+            actual: None,
+            status: IntegrityStatus::Missing,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,7 +286,10 @@ mod tests {
             ),
         );
 
-        let config = crate::state::tests::test_config(dir.path());
+        let mut config = crate::state::tests::test_config(dir.path());
+        // Манифест здесь знает только smp-server, поэтому xftp выключен: включённый релей
+        // без записи в манифесте — отдельная находка (unpinned_relays).
+        config.xftp.enabled = false;
         let state = AppState::new(config, Sys::new(true)).expect("state");
         let snapshot = IntegrityChecker::new(state.clone()).check().await;
 
@@ -333,5 +360,65 @@ mod tests {
         checker.check().await;
         checker.check().await;
         assert!(checker.stopped_relays);
+    }
+
+    /// smp-server и xftp-server, запиненные по-настоящему.
+    fn pinned_relays_manifest(dir: &std::path::Path) {
+        let smp = fake_binary(dir, "smp-server");
+        let xftp = fake_binary(dir, "xftp-server");
+        write_manifest(
+            dir,
+            &format!(
+                "\n[[binary]]\nname = \"smp-server\"\npath = {smp:?}\n\
+                 version = \"v7.0.1\"\nsha256 = \"{}\"\n\
+                 \n[[binary]]\nname = \"xftp-server\"\npath = {xftp:?}\n\
+                 version = \"v7.0.1\"\nsha256 = \"{}\"\n",
+                sha256_file(&smp).expect("hash"),
+                sha256_file(&xftp).expect("hash"),
+                smp = smp.display().to_string(),
+                xftp = xftp.display().to_string(),
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn an_enabled_relay_missing_from_the_manifest_quarantines_the_node() {
+        // Запись push-сервера в манифесте закомментирована. Включили [ntf] и забыли
+        // запинить — запущенный бинарь ничем не подтверждён, это то же, что чужой хеш.
+        let dir = tempfile::tempdir().expect("tempdir");
+        pinned_relays_manifest(dir.path());
+        let mut config = crate::state::tests::test_config(dir.path());
+        config
+            .ntf
+            .as_mut()
+            .expect("the reference config carries [ntf]")
+            .enabled = true;
+        let state = AppState::new(config, Sys::new(true)).expect("state");
+        let snapshot = IntegrityChecker::new(state.clone()).check().await;
+
+        assert_eq!(snapshot.state, HealthState::Down);
+        let finding = snapshot
+            .findings
+            .iter()
+            .find(|f| f.name == "ntf-server")
+            .expect("ntf-server is reported");
+        assert_eq!(finding.status, IntegrityStatus::Missing);
+        assert_eq!(
+            state.mode.read().await.mode,
+            crate::model::mode::NodeMode::Quarantine
+        );
+    }
+
+    #[tokio::test]
+    async fn a_disabled_push_server_needs_no_manifest_entry() {
+        // Иначе поставляемый манифест отправлял бы в карантин каждый узел без push.
+        let dir = tempfile::tempdir().expect("tempdir");
+        pinned_relays_manifest(dir.path());
+        let config = crate::state::tests::test_config(dir.path());
+        let state = AppState::new(config, Sys::new(true)).expect("state");
+        let snapshot = IntegrityChecker::new(state.clone()).check().await;
+
+        assert_eq!(snapshot.state, HealthState::Ok);
+        assert_eq!(snapshot.findings.len(), 2);
     }
 }

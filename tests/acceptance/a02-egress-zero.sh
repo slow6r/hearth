@@ -28,6 +28,7 @@ INPUT="$(read_counter input_drop)"
 FORWARD="$(read_counter forward_drop)"
 APP="$(read_counter app_egress)"
 TURN="$(read_counter turn_egress)"
+NTF="$(read_counter ntf_egress)"
 
 if [[ -z "$EGRESS" ]]; then
     echo "!! счётчик egress_drop не найден. Правила используют анонимные счётчики?"
@@ -43,6 +44,7 @@ echo
 echo "  Разрешённый egress (растёт — это норма, ADR 0008):"
 echo "    app_egress   = ${APP:-нет счётчика}   (зал, обновления, ваши сервисы)"
 echo "    turn_egress  = ${TURN:-нет счётчика}   (медиа звонков)"
+echo "    ntf_egress   = ${NTF:-нет счётчика}   (пуши в Apple, 17.0.0.0/8:443 — только с [ntf], ADR 0016)"
 echo
 
 if [[ "$EGRESS" -ne 0 ]]; then

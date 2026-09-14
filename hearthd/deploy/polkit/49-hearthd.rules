@@ -13,8 +13,8 @@
 //   * integrity   — остановка релеев при несовпадении sha256 (fail-closed).
 //
 // Список юнитов закрытый. Даже если hearthd будет скомпрометирован, он не сможет
-// остановить nftables, sshd или сам себя — только те три сервиса, которыми обязан
-// управлять по назначению.
+// остановить nftables, sshd, PostgreSQL или сам себя — только перечисленные ниже
+// сервисы, которыми обязан управлять по назначению.
 //
 // Формат — JS-правила polkit (0.106+). Debian 13 использует именно их; старый
 // формат .pkla там больше не поддерживается.
@@ -30,6 +30,9 @@ polkit.addRule(function (action, subject) {
     var allowedUnits = [
         "smp-server.service",
         "xftp-server.service",
+        // Push-сервер (ADR 0016). Того же класса, что релеи: стоковый код upstream,
+        // который надзор поднимает, а целостность и перенос останавливают.
+        "ntf-server.service",
         "coturn.service"
     ];
     var allowedVerbs = ["start", "stop", "restart", "try-restart", "reload-or-restart"];

@@ -15,7 +15,10 @@
 
 1. отпечаток CA и ключи — `/etc/opt/simplex`;
 2. пароль на создание очередей — `/etc/hearth/secrets`;
-3. публичное имя `node.host` — переставляется проброс портов на роутере.
+3. публичное имя `node.host` — переставляется проброс портов на роутере;
+4. если включён push-сервер для iOS — его CA `/etc/opt/simplex-ntf` (едет в архиве) и
+   база PostgreSQL (едет **отдельно**, [runbook-ntf.md](runbook-ntf.md) §9). Ключ APNs
+   в архив не входит намеренно: его кладут на новый узел заново.
 
 Всё остальное (store log, реестр устройств, история инцидентов) едет тем же архивом,
 чтобы новый узел был **тем же узлом**, а не только тем же адресом.
@@ -72,9 +75,11 @@ nft -f /etc/hearth/nftables/hearth.nft
 
 ### 2. Переставить проброс портов (ТЗ §10.2 п.2)
 
-На роутере: проброс 5223/443/5443/3478/49160-49200 переносится на LAN-адрес mini-PC —
-**пока старый узел ещё работает**. Порядок именно такой: сделать это после выключения
-старого узла — значит получить окно, когда узел не отвечает вообще.
+На роутере: проброс 8443/443/5223/5443/3478/7444/49160-49200 (и 2053, если включён
+push-сервер) переносится на LAN-адрес mini-PC — **пока старый узел ещё работает**.
+Точный список печатает `hearthctl migrate export` — он строится из конфига. Порядок
+именно такой: сделать это после выключения старого узла — значит получить окно, когда
+узел не отвечает вообще.
 
 Пока mini-PC живёт на временном LAN-адресе, конфликта нет.
 
@@ -84,10 +89,13 @@ nft -f /etc/hearth/nftables/hearth.nft
 hearthctl migrate export
 ```
 
+Если включён push-сервер, сразу после экспорта снять дамп его базы — в архив она не
+входит ([runbook-ntf.md](runbook-ntf.md) §9).
+
 Что произойдёт:
 
-- остановятся `smp-server`, `xftp-server`, `coturn` (store log не должен меняться во
-  время копирования);
+- остановятся `smp-server`, `xftp-server`, `coturn` и, если включён, `ntf-server`
+  (store log не должен меняться во время копирования);
 - соберётся один `tar.gz.age`, зашифрованный публичным age-ключом;
 - напечатается путь, размер и **sha256** — записать его.
 
@@ -124,6 +132,8 @@ USB или чужую машину.
 systemctl restart systemd-networkd
 nft -f /etc/hearth/nftables/hearth.nft
 systemctl enable --now smp-server xftp-server coturn hearthd
+# если включён push-сервер: сначала pg_restore и ключ APNs (runbook-ntf.md §9), затем
+systemctl enable --now ntf-server
 hearthctl health
 ```
 
@@ -141,7 +151,7 @@ hearthctl status
 
 ```bash
 # на старом узле
-systemctl disable --now smp-server xftp-server coturn hearthd
+systemctl disable --now smp-server xftp-server coturn ntf-server hearthd
 ```
 
 > **Старый узел больше никогда не включается с этими ключами.** Два релея с одним CA и

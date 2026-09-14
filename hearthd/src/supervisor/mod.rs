@@ -533,4 +533,34 @@ mod tests {
         assert_eq!(health.state, HealthState::Down);
         assert!(health.services.iter().any(|s| s.name == "smp"));
     }
+
+    #[tokio::test]
+    async fn an_enabled_push_server_is_supervised_and_held_like_a_relay() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = crate::state::tests::test_config(dir.path());
+        config
+            .ntf
+            .as_mut()
+            .expect("the reference config carries [ntf]")
+            .enabled = true;
+        let state = AppState::new(config, crate::sys::Sys::new(true)).expect("state");
+        let supervisor = Supervisor::new(state.clone());
+        assert!(supervisor
+            .watched
+            .iter()
+            .any(|w| w.unit == "ntf-server.service"));
+
+        // Карантин держит и его: это тоже стоковый код upstream, а не наш.
+        let relay_units: Vec<String> = state
+            .config
+            .relays()
+            .iter()
+            .map(|relay| relay.unit.clone())
+            .collect();
+        assert!(!may_restart(
+            crate::model::mode::NodeMode::Quarantine,
+            "ntf-server.service",
+            &relay_units
+        ));
+    }
 }

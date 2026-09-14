@@ -63,6 +63,36 @@ for dir in /etc/opt/simplex /var/opt/simplex /etc/opt/simplex-xftp /var/opt/simp
 done
 
 echo
+echo "== push-сервер (ADR 0016): группа simplex-ntf, ключ APNs только root"
+if id -u simplex-ntf >/dev/null 2>&1; then
+    if id -nG hearth | tr ' ' '\n' | grep -qx simplex-ntf; then
+        note "hearth уже в группе simplex-ntf"
+    else
+        run usermod -aG simplex-ntf hearth
+        note "hearth добавлен в группу simplex-ntf — hearthd подхватит после рестарта"
+    fi
+    for dir in /etc/opt/simplex-ntf /var/opt/simplex-ntf; do
+        if [[ -d "$dir" ]]; then
+            run chgrp -R simplex-ntf "$dir"
+            run chmod -R g+rX "$dir"
+            note "$dir"
+        else
+            skip "$dir отсутствует (init-ntf.sh не запускался)"
+        fi
+    done
+    # Ключ APNs подписывает пуши от имени команды Apple. Службе он приходит через
+    # LoadCredential, поэтому на диске его не читает никто, кроме root — ни сама
+    # служба, ни hearthd.
+    if [[ -f /etc/credstore/hearth-apns.p8 ]]; then
+        run chown root:root /etc/credstore/hearth-apns.p8
+        run chmod 0600 /etc/credstore/hearth-apns.p8
+        note "hearth-apns.p8 (0600 root:root)"
+    fi
+else
+    skip "нет пользователя simplex-ntf — сначала install.sh"
+fi
+
+echo
 echo "== секреты: каталог и файлы hearth:hearth, каталог 0750, файлы 0600"
 # Каталог принадлежит демону, а не root. `hearthctl rotate turn-secret` пишет
 # turn-secret атомарно (временный файл + rename), а для этого нужна запись в САМ

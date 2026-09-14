@@ -44,6 +44,11 @@ table inet hearth {
     counter app_in { }
     # Device API: обновления и свежие TURN-креды для самих телефонов.
     counter device_in { }
+    # Push-сервер для iOS (ADR 0016): вход телефонов и единственный выход релейного
+    # стека наружу — к Apple. Объявлены и на узле без [ntf]: правила ниже на них
+    # ссылаются, а необъявленный счётчик не даёт загрузить весь файл.
+    counter ntf_in { }
+    counter ntf_egress { }
     # Link-scoped chatter this host must answer: NDP and mDNS. Counted rather than
     # accepted silently, so it is visible without polluting app_egress.
     counter link_local { }
@@ -119,6 +124,13 @@ table inet hearth {
         # именно его доступ, не трогая остальных. Не путать с 7443: тот admin API,
         # он остаётся только для LAN и требует клиентский сертификат.
         tcp dport 7444 counter name device_in accept
+
+        # Push-сервер для iOS (ADR 0016), 2053. Публичный по той же причине, что релеи:
+        # к нему подключаются телефоны. НЕ 443 и НЕ 5223 — там провайдер узла выбрасывает
+        # TLS-приветствие SimpleX (docs/deploy-fels-2026-09-09.md). Держать в согласии с
+        # ntf.port в hearthd.toml. Пока [ntf] не заведён, порт никто не слушает: ядро
+        # отвечает RST, и снаружи он выглядит закрытым.
+        tcp dport 2053 counter name ntf_in accept
 
         # --- LAN only: administration ----------------------------------------
         ip saddr @lan_nets tcp dport 7443 counter name admin_in accept
@@ -245,7 +257,34 @@ table inet hearth {
         meta skuid "turnserver" udp sport $TURN_RANGE \
             counter name turn_egress accept
 
-        # --- exception 2: everything else the owner runs on purpose --------------
+        # --- exception 2: push to Apple (ADR 0016) --------------------------------
+        # The first and only hole opened for the RELAY STACK itself. ntf-server learns
+        # from the relay that a queue has a new message and calls APNs to wake the
+        # iPhone. There is no push without an outbound connection to Apple; this is not
+        # a setting.
+        #
+        # Exactly what is allowed, and no more:
+        #   * one user, `simplex-ntf` — NOT `simplex`: smp-server and xftp-server share
+        #     that uid, and a rule on it would open the internet to both relays;
+        #   * TCP 443 to 17.0.0.0/8 only — the network Apple documents for APNs. The /8
+        #     is all Apple but not only APNs: this user can reach any Apple service on
+        #     443. Narrower than "the internet", wider than "APNs".
+        #
+        # What Apple learns: this node's address, and when and how many pushes go to
+        # each device token. Not the content: the payload is encrypted for the device,
+        # and the notification extension fetches the message from the relay itself.
+        #
+        # DNS for api.push.apple.com goes to the router (@lan_nets, accepted above)
+        # through a resolv.conf only ntf-server.service sees. ntf-server reaches our own
+        # SMP relay over the LAN via /etc/hosts, exactly like the relay itself.
+        #
+        # `simplex-ntf` must exist BEFORE this file is loaded (skuid note at the bottom),
+        # or the whole ruleset fails to load and the relays with it. install.sh creates
+        # the user on every node, with or without push.
+        meta skuid "simplex-ntf" ip daddr 17.0.0.0/8 tcp dport 443 \
+            counter name ntf_egress accept
+
+        # --- exception 3: everything else the owner runs on purpose --------------
         # Every name here is a hole opened knowingly. `gym` from ADR 0008 does not
         # exist on this host — the desktop session, Sunshine and the browser all run
         # as `fels` (uid 1000). nft resolves these names at load time, so a name that
@@ -290,7 +329,8 @@ table inet hearth {
 # * `meta skuid` resolves user NAMES when the ruleset is loaded. If a user does not
 #   exist yet, `nft -f` fails. Create the accounts first, or use numeric UIDs. This
 #   is why coturn is installed before the firewall is loaded: no `turnserver` user,
-#   no ruleset.
+#   no ruleset. The same holds for `simplex-ntf` (the push server, ADR 0016):
+#   install.sh creates it on every node, push or no push, so that this file loads.
 #
 # * Adding a service that needs the internet? Add its user to the app_egress rule.
 #   Do NOT relax the final drop — that rule is the whole point of the file.

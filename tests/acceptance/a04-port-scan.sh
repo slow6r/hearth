@@ -5,9 +5,11 @@
 # с телефона по мобильному интернету (termux) или с любого VPS.
 #
 #   TARGET=relay.example.org ./a04-port-scan.sh
+#   TARGET=relay.example.org NTF_PORT=2053 ./a04-port-scan.sh   # узел с push-сервером
 #
 # Ожидание:
-#   открыты   5223, 443, 5443 (tcp), 3478 (udp/tcp), 49160-49200 (udp)
+#   открыты   8443, 5223, 443, 5443, 7444 (tcp), 3478 (udp/tcp), 49160-49200 (udp)
+#             + порт push-сервера (tcp), если он заведён (ADR 0016)
 #   закрыты   7443 (admin API), 22 (ssh) — они только для LAN
 set -uo pipefail
 
@@ -24,14 +26,26 @@ fi
 TARGET="${TARGET:?укажите TARGET=<node.host>}"
 command -v nmap >/dev/null || { echo "нет nmap — пропуск"; exit 77; }
 
+# Снаружи конфига узла не видно, поэтому набор портов задаётся здесь. По умолчанию —
+# то, что публикует развёрнутый узел: 8443 в адресах клиентов, 443 и 5223 по-старому,
+# 5443 XFTP, 3478 TURN, 7444 device API. Узел без device API: EXPECT_TCP без 7444.
+EXPECT_TCP="${EXPECT_TCP:-8443 5223 443 5443 3478 7444}"
+# Push-сервер есть не на каждом узле — его порт добавляется явно.
+if [[ -n "${NTF_PORT:-}" ]]; then
+    EXPECT_TCP="$EXPECT_TCP $NTF_PORT"
+fi
+read -r -a expected <<<"$EXPECT_TCP"
+PORT_LIST="$(IFS=,; echo "${expected[*]}")"
+PORT_RE="$(IFS='|'; echo "${expected[*]}")"
+
 status=0
 
 echo "== Порты, которые ДОЛЖНЫ быть открыты"
-OPEN_TCP="$(nmap -Pn -p 5223,443,5443,3478 --open "$TARGET" 2>/dev/null \
+OPEN_TCP="$(nmap -Pn -p "$PORT_LIST" --open "$TARGET" 2>/dev/null \
             | grep -E '^[0-9]+/tcp' | cut -d/ -f1)"
 # 3478/tcp тоже обязателен: TURN слушает и TCP, и через него проходят клиенты
 # из сетей, где UDP зарезан.
-for port in 5223 443 5443 3478; do
+for port in "${expected[@]}"; do
     if grep -qw "$port" <<<"$OPEN_TCP"; then
         echo "  ok   $port/tcp открыт"
     else
@@ -57,7 +71,7 @@ echo
 echo "== Ничего лишнего"
 EXTRA="$(nmap -Pn -p- --open -T4 "$TARGET" 2>/dev/null \
          | grep -E '^[0-9]+/tcp' | cut -d/ -f1 \
-         | grep -vE '^(5223|443|5443|3478)$' || true)"
+         | grep -vE "^($PORT_RE)$" || true)"
 if [[ -n "$EXTRA" ]]; then
     echo "  !!   лишние открытые порты:"
     sed 's/^/       /' <<<"$EXTRA"

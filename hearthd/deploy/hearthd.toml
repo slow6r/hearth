@@ -83,6 +83,23 @@ fingerprint_file = "/etc/opt/simplex-xftp/fingerprint"
 password_file = "/etc/hearth/secrets/xftp-create-password"
 process = "xftp-server"
 
+[ntf]
+# Push-сервер для iOS-приложения (ADR 0016, docs/runbook-ntf.md). ВЫКЛЮЧЕН по умолчанию:
+# включение — это PostgreSQL на узле, новый публичный порт и первое исключение из
+# egress релейного стека (к Apple). Осознанное действие, а не следствие обновления.
+enabled = false
+unit = "ntf-server.service"
+scheme = "ntf"
+# НЕ 443 и НЕ 5223 — провайдер узла выбрасывает там TLS-приветствие SimpleX (см. [smp]).
+# 2053 — из двадцати портов, проверенных в docs/deploy-fels-2026-09-09.md.
+port = 2053
+extra_ports = []
+control = "127.0.0.1:5227"
+config_file = "/etc/opt/simplex-ntf/ntf-server.ini"
+fingerprint_file = "/etc/opt/simplex-ntf/fingerprint"
+# password_file нет и быть не может: у адреса push-сервера пароля не бывает.
+process = "ntf-server"
+
 [turn]
 # Voice and video calls. When both parties are behind NAT — two phones on mobile
 # networks, i.e. the normal case — TURN is the only way a media path exists at all,
@@ -143,9 +160,20 @@ input_counter = "input_drop"
 journal_prefix = "hearth-egress-drop"
 # Релейный стек: эти процессы не должны САМИ инициировать соединения наружу.
 # turnserver сюда не входит — он ретранслирует медиа звонков по назначению.
-relay_processes = ["smp-server", "xftp-server"]
+# ntf-server здесь и тогда, когда [ntf] выключен: нет процесса — нет и его сокетов.
+relay_processes = ["smp-server", "xftp-server", "ntf-server"]
 # Счётчики разрешённого egress: показываются, но инцидентом не считаются.
-informational_counters = ["app_egress", "turn_egress"]
+informational_counters = ["app_egress", "turn_egress", "ntf_egress"]
+
+# Единственное место, куда релейному процессу МОЖНО звонить самому: ntf-server доставляет
+# пуши в Apple (ADR 0016). Та же дыра, что правило ntf_egress в hearth.nft, записанная
+# второй раз — для сканера сокетов, иначе каждый пуш был бы инцидентом. НЕ добавлять эти
+# сети в node.lan_networks: там они стали бы разрешёнными и для самого hearthd, и для
+# адресов бэкапа и алертов.
+[[egress.process_allow]]
+process = "ntf-server"
+networks = ["17.0.0.0/8"]
+ports = [443]
 
 [integrity]
 interval_secs = 3600
@@ -157,6 +185,10 @@ hour_utc = 3
 paths = [
     "/etc/opt/simplex",
     "/etc/opt/simplex-xftp",
+    # Push-сервер (ADR 0016): в /etc — CA, от него зависит адрес, вшитый в сборки iOS; в
+    # /var — дамп базы от ntf-db-dump.timer. На узле без push каталоги пусты.
+    "/etc/opt/simplex-ntf",
+    "/var/opt/simplex-ntf",
     "/var/opt/simplex",
     "/etc/hearth",
     "/var/lib/hearth",

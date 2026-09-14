@@ -77,6 +77,42 @@ for d in /etc/opt/simplex /var/opt/simplex; do
 done
 check_readable /etc/opt/simplex/fingerprint "отпечаток CA -> адрес релея в bundle"
 
+# Push-сервер (ADR 0016) — только на узле, где он заведён. Его каталоги демону нужны
+# ровно так же, как каталоги релеев: их архивирует ночной бэкап.
+if id -u simplex-ntf >/dev/null 2>&1; then
+    echo
+    echo "== Push-сервер (ADR 0016)"
+    if id -nG "$HEARTH_USER" | tr ' ' '\n' | grep -qx simplex-ntf; then
+        echo "  ok   $HEARTH_USER состоит в группе simplex-ntf"
+    else
+        echo "  !!   $HEARTH_USER НЕ состоит в группе simplex-ntf — бэкап push-сервера сломан"
+        status=1
+    fi
+    for d in /etc/opt/simplex-ntf /var/opt/simplex-ntf; do
+        if [[ ! -d "$d" ]]; then
+            echo "  ?    $d отсутствует (init-ntf.sh не запускался)"
+        elif can_traverse "$d"; then
+            echo "  ok   $d проходим"
+        else
+            echo "  !!   $d недоступен — ночной бэкап будет падать"
+            status=1
+        fi
+    done
+    # Ключ APNs подписывает пуши от имени команды Apple. Читать его на диске не должен
+    # никто, кроме root: службе его отдаёт systemd через LoadCredential.
+    APNS_KEY=/etc/credstore/hearth-apns.p8
+    if [[ -e "$APNS_KEY" ]]; then
+        if can_read "$APNS_KEY" || sudo -u simplex-ntf test -r "$APNS_KEY" 2>/dev/null; then
+            echo "  !!   $APNS_KEY читается не только root — должно быть 0600 root:root"
+            status=1
+        else
+            echo "  ok   ключ APNs доступен только root"
+        fi
+    else
+        echo "  ?    $APNS_KEY отсутствует (docs/runbook-ntf.md, шаг 4)"
+    fi
+fi
+
 echo
 echo "== TLS-материал admin API"
 check_readable /etc/hearth/pki/server.pem "сертификат admin API"

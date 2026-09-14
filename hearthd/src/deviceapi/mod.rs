@@ -365,6 +365,26 @@ fn parse_range(value: &str, total: u64) -> Option<Option<(u64, u64)>> {
 struct EnrollRequest {
     /// Человеческое имя нового устройства, как его вводит член семьи.
     name: String,
+    /// `android` | `ios` | `desktop`; без поля — `android`, как у всех сборок до него.
+    #[serde(default)]
+    platform: Option<String>,
+}
+
+/// Платформа из запроса устройства.
+///
+/// Поле необязательно: Android-сборки, выпущенные до него, его не присылают, и для них
+/// всё остаётся как было. Разбор строже, чем `Platform::from_str`: тот понимает `iphone`
+/// и `pc`, потому что его вход набирает человек в `hearthctl`. Здесь строку шлёт
+/// приложение, и незнакомое значение — ошибка сборки, которую лучше увидеть сразу, чем
+/// записать в реестр телефон с неверной платформой.
+fn requested_platform(raw: Option<&str>) -> Option<crate::model::device::Platform> {
+    use crate::model::device::Platform;
+    match raw {
+        None | Some("android") => Some(Platform::Android),
+        Some("ios") => Some(Platform::Ios),
+        Some("desktop") => Some(Platform::Desktop),
+        Some(_) => None,
+    }
 }
 
 /// Завести НОВОЕ устройство по просьбе уже заведённого.
@@ -407,6 +427,9 @@ async fn enroll(
     if name.is_empty() || name.chars().count() > 64 {
         return Err(ApiError(StatusCode::BAD_REQUEST, "bad device name"));
     }
+    let Some(platform) = requested_platform(req.platform.as_deref()) else {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "bad platform"));
+    };
 
     // Бюджет на сутки: даже включённая поверхность не должна давать одному токену
     // исчерпать max_devices за минуту.
@@ -435,7 +458,7 @@ async fn enroll(
         .await
         .add(
             name,
-            crate::model::device::Platform::Android,
+            platform,
             Some(format!("заведено с устройства {inviter}")),
             state.config.devices.max_devices,
         )
@@ -498,6 +521,10 @@ struct ClaimRequest {
     /// Как назвать устройство в реестре. Приложение подставляет модель телефона —
     /// человек в этот момент ничего не вводит, в этом и смысл.
     name: String,
+    /// `android` | `ios` | `desktop`. Сборки до этого поля его не присылают — для них
+    /// `android`, как и было.
+    #[serde(default)]
+    platform: Option<String>,
 }
 
 /// Завести себя по вшитому в сборку приглашению.
@@ -550,6 +577,17 @@ async fn claim(
             ));
         }
     }
+
+    // Всё, что можно проверить по самому запросу, проверяется ДО списания кода. Раньше
+    // длинное имя отвергалось уже после `reserve()` и без `release()`: одноразовый код
+    // сгорал на ошибке, которой человек даже не видел, — имя подставляет приложение.
+    let requested = req.name.trim();
+    if requested.chars().count() > 64 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "bad device name"));
+    }
+    let Some(platform) = requested_platform(req.platform.as_deref()) else {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "bad platform"));
+    };
 
     let now = Utc::now();
 
@@ -610,10 +648,6 @@ async fn claim(
     };
     let invite_id = invite.id.clone();
 
-    let requested = req.name.trim();
-    if requested.chars().count() > 64 {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "bad device name"));
-    }
     let requested = if requested.is_empty() {
         "Устройство"
     } else {
@@ -635,7 +669,7 @@ async fn claim(
             };
             match devices.add(
                 &name,
-                crate::model::device::Platform::Android,
+                platform,
                 Some(format!("заведено по приглашению {invite_id}")),
                 state.config.devices.max_devices,
             ) {
@@ -842,5 +876,162 @@ mod tests {
     fn ignores_units_it_does_not_speak() {
         assert_eq!(parse_range("items=0-99", 1000), None);
         assert_eq!(parse_range("bytes=abc", 1000), None);
+    }
+
+    #[test]
+    fn the_platform_is_strict_and_defaults_to_android() {
+        use crate::model::device::Platform;
+        assert_eq!(requested_platform(None), Some(Platform::Android));
+        assert_eq!(requested_platform(Some("android")), Some(Platform::Android));
+        assert_eq!(requested_platform(Some("ios")), Some(Platform::Ios));
+        assert_eq!(requested_platform(Some("desktop")), Some(Platform::Desktop));
+        // То, что `hearthctl` прощает человеку, приложению не прощается.
+        for bad in ["iphone", "iOS", "pc", "", "symbian"] {
+            assert_eq!(requested_platform(Some(bad)), None, "{bad:?}");
+        }
+    }
+
+    /// Узел с секретами релеев на диске — ровно столько, сколько `/claim` нужно для bundle.
+    fn claim_node(dir: &std::path::Path) -> Arc<AppState> {
+        let mut config = crate::state::tests::test_config(dir);
+        config.smp.fingerprint_file = dir.join("smp-fingerprint");
+        config.smp.password_file = Some(dir.join("smp-password"));
+        config.xftp.fingerprint_file = dir.join("xftp-fingerprint");
+        config.xftp.password_file = Some(dir.join("xftp-password"));
+        config.turn.secret_file = dir.join("turn-secret");
+        for (file, value) in [
+            ("smp-fingerprint", "smpFingerPrintAbC"),
+            ("smp-password", "smpPassword123"),
+            ("xftp-fingerprint", "xftpFingerPrintXyZ"),
+            ("xftp-password", "xftpPassword456"),
+            ("turn-secret", "turnStaticSecret"),
+        ] {
+            store::write_secret(dir.join(file), value).expect("seed");
+        }
+        AppState::new(config, crate::sys::Sys::new(true)).expect("state")
+    }
+
+    async fn post_claim(state: &Arc<AppState>, code: &str, body: serde_json::Value) -> StatusCode {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/claim")
+            .header(INVITE_HEADER, code)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request");
+        tower::ServiceExt::oneshot(router(state.clone()), request)
+            .await
+            .expect("response")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn a_bad_request_does_not_burn_a_single_use_code() {
+        // Раньше длинное имя отвергалось после reserve() и без release(): одноразовый код
+        // сгорал, хотя устройство так и не завелось.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = claim_node(dir.path());
+        let invite = state
+            .invites
+            .write()
+            .await
+            .create(1, 0, None)
+            .expect("invite");
+
+        let long_name = "x".repeat(65);
+        assert_eq!(
+            post_claim(
+                &state,
+                &invite.token,
+                serde_json::json!({ "name": long_name })
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_claim(
+                &state,
+                &invite.token,
+                serde_json::json!({ "name": "iPhone", "platform": "symbian" })
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            state
+                .invites
+                .read()
+                .await
+                .get(&invite.id)
+                .expect("invite")
+                .uses,
+            0,
+            "ни одна отвергнутая попытка не списала код"
+        );
+
+        assert_eq!(
+            post_claim(
+                &state,
+                &invite.token,
+                serde_json::json!({ "name": "iPhone" })
+            )
+            .await,
+            StatusCode::OK,
+            "the code still lets the device in"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_claim_records_the_platform_it_was_given() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = claim_node(dir.path());
+        let ios = state
+            .invites
+            .write()
+            .await
+            .create(1, 0, None)
+            .expect("invite");
+        let legacy = state
+            .invites
+            .write()
+            .await
+            .create(1, 0, None)
+            .expect("invite");
+
+        assert_eq!(
+            post_claim(
+                &state,
+                &ios.token,
+                serde_json::json!({ "name": "iPhone 15", "platform": "ios" })
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post_claim(
+                &state,
+                &legacy.token,
+                serde_json::json!({ "name": "Pixel 8" })
+            )
+            .await,
+            StatusCode::OK
+        );
+
+        let devices = state.devices.read().await;
+        let platform_of = |name: &str| {
+            devices
+                .active()
+                .find(|device| device.name == name)
+                .map(|device| device.platform)
+        };
+        assert_eq!(
+            platform_of("iPhone 15"),
+            Some(crate::model::device::Platform::Ios)
+        );
+        assert_eq!(
+            platform_of("Pixel 8"),
+            Some(crate::model::device::Platform::Android),
+            "a build without the field stays android"
+        );
     }
 }

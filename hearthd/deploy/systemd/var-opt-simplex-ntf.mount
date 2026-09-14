@@ -1,0 +1,23 @@
+# ВНИМАНИЕ: разворачивается под ЭКРАНИРОВАННЫМ именем
+#   /etc/systemd/system/var-opt-simplex\x2dntf.mount
+# systemd выводит имя mount-юнита из точки монтирования, и дефис в
+# `simplex-ntf` обязан быть записан как \x2d. Под именем без экранирования
+# юнит просто не будет найден. Здесь он лежит с дефисом только потому, что
+# обратный слэш в имени файла не переживает checkout на Windows.
+#   systemd-escape -p --suffix=mount /var/opt/simplex-ntf
+[Unit]
+Description=hearth data bind mount: /var/opt/simplex-ntf
+Documentation=file:///srv/hearth/src/docs/runbook-ntf.md
+# Push-сервер пишет сюда статистику и дамп своей базы (ntf-db-dump.timer). Сама база —
+# в /var/lib/postgresql, её размещение решается при установке PostgreSQL.
+After=srv.mount
+Requires=srv.mount
+
+[Mount]
+What=/srv/hearth/data/simplex-ntf
+Where=/var/opt/simplex-ntf
+Type=none
+Options=bind
+
+[Install]
+WantedBy=multi-user.target

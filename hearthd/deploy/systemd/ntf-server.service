@@ -1,0 +1,70 @@
+[Unit]
+Description=SimpleX notification server for the iOS app (simplexmq + one hearth patch, ADR 0016)
+Documentation=file:///srv/hearth/src/docs/runbook-ntf.md
+After=network-online.target nftables.service postgresql.service
+Wants=network-online.target postgresql.service
+Requires=nftables.service
+
+[Service]
+Type=simple
+# Upstream defaults are /etc/opt/simplex-notifications and /var/opt/simplex-notifications.
+# Named after the xftp pair instead, so the three relays read alike.
+Environment=NTF_SERVER_CFG_PATH=/etc/opt/simplex-ntf
+Environment=NTF_SERVER_LOG_PATH=/var/opt/simplex-ntf
+# APNS_KEY_ID, APNS_TEAM_ID, APNS_TOPIC (the last two need relays/ntf/patches). systemd
+# reads this file as root. It must NOT set APNS_KEY_FILE: an EnvironmentFile overrides
+# Environment= below.
+EnvironmentFile=/etc/hearth/ntf.env
+# The APNs key is handed over as a credential. On disk it is 0600 root:root, outside
+# every backup path; neither simplex-ntf nor hearthd can read it at rest. %d is this
+# service's credentials directory.
+LoadCredential=apns.p8:/etc/credstore/hearth-apns.p8
+Environment=APNS_KEY_FILE=%d/apns.p8
+ExecStart=/usr/local/bin/ntf-server start +RTS -N -RTS
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=60
+KillSignal=SIGINT
+
+# NOT `simplex`. The firewall lets exactly this user reach Apple (hearth.nft, ntf_egress);
+# sharing a uid with smp-server and xftp-server would open that hole for them too.
+User=simplex-ntf
+Group=simplex-ntf
+LimitNOFILE=65535
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# AF_UNIX: PostgreSQL over its local socket (peer authentication, no password).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+ReadWritePaths=/var/opt/simplex-ntf
+ReadOnlyPaths=/etc/opt/simplex-ntf
+# ntf-server looks for CA roots at a hardcoded /etc/ssl/cert.pem
+# (APNSPushClientConfig.caStoreFile). Debian has no such file: without this line the TLS
+# connection to APNs never comes up and not a single push leaves.
+BindReadOnlyPaths=/etc/ssl/certs/ca-certificates.crt:/etc/ssl/cert.pem
+# The node has no resolver (ТЗ §5.2), and api.push.apple.com is a name. A resolv.conf for
+# this service only, pointing at the router: the rest of the node still resolves nothing.
+# /etc/hosts is not replaced, so relay.<host> keeps resolving to the LAN address.
+BindReadOnlyPaths=/etc/hearth/ntf-resolv.conf:/etc/resolv.conf
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ntf-server
+
+[Install]
+WantedBy=multi-user.target

@@ -26,6 +26,10 @@ pub struct Config {
     pub paths: Paths,
     pub smp: Relay,
     pub xftp: Relay,
+    /// Push-сервер для iOS-приложения (ADR 0016). `Option`, а не обязательная секция:
+    /// конфиги узлов, развёрнутых до него, её не содержат и обязаны читаться как раньше.
+    #[serde(default)]
+    pub ntf: Option<Relay>,
     pub turn: Turn,
     #[serde(default)]
     pub supervisor: Supervisor,
@@ -217,7 +221,7 @@ pub struct Relay {
     pub enabled: bool,
     /// systemd unit name, e.g. `smp-server.service`.
     pub unit: String,
-    /// URI scheme used in client addresses: `smp` or `xftp`.
+    /// URI scheme used in client addresses: `smp`, `xftp` or `ntf`.
     pub scheme: String,
     /// Port advertised in client addresses, e.g. 5223.
     pub port: u16,
@@ -230,10 +234,14 @@ pub struct Relay {
     pub control: Option<SocketAddr>,
     /// Upstream ini file (owned by the relay; hearthd only reads it).
     pub config_file: PathBuf,
-    /// File written by `smp-server init` holding the CA fingerprint.
+    /// File written by `<scheme>-server init` holding the CA fingerprint.
     pub fingerprint_file: PathBuf,
     /// File holding the queue/upload creation password (ТЗ §6.2, §6.3).
-    pub password_file: PathBuf,
+    ///
+    /// Required for smp and xftp — on a public relay it is the only lock against
+    /// strangers. Absent for ntf: a push server address carries no password at all.
+    #[serde(default)]
+    pub password_file: Option<PathBuf>,
     /// Process name as reported by `ss -tnp`, for the socket scanner.
     pub process: String,
 }
@@ -334,6 +342,35 @@ pub struct Egress {
     /// can see it is *them* growing and not `egress_drop`.
     #[serde(default = "d_informational_counters")]
     pub informational_counters: Vec<String>,
+    /// Destinations a relay process may dial on purpose.
+    ///
+    /// Exactly one exists: ntf-server delivering pushes to Apple (ADR 0016). Without it the
+    /// socket scan would call every push a leak. Deliberately NOT `node.lan_networks`: that
+    /// list is also hearthd's own egress policy and the bound for backup and alert targets,
+    /// and Apple's /8 belongs in neither.
+    #[serde(default)]
+    pub process_allow: Vec<ProcessAllow>,
+}
+
+/// One named hole in the socket scan: `process` may connect to `networks` on `ports`.
+///
+/// It mirrors a rule in hearth.nft rather than replacing one: the firewall decides what
+/// can leave, this only keeps the scanner from reporting what the firewall allowed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessAllow {
+    /// Process name as `ss -tnp` reports it, e.g. `ntf-server`.
+    pub process: String,
+    pub networks: Vec<IpNet>,
+    pub ports: Vec<u16>,
+}
+
+impl ProcessAllow {
+    /// Is `peer` one of this entry's destinations? The owner is the caller's check.
+    pub fn covers(&self, peer: SocketAddr) -> bool {
+        self.ports.contains(&peer.port())
+            && self.networks.iter().any(|net| net.contains(&peer.ip()))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -489,6 +526,7 @@ impl Default for Egress {
             journal_prefix: d_journal_prefix(),
             relay_processes: d_relay_processes(),
             informational_counters: d_informational_counters(),
+            process_allow: Vec::new(),
         }
     }
 }
@@ -521,9 +559,19 @@ impl Config {
         EgressPolicy::new(self.node.lan_networks.clone())
     }
 
-    /// Relays in a stable order, for iteration.
+    /// Relays in a stable order, for iteration. ntf is listed whenever its section exists;
+    /// callers check `enabled`, exactly as they do for smp and xftp.
     pub fn relays(&self) -> Vec<&Relay> {
-        vec![&self.smp, &self.xftp]
+        let mut relays = vec![&self.smp, &self.xftp];
+        relays.extend(self.ntf.as_ref());
+        relays
+    }
+
+    /// Relay sections paired with the scheme each one must carry.
+    fn relay_sections(&self) -> Vec<(&'static str, &Relay)> {
+        let mut sections = vec![("smp", &self.smp), ("xftp", &self.xftp)];
+        sections.extend(self.ntf.as_ref().map(|ntf| ("ntf", ntf)));
+        sections
     }
 
     /// Enforce the invariants that can be checked statically.
@@ -587,32 +635,79 @@ impl Config {
             )));
         }
 
-        for relay in self.relays() {
+        for (section, relay) in self.relay_sections() {
+            // The scheme belongs to the section: `[ntf]` with scheme smp is a section copied
+            // from [smp] and not finished, not a new kind of relay.
+            if relay.scheme != section {
+                return Err(Error::config(format!(
+                    "[{section}] has scheme `{}`; expected `{section}`",
+                    relay.scheme
+                )));
+            }
             if !relay.enabled {
                 continue;
             }
             if relay.port == 0 {
-                return Err(Error::config(format!("{}.port must be set", relay.scheme)));
+                return Err(Error::config(format!("{section}.port must be set")));
             }
             if let Some(control) = relay.control {
                 if !control.ip().is_loopback() {
                     return Err(Error::config(format!(
-                        "{}.control must be on loopback, got {control}",
-                        relay.scheme
+                        "{section}.control must be on loopback, got {control}"
                     )));
                 }
             }
-            if relay.scheme != "smp" && relay.scheme != "xftp" {
+            match (section, &relay.password_file) {
+                ("ntf", Some(_)) => {
+                    return Err(Error::config(
+                        "ntf.password_file must not be set: a push server address carries \
+                         no password, so this section was probably copied from [smp]",
+                    ))
+                }
+                ("ntf", None) | (_, Some(_)) => {}
+                (_, None) => {
+                    return Err(Error::config(format!(
+                        "{section}.password_file must be set: on a public relay the \
+                         creation password is the only lock against strangers"
+                    )))
+                }
+            }
+            // A relay whose sockets nobody looks at is a blind spot of the watchdog.
+            if !self
+                .egress
+                .relay_processes
+                .iter()
+                .any(|p| p == &relay.process)
+            {
                 return Err(Error::config(format!(
-                    "unsupported relay scheme `{}` (expected smp or xftp)",
-                    relay.scheme
+                    "{section}.process `{}` is missing from egress.relay_processes; the \
+                     socket scan would never look at this relay",
+                    relay.process
                 )));
             }
         }
-        if self.smp.enabled && self.xftp.enabled {
-            let smp_ports = self.smp.all_ports();
-            if let Some(clash) = self.xftp.all_ports().iter().find(|p| smp_ports.contains(p)) {
-                return Err(Error::config(format!("smp and xftp both use port {clash}")));
+        // Every pair of enabled relays, and each against the admin API and TURN: of two
+        // listeners on one port one fails to bind, and which one depends on start-up order.
+        let mut taken = vec![("api.listen", self.api.listen.port())];
+        if self.turn.enabled {
+            taken.extend(self.turn.all_ports().into_iter().map(|port| ("turn", port)));
+        }
+        let enabled: Vec<&Relay> = self.relays().into_iter().filter(|r| r.enabled).collect();
+        for (index, first) in enabled.iter().enumerate() {
+            let first_ports = first.all_ports();
+            for second in &enabled[index + 1..] {
+                if let Some(clash) = second.all_ports().iter().find(|p| first_ports.contains(p)) {
+                    return Err(Error::config(format!(
+                        "{} and {} both use port {clash}",
+                        first.scheme, second.scheme
+                    )));
+                }
+            }
+            if let Some((owner, port)) = taken.iter().find(|(_, port)| first_ports.contains(port)) {
+                return Err(Error::config(format!(
+                    "{} port {port} is already used by {owner}",
+                    first.scheme
+                )));
             }
         }
         if self.turn.enabled {
@@ -694,13 +789,45 @@ impl Config {
             // иначе один из слушателей не поднимется, и какой именно — зависит от
             // порядка старта, то есть отладка будет случайной.
             let port = self.device_api.listen.port();
-            let mut taken: Vec<u16> = self.smp.all_ports();
-            taken.extend(self.xftp.all_ports());
-            taken.push(self.api.listen.port());
-            taken.push(self.turn.port);
-            if taken.contains(&port) {
+            let mut used: Vec<u16> = self
+                .relays()
+                .into_iter()
+                .flat_map(|relay| relay.all_ports())
+                .collect();
+            used.push(self.api.listen.port());
+            used.push(self.turn.port);
+            if used.contains(&port) {
                 return Err(Error::config(format!(
                     "device_api.listen port {port} is already used by another service"
+                )));
+            }
+        }
+
+        for (index, allow) in self.egress.process_allow.iter().enumerate() {
+            // An exception for a process the scan never looks at excuses nothing, and a /0
+            // is not an exception but a switched-off watchdog.
+            if !self
+                .egress
+                .relay_processes
+                .iter()
+                .any(|p| p == &allow.process)
+            {
+                return Err(Error::config(format!(
+                    "egress.process_allow[{index}]: `{}` is not in egress.relay_processes, \
+                     so there is nothing to allow",
+                    allow.process
+                )));
+            }
+            if allow.networks.is_empty() || allow.ports.is_empty() || allow.ports.contains(&0) {
+                return Err(Error::config(format!(
+                    "egress.process_allow[{index}] must name its destination: networks and \
+                     non-zero ports"
+                )));
+            }
+            if let Some(net) = allow.networks.iter().find(|net| net.prefix_len() == 0) {
+                return Err(Error::config(format!(
+                    "egress.process_allow[{index}]: {net} is the whole internet; an exception \
+                     must name where it goes"
                 )));
             }
         }
@@ -801,7 +928,12 @@ fn d_relay_processes() -> Vec<String> {
     vec!["smp-server".into(), "xftp-server".into()]
 }
 fn d_informational_counters() -> Vec<String> {
-    vec!["app_egress".into(), "turn_egress".into()]
+    vec![
+        "app_egress".into(),
+        "turn_egress".into(),
+        // Declared in hearth.nft on every node; it simply stays at 0 without a push server.
+        "ntf_egress".into(),
+    ]
 }
 fn d_integrity_interval() -> u64 {
     3600
@@ -986,6 +1118,159 @@ mod tests {
         assert!(
             msg.contains("bogus") || msg.contains("unknown"),
             "got {msg}"
+        );
+    }
+
+    #[test]
+    fn a_config_from_before_the_push_server_still_loads() {
+        // Узлы, развёрнутые до ADR 0016, не знают ни [ntf], ни process_allow.
+        let mut cfg = reference();
+        cfg.ntf = None;
+        cfg.egress.process_allow.clear();
+        cfg.validate().expect("valid without [ntf]");
+        assert_eq!(cfg.relays().len(), 2);
+    }
+
+    fn with_ntf_enabled() -> Config {
+        let mut cfg = reference();
+        cfg.ntf
+            .as_mut()
+            .expect("the reference config carries [ntf]")
+            .enabled = true;
+        cfg
+    }
+
+    #[test]
+    fn an_enabled_push_server_validates_like_a_relay() {
+        with_ntf_enabled()
+            .validate()
+            .expect("the reference [ntf] is valid once enabled");
+
+        let mut cfg = with_ntf_enabled();
+        if let Some(ntf) = cfg.ntf.as_mut() {
+            ntf.password_file = Some("/etc/hearth/secrets/ntf-password".into());
+        }
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("ntf.password_file"), "got {err}");
+
+        let mut cfg = with_ntf_enabled();
+        if let Some(ntf) = cfg.ntf.as_mut() {
+            ntf.scheme = "smp".into();
+        }
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("expected `ntf`"), "got {err}");
+
+        // Релей, за сокетами которого сторож не смотрит, — слепое пятно.
+        let mut cfg = with_ntf_enabled();
+        cfg.egress.relay_processes.retain(|p| p != "ntf-server");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("relay_processes"), "got {err}");
+    }
+
+    #[test]
+    fn the_push_server_port_cannot_collide() {
+        for (port, expected) in [
+            (8443, "smp and ntf both use port 8443"),
+            (5443, "xftp and ntf both use port 5443"),
+            (3478, "already used by turn"),
+            (7443, "already used by api.listen"),
+            (49170, "TURN relay range"),
+        ] {
+            let mut cfg = with_ntf_enabled();
+            if let Some(ntf) = cfg.ntf.as_mut() {
+                ntf.port = port;
+            }
+            let err = cfg.validate().unwrap_err();
+            assert!(err.to_string().contains(expected), "port {port}: got {err}");
+        }
+
+        let mut cfg = with_ntf_enabled();
+        cfg.device_api.enabled = true;
+        if let Some(ntf) = cfg.ntf.as_mut() {
+            ntf.port = 7444;
+        }
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("device_api.listen"), "got {err}");
+    }
+
+    #[test]
+    fn a_relay_without_a_password_is_refused() {
+        // На публичном релее пароль на создание очередей — единственный замок.
+        let mut cfg = reference();
+        cfg.smp.password_file = None;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("smp.password_file"), "got {err}");
+    }
+
+    #[test]
+    fn a_process_exception_must_name_its_destination() {
+        let good = ProcessAllow {
+            process: "ntf-server".into(),
+            networks: vec!["17.0.0.0/8".parse().expect("cidr")],
+            ports: vec![443],
+        };
+        let cases = [
+            (
+                ProcessAllow {
+                    networks: vec!["0.0.0.0/0".parse().expect("cidr")],
+                    ..good.clone()
+                },
+                "whole internet",
+            ),
+            (
+                ProcessAllow {
+                    networks: Vec::new(),
+                    ..good.clone()
+                },
+                "must name its destination",
+            ),
+            (
+                ProcessAllow {
+                    ports: Vec::new(),
+                    ..good.clone()
+                },
+                "must name its destination",
+            ),
+            (
+                ProcessAllow {
+                    ports: vec![0],
+                    ..good.clone()
+                },
+                "must name its destination",
+            ),
+            (
+                ProcessAllow {
+                    process: "firefox".into(),
+                    ..good.clone()
+                },
+                "nothing to allow",
+            ),
+        ];
+        for (allow, expected) in cases {
+            let mut cfg = reference();
+            cfg.egress.process_allow = vec![allow];
+            let err = cfg.validate().unwrap_err();
+            assert!(err.to_string().contains(expected), "got {err}");
+        }
+    }
+
+    #[test]
+    fn a_process_exception_covers_only_its_destination() {
+        let cfg = reference();
+        let apns = &cfg.egress.process_allow[0];
+        assert_eq!(apns.process, "ntf-server");
+        assert!(apns.covers("17.188.143.34:443".parse().expect("addr")));
+        assert!(
+            !apns.covers("17.188.143.34:80".parse().expect("addr")),
+            "another port"
+        );
+        assert!(
+            !apns.covers("18.0.0.1:443".parse().expect("addr")),
+            "another network"
+        );
+        assert!(
+            !apns.covers("[2620:149:a44::1]:443".parse().expect("addr")),
+            "IPv6 is not in the rule"
         );
     }
 }

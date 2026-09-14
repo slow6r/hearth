@@ -19,6 +19,7 @@
 //! that were already turned into incidents.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -290,6 +291,7 @@ impl EgressWatchdog {
             &cfg.relay_processes,
             &listening_ports,
             &self.state.policy,
+            &cfg.process_allow,
         );
 
         if !foreign.is_empty() {
@@ -418,11 +420,19 @@ impl EgressWatchdog {
 /// locally, while an outbound one gets an ephemeral port and the service port on the
 /// remote side. So a relay socket whose local port is not one of ours, pointing at a
 /// non-home peer, is the thing worth alerting on.
+///
+/// # Named exceptions
+///
+/// One relay process dials out by design: ntf-server delivering pushes to Apple
+/// (ADR 0016). `allow` lists such destinations per process, and a socket is excused only
+/// when its owner, peer network AND peer port all match — the width of the `ntf_egress`
+/// rule in hearth.nft, not wider.
 fn find_foreign(
     sockets: &[ss::SocketEntry],
     relay_processes: &[String],
     listening_ports: &[u16],
     policy: &crate::net::EgressPolicy,
+    allow: &[crate::config::ProcessAllow],
 ) -> Vec<ForeignSocket> {
     sockets
         .iter()
@@ -438,6 +448,15 @@ fn find_foreign(
         .filter(|s| match s.peer_ip() {
             Some(ip) => !policy.permits_ip(ip),
             None => false,
+        })
+        .filter(|s| {
+            let peer = ss::split_host_port(&s.peer)
+                .and_then(|(_, port)| s.peer_ip().map(|ip| SocketAddr::new(ip, port)));
+            !peer.is_some_and(|peer| {
+                allow
+                    .iter()
+                    .any(|entry| s.owned_by(&entry.process) && entry.covers(peer))
+            })
         })
         .map(|s| ForeignSocket {
             process: s.processes.first().cloned().unwrap_or_else(|| "?".into()),
@@ -563,7 +582,7 @@ ESTAB  0 0 203.0.113.10:38000 142.250.185.78:443 users:((\"smp-server\",pid=812,
     #[test]
     fn flags_a_relay_that_dials_out() {
         let sockets = ss::parse(SS_OUTPUT);
-        let foreign = find_foreign(&sockets, &relays(), PORTS, &policy());
+        let foreign = find_foreign(&sockets, &relays(), PORTS, &policy(), &[]);
         assert_eq!(foreign.len(), 1, "exactly one socket is a real finding");
         assert_eq!(foreign[0].peer, "142.250.185.78:443");
         assert_eq!(foreign[0].process, "smp-server");
@@ -578,7 +597,7 @@ ESTAB  0 0 203.0.113.10:38000 142.250.185.78:443 users:((\"smp-server\",pid=812,
         // The whole point of ADR 0007: strangers' addresses connecting to 5223/443/5443
         // are family members, not leaks.
         let sockets = ss::parse(SS_OUTPUT);
-        let foreign = find_foreign(&sockets, &relays(), PORTS, &policy());
+        let foreign = find_foreign(&sockets, &relays(), PORTS, &policy(), &[]);
         assert!(
             !foreign
                 .iter()
@@ -590,13 +609,52 @@ ESTAB  0 0 203.0.113.10:38000 142.250.185.78:443 users:((\"smp-server\",pid=812,
     #[test]
     fn other_services_are_none_of_our_business() {
         let sockets = ss::parse(SS_OUTPUT);
-        let foreign = find_foreign(&sockets, &relays(), PORTS, &policy());
+        let foreign = find_foreign(&sockets, &relays(), PORTS, &policy(), &[]);
         for process in ["firefox", "apt-get", "turnserver"] {
             assert!(
                 !foreign.iter().any(|f| f.process == process),
                 "{process} talking to the internet is expected on this host"
             );
         }
+    }
+
+    #[test]
+    fn the_push_server_may_reach_apple_and_nothing_else() {
+        // ntf-server звонит в APNs по назначению (ADR 0016). Исключение ровно такой ширины,
+        // как правило ntf_egress в hearth.nft: процесс, сеть и порт — вместе.
+        let allow = vec![crate::config::ProcessAllow {
+            process: "ntf-server".into(),
+            networks: vec!["17.0.0.0/8".parse().expect("cidr")],
+            ports: vec![443],
+        }];
+        let processes = vec![
+            "smp-server".to_string(),
+            "xftp-server".to_string(),
+            "ntf-server".to_string(),
+        ];
+        let sockets = ss::parse(
+            "ESTAB 0 0 203.0.113.10:41000 17.188.143.34:443 users:((\"ntf-server\",pid=950,fd=20))\n\
+             ESTAB 0 0 203.0.113.10:41001 17.188.143.34:80 users:((\"ntf-server\",pid=950,fd=21))\n\
+             ESTAB 0 0 203.0.113.10:41002 142.250.185.78:443 users:((\"ntf-server\",pid=950,fd=22))\n\
+             ESTAB 0 0 203.0.113.10:41003 17.188.143.34:443 users:((\"smp-server\",pid=812,fd=40))\n\
+             ESTAB 0 0 192.168.1.72:41004 192.168.1.72:8443 users:((\"ntf-server\",pid=950,fd=23))\n",
+        );
+        let ports = [443, 5223, 5443, 8443, 2053];
+        let foreign = find_foreign(&sockets, &processes, &ports, &policy(), &allow);
+        let peers: Vec<(&str, &str)> = foreign
+            .iter()
+            .map(|f| (f.process.as_str(), f.peer.as_str()))
+            .collect();
+        assert_eq!(
+            peers,
+            vec![
+                ("ntf-server", "17.188.143.34:80"),
+                ("ntf-server", "142.250.185.78:443"),
+                ("smp-server", "17.188.143.34:443"),
+            ],
+            "only ntf-server itself, to Apple, on 443 is excused; its own relay over the LAN \
+             was never a finding"
+        );
     }
 
     #[test]

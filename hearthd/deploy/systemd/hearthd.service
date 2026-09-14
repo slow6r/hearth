@@ -19,7 +19,11 @@ CapabilityBoundingSet=CAP_NET_ADMIN
 # systemd-journal: read the netfilter LOG entries behind an egress incident.
 # simplex:         read the relay fingerprint for bundles and archive the relay
 #                  directories in the nightly backup.
-SupplementaryGroups=systemd-journal simplex
+# simplex-ntf:     archive the push server's directories (ADR 0016). The group is
+#                  created by install.sh on every node, with or without push: systemd
+#                  refuses to start a unit that names a group which does not exist
+#                  (status=216/GROUP), so run install.sh before installing this unit.
+SupplementaryGroups=systemd-journal simplex simplex-ntf
 
 # Deliberately NOT granted: CAP_SYS_PTRACE. It would let `ss -p` name the relays'
 # sockets (making the socket scan a full second signal instead of a degraded one),
@@ -65,6 +69,9 @@ ReadWritePaths=/var/lib/hearth /var/opt/hearth /etc/hearth
 # The relay state: read for the fingerprint that goes into bundles, and read again by
 # the nightly backup. /var/opt/simplex holds the store log — needed by the backup.
 ReadOnlyPaths=/etc/opt/simplex /etc/opt/simplex-xftp /var/opt/simplex /var/opt/simplex-xftp
+# The push server's CA and its database dump (ADR 0016). `-`: most nodes have no push
+# server, and a missing path must not keep the control plane from starting.
+ReadOnlyPaths=-/etc/opt/simplex-ntf -/var/opt/simplex-ntf
 
 # journald is the alert journal of record.
 StandardOutput=journal

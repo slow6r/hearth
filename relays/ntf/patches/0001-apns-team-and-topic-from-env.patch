@@ -1,0 +1,33 @@
+diff --git a/src/Simplex/Messaging/Notifications/Server/Push/APNS.hs b/src/Simplex/Messaging/Notifications/Server/Push/APNS.hs
+index 0657e5c..a81902c 100644
+--- a/src/Simplex/Messaging/Notifications/Server/Push/APNS.hs
++++ b/src/Simplex/Messaging/Notifications/Server/Push/APNS.hs
+@@ -73,7 +73,7 @@ import Simplex.Messaging.Parsers (defaultJSON)
+ import Simplex.Messaging.Transport.HTTP2 (HTTP2Body (..))
+ import Simplex.Messaging.Transport.HTTP2.Client
+ import Simplex.Messaging.Util (safeDecodeUtf8, tshow)
+-import System.Environment (getEnv)
++import System.Environment (getEnv, lookupEnv)
+ import UnliftIO.STM
+ 
+ data JWTHeader = JWTHeader
+@@ -231,13 +231,17 @@ data APNSPushClient = APNSPushClient
+   }
+ 
+ createAPNSPushClient :: HostName -> APNSPushClientConfig -> IO APNSPushClient
+-createAPNSPushClient apnsHost apnsCfg@APNSPushClientConfig {authKeyFileEnv, authKeyAlg, authKeyIdEnv, appTeamId} = do
++createAPNSPushClient apnsHost apnsCfg0@APNSPushClientConfig {authKeyFileEnv, authKeyAlg, authKeyIdEnv, appTeamId = defTeamId, appName = defTopic} = do
++  -- hearth: team and topic of another app from the environment, upstream values otherwise
++  teamId <- maybe defTeamId T.pack <$> lookupEnv "APNS_TEAM_ID"
++  topic <- maybe defTopic (encodeUtf8 . T.pack) <$> lookupEnv "APNS_TOPIC"
++  let apnsCfg = apnsCfg0 {appTeamId = teamId, appName = topic}
+   https2Client <- newTVarIO Nothing
+   connectHTTPS2 apnsHost apnsCfg https2Client >>= either (throwIO . userError . show) (\_ -> pure ())
+   privateKey <- readECPrivateKey =<< getEnv authKeyFileEnv
+   authKeyId <- T.pack <$> getEnv authKeyIdEnv
+   let jwtHeader = JWTHeader {alg = authKeyAlg, kid = authKeyId}
+-  jwtToken <- newTVarIO =<< mkApnsJWTToken appTeamId jwtHeader privateKey
++  jwtToken <- newTVarIO =<< mkApnsJWTToken teamId jwtHeader privateKey
+   nonceDrg <- C.newRandom
+   pure APNSPushClient {https2Client, privateKey, jwtHeader, jwtToken, nonceDrg, apnsHost, apnsCfg}
+ 

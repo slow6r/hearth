@@ -38,9 +38,9 @@ fn loopback_config(dir: &Path) -> Config {
     config.paths.manifest = dir.join("manifest.toml");
 
     config.smp.fingerprint_file = dir.join("secrets/smp-fingerprint");
-    config.smp.password_file = dir.join("secrets/smp-password");
+    config.smp.password_file = Some(dir.join("secrets/smp-password"));
     config.xftp.fingerprint_file = dir.join("secrets/xftp-fingerprint");
-    config.xftp.password_file = dir.join("secrets/xftp-password");
+    config.xftp.password_file = Some(dir.join("secrets/xftp-password"));
     config.turn.secret_file = dir.join("secrets/turn-secret");
 
     config.backup.spool_dir = dir.join("spool");

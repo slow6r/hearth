@@ -35,6 +35,15 @@ say "1. users"
 # System users, no shell, no home. The relays and hearthd never need to log in.
 id -u simplex >/dev/null 2>&1 || run useradd --system --no-create-home --shell /usr/sbin/nologin simplex
 id -u hearth  >/dev/null 2>&1 || run useradd --system --no-create-home --shell /usr/sbin/nologin hearth
+# The push server (ADR 0016) gets its own user even on a node that never runs it, for
+# two reasons that both fail hard rather than softly:
+#   * hearth.nft names it in `meta skuid` — nft resolves names at load time, and one
+#     unknown name makes the WHOLE ruleset fail to load (and the relays require it);
+#   * hearthd.service lists its group in SupplementaryGroups — systemd refuses to start
+#     a unit whose group does not exist.
+# It is NOT `simplex`: the firewall lets exactly this uid reach Apple, and a shared uid
+# would open that hole for smp-server and xftp-server too.
+id -u simplex-ntf >/dev/null 2>&1 || run useradd --system --no-create-home --shell /usr/sbin/nologin simplex-ntf
 
 # hearthd has to READ relay state that the relays own:
 #   * /etc/opt/simplex/fingerprint       -> goes into every client bundle
@@ -42,11 +51,14 @@ id -u hearth  >/dev/null 2>&1 || run useradd --system --no-create-home --shell /
 # Without this the bundle endpoint and the backup both fail every single time, with
 # nothing but EACCES to explain it.
 run usermod -aG simplex hearth
+# Same for the push server's CA and database dump: archived by the nightly backup.
+run usermod -aG simplex-ntf hearth
 
 say "2. directories (ТЗ §10.1: everything the node owns lives in these)"
 # 0750 with group `simplex`: the relays write, hearthd (in that group) reads.
 run install -d -m 0750 -o simplex -g simplex /etc/opt/simplex /var/opt/simplex
 run install -d -m 0750 -o simplex -g simplex /etc/opt/simplex-xftp /var/opt/simplex-xftp
+run install -d -m 0750 -o simplex-ntf -g simplex-ntf /etc/opt/simplex-ntf /var/opt/simplex-ntf
 # 0751 on /etc/hearth, not 0750: `turnserver` has to traverse it to reach its config in
 # /etc/hearth/turn. `x` without `r` permits exactly that — walking a known path — and
 # still hides the listing; every file inside keeps its own mode.
@@ -67,6 +79,9 @@ if id -u turnserver >/dev/null 2>&1; then
 else
     warn "no `turnserver` user yet — install coturn, then re-run this script (or fix-permissions.sh)"
 fi
+# systemd's credential store: the APNs key lives here, 0600 root:root, outside every
+# backup path, and reaches ntf-server only through LoadCredential (docs/runbook-ntf.md).
+run install -d -m 0700 -o root -g root /etc/credstore
 
 say "3. binaries"
 for binary in hearthd hearthctl; do
@@ -81,6 +96,9 @@ done
 for binary in smp-server xftp-server; do
     [[ -x "/usr/local/bin/$binary" ]] || warn "/usr/local/bin/$binary is missing (copy the verified upstream release, ТЗ §6.1)"
 done
+# Optional: only nodes that serve push to the iOS app need it.
+[[ -x /usr/local/bin/ntf-server ]] \
+    || echo "   /usr/local/bin/ntf-server not installed — fine unless you enable [ntf] (docs/runbook-ntf.md)"
 # The local alert channel referenced by alerts.beeper in hearthd.toml. Without it a
 # critical alert has nowhere to go on a node that has no Gotify yet.
 run install -m 0755 "$HERE/hearth-beep" /usr/local/sbin/hearth-beep
@@ -113,6 +131,11 @@ say "6. systemd units"
 run install -m 0644 "$HERE/systemd/hearthd.service" /etc/systemd/system/hearthd.service
 run install -m 0644 "$HERE/systemd/smp-server.service" /etc/systemd/system/smp-server.service
 run install -m 0644 "$HERE/systemd/xftp-server.service" /etc/systemd/system/xftp-server.service
+# Installed everywhere, enabled only where [ntf] is (docs/runbook-ntf.md). An installed
+# but disabled unit costs nothing and keeps the node's units in step with the repo.
+run install -m 0644 "$HERE/systemd/ntf-server.service" /etc/systemd/system/ntf-server.service
+run install -m 0644 "$HERE/systemd/ntf-db-dump.service" /etc/systemd/system/ntf-db-dump.service
+run install -m 0644 "$HERE/systemd/ntf-db-dump.timer" /etc/systemd/system/ntf-db-dump.timer
 run install -d -m 0755 /etc/systemd/system/coturn.service.d
 run install -m 0644 "$HERE/systemd/coturn.service.d-hearth.conf" /etc/systemd/system/coturn.service.d/hearth.conf
 # /run is tmpfs and the Debian package creates neither directory. Without them systemd
@@ -127,12 +150,13 @@ say "7. polkit: let hearthd manage the relay units"
 # hearthd runs unprivileged, and polkit rejects `systemctl restart/stop` of system
 # units from a non-root user by default. Without this rule the supervisor, the TURN
 # rotation, the migration export and the integrity stop all fail silently.
-# The rule lists exactly three units — nothing else, and no enable/disable.
+# The rule lists exactly the relay units and coturn — nothing else, and no enable/disable.
 run install -d -m 0755 /etc/polkit-1/rules.d
 run install -m 0644 "$HERE/polkit/49-hearthd.rules" /etc/polkit-1/rules.d/49-hearthd.rules
 
 say "8. host hardening (ТЗ §5.2, §11)"
-# No resolver: the node resolves nothing, so nothing can be poisoned.
+# No resolver: the node resolves nothing, so nothing can be poisoned. (ntf-server, when
+# enabled, gets a private resolv.conf of its own — the host still has none.)
 if systemctl is-enabled systemd-resolved >/dev/null 2>&1; then
     warn "systemd-resolved is enabled — disable it (ТЗ §5.2)"
 fi
@@ -177,11 +201,15 @@ cat <<'NEXT'
      They now check ownership, not just file modes — the mismatch that used to break
      bundles and backups silently.
 
+  7. Optional — push server for the iOS app (ADR 0016): docs/runbook-ntf.md.
+     It adds PostgreSQL, a public port and the relay stack's first way out (to Apple);
+     skip it unless the iOS app is in use.
+
 == not installed by this script (host-specific, decide per node)
 
   * deploy/systemd/var-opt-*.mount — put the relay data on a roomy partition. On a
     host where /var is small this is not optional: the store log grows without bound.
-    NB the xftp unit deploys under its systemd-escaped name, see the file header.
+    NB the xftp and ntf units deploy under their systemd-escaped names, see the headers.
   * /etc/nftables.conf — deploy/nftables/nftables.conf. The Debian default starts with
     `flush ruleset`, which deletes Docker's tables too; on a host that runs containers
     that costs them the network on every boot, with nothing in any log.

@@ -1,0 +1,29 @@
+[Unit]
+Description=hearth: dump the ntf-server database next to its data, for the nightly backup
+Documentation=file:///srv/hearth/src/docs/runbook-ntf.md
+# ntf-server keeps device tokens and subscriptions in PostgreSQL (simplexmq v7.0.1 has no
+# other store for it). hearthd's backup archives directories, and a live database
+# directory is not a consistent copy — so a dump lands in /var/opt/simplex-ntf, which is
+# already in backup.paths, shortly before the backup runs.
+After=postgresql.service
+Requires=postgresql.service
+ConditionPathExists=/etc/opt/simplex-ntf/ntf-server.ini
+
+[Service]
+Type=oneshot
+User=simplex-ntf
+Group=simplex-ntf
+# 0640: hearthd (group simplex-ntf) must read it to archive it; nobody else.
+UMask=0027
+# Write, then rename: the backup must never pick up half a dump.
+ExecStart=/usr/bin/pg_dump --format=custom --file=/var/opt/simplex-ntf/ntf-db.dump.tmp ntf_server_store
+ExecStart=/bin/mv -f /var/opt/simplex-ntf/ntf-db.dump.tmp /var/opt/simplex-ntf/ntf-db.dump
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ReadWritePaths=/var/opt/simplex-ntf
+RestrictAddressFamilies=AF_UNIX
+SyslogIdentifier=ntf-db-dump

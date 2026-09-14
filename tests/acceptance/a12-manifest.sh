@@ -8,13 +8,16 @@ MANIFEST="${MANIFEST:-/etc/hearth/manifest.toml}"
 status=0
 
 # Плейсхолдеры из поставки — не «почти готово», а незавершённая установка.
-if grep -q '0000000000000000000000000000000000000000000000000000000000000000' "$MANIFEST"; then
+# Закомментированные строки не в счёт: так поставляется запись ntf-server, нужная только
+# узлу с push-сервером (ADR 0016). Раскомментировали — и нули снова ловятся.
+ACTIVE="$(grep -v '^[[:space:]]*#' "$MANIFEST")"
+if grep -q '0000000000000000000000000000000000000000000000000000000000000000' <<<"$ACTIVE"; then
     echo "  !! в манифесте остались нулевые плейсхолдеры sha256."
     echo "     Узел не может доказать, что запущено. Заполните:"
     echo "       hearthctl manifest pin --name smp-server --version <tag>"
     status=1
 fi
-if grep -q 'REPLACE-WITH-PINNED-TAG' "$MANIFEST"; then
+if grep -q 'REPLACE-WITH-PINNED-TAG' <<<"$ACTIVE"; then
     echo "  !! в манифесте не проставлены теги upstream (ТЗ §6.1: latest запрещён)"
     status=1
 fi

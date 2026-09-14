@@ -1,0 +1,12 @@
+[Unit]
+Description=hearth: daily ntf-server database dump, before the nightly backup
+Documentation=file:///srv/hearth/src/docs/runbook-ntf.md
+
+[Timer]
+# backup.hour_utc = 3 in the reference config: dump twenty minutes earlier. Move both
+# together if you move one.
+OnCalendar=*-*-* 02:40:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

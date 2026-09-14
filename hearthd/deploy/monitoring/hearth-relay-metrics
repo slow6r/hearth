@@ -33,6 +33,8 @@ import tempfile
 SOURCES = {
     "/var/opt/simplex/smp-server-metrics.txt": "smp-server.prom",
     "/var/opt/simplex-xftp/xftp-server-metrics.txt": "xftp-server.prom",
+    # Push-сервер (ADR 0016) есть не на каждом узле: нет файла — источник пропускается.
+    "/var/opt/simplex-ntf/ntf-server-metrics.txt": "ntf-server.prom",
 }
 OUT_DIR = "/var/lib/node_exporter/textfile"
 

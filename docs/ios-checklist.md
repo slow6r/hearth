@@ -61,8 +61,10 @@ turn:<timestamp>:<credential>@<node.host>:3478
 
 ### 6. Приватность и уведомления
 - Private message routing: **Always**;
-- Notifications: **Instant** (Push/Periodic не использовать — сервера уведомлений в
-  контуре нет);
+- Notifications: **No push server** (Off). На iOS и Instant, и Periodic работают через
+  push-сервер SimpleX — третью сторону, которой в контуре нет. Цена: о новом сообщении
+  узнаёте, только открыв приложение. Свой push-сервер — только у приложения Hearth
+  ([ADR 0016](adr/0016-own-push-server.md));
 - Исчезающие сообщения — включить для новых контактов (7 дней), как на Android;
 - Экранная блокировка приложения (Face ID / пароль) — включить;
 - iCloud Backup для приложения — **выключить** (аналог `allowBackup=false`, ТЗ §3.1).
