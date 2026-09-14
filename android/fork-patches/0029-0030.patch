@@ -1,0 +1,284 @@
+From c2572ba343cabb1233d6c36e5e4d2f98de81174b Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Mon, 14 Sep 2026 18:02:19 +0300
+Subject: [PATCH 29/29] =?UTF-8?q?0030:=20=C2=AB=D1=87=D0=B0=D1=82=20=D0=B7?=
+ =?UTF-8?q?=D0=B0=D0=BF=D1=83=D1=89=D0=B5=D0=BD=C2=BB=20=D0=BF=D0=BE=D0=BA?=
+ =?UTF-8?q?=D0=B0=D0=B7=D1=8B=D0=B2=D0=B0=D0=B5=D1=82=D1=81=D1=8F=20=D1=82?=
+ =?UTF-8?q?=D0=BE=D0=BB=D1=8C=D0=BA=D0=BE=20=D0=BA=D0=BE=D0=B3=D0=B4=D0=B0?=
+ =?UTF-8?q?=20=D0=BE=D0=BD=20=D0=B4=D0=B5=D0=B9=D1=81=D1=82=D0=B2=D0=B8?=
+ =?UTF-8?q?=D1=82=D0=B5=D0=BB=D1=8C=D0=BD=D0=BE=20=D0=B7=D0=B0=D0=BF=D1=83?=
+ =?UTF-8?q?=D1=89=D0=B5=D0=BD?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+По жалобе: после переустановки приложения чат не работал, хотя в настройках стояло
+«чат запущен»; помогало только вручную выключить и включить обратно.
+
+Три дефекта, которые складывались в этот симптом.
+
+1. Третье состояние читалось как «работает». `chatRunning` — это `Boolean?`:
+   null означает «ядро ни разу не запускали в этом процессе». Экраны написаны как
+   `chatRunning.value == false`, и null уходил в ветку «не остановлен», то есть
+   «работает». На свежей установке человек видел галочку у мёртвого ядра.
+   Сам upstream непоследователен: ChatListView:413 и NtfManager:121 проверяют null
+   отдельно, ChatListView:660 пишет `!= true`, а эти места — `== false`.
+
+2. Флаг поднимался раньше реального старта. В startChat `chatRunning = true` стояло
+   ДО apiStartChat(), а catch его не сбрасывал: любая осечка оставляла пометку
+   «работает». Теперь флаг выставляется после apiStartChat и сбрасывается в catch.
+   Проверено, что это безопасно: startReceiver крутится по isActive и chatCtrl,
+   флаг ему не нужен, иначе перенос остановил бы приём сообщений.
+
+3. Падение старта обрывало онбординг. В createProfileInNoProfileSetup вызов
+   startChat шёл без try/catch, и исключение отменяло применение bundle и смену
+   стадии: человек оставался с созданным профилем в неработающем приложении и без
+   следа на экране. Теперь неудача пишется в журнал и не отменяет остального — ниже
+   всё равно проверяется, легли ли настройки узла, и при неудаче экран узла
+   показывается заново.
+
+Правило вынесено в HearthChatState и покрыто тестом: `== false` принадлежит upstream
+и вернётся на следующем ребейзе, а тест назовёт, чего именно лишились.
+
+:common:desktopTest — 4 новых теста, все прежние Hearth-тесты целы, ошибок
+компиляции нет.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rFCpGgTKkXuYYaCC7Zsew
+---
+ .../kotlin/chat/hearth/HearthChatState.kt     | 45 ++++++++++++++++
+ .../chat/simplex/common/model/SimpleXAPI.kt   | 11 +++-
+ .../chat/simplex/common/views/WelcomeView.kt  | 10 +++-
+ .../common/views/database/DatabaseView.kt     |  4 +-
+ .../common/views/usersettings/SettingsView.kt |  4 +-
+ .../kotlin/chat/hearth/HearthChatStateTest.kt | 52 +++++++++++++++++++
+ apps/multiplatform/gradle.properties          |  4 +-
+ 7 files changed, 122 insertions(+), 8 deletions(-)
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthChatState.kt
+ create mode 100644 apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthChatStateTest.kt
+
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthChatState.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthChatState.kt
+new file mode 100644
+index 0000000..0933022
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthChatState.kt
+@@ -0,0 +1,45 @@
++package chat.hearth
++
++/**
++ * Работает ли чат — из трёх состояний, а не из двух.
++ *
++ * # Зачем отдельное место
++ *
++ * `chatModel.chatRunning` — это `Boolean?`, и значений у него ТРИ:
++ *
++ *   * `null`  — ядро ещё ни разу не запускали в этом процессе;
++ *   * `true`  — запущено;
++ *   * `false` — остановлено человеком.
++ *
++ * Upstream местами пишет `chatRunning.value == false`, и тогда `null` молча
++ * попадает в ветку «работает»: сравнение неравно, значит «не остановлен». На свежей
++ * установке это выглядело так, что в настройках стоит «чат запущен», а на самом деле
++ * ядро не стартовало — человек видел галочку и не понимал, почему ничего не ходит.
++ * Лечилось только ручным выключить/включить, то есть случайным попаданием.
++ *
++ * Тот же upstream в других местах пишет правильно (`== true`, `!= true`) и даже
++ * проверяет `null` отдельным экраном «загрузка чатов». То есть это не соглашение, а
++ * расхождение внутри одного кода — и оно вернётся при следующем ребейзе на новый тег.
++ *
++ * Поэтому правило вынесено сюда и покрыто тестом: если ребейз принесёт `== false`
++ * обратно, конфликт будет виден на вызове, а тест скажет, чего именно лишились.
++ *
++ * # Правило
++ *
++ * Показывать «работает» только тогда, когда это ТОЧНО так. Неизвестность
++ * приравнивается к «не работает»: неверно сказать человеку, что всё в порядке,
++ * когда мы не знаем, хуже, чем лишний раз показать «остановлен».
++ */
++object HearthChatState {
++
++  /** Ядро точно запущено. `null` — нет: мы этого не знаем. */
++  fun isRunning(flag: Boolean?): Boolean = flag == true
++
++  /**
++   * Ядро не работает — остановлено или ещё не запускалось.
++   *
++   * Именно это значение показывают экраны настроек и им же гасят действия, которые
++   * без работающего ядра всё равно не выполнятся.
++   */
++  fun isStopped(flag: Boolean?): Boolean = flag != true
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+index e977d25..4d6d256 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/SimpleXAPI.kt
+@@ -612,7 +612,10 @@ object ChatController {
+         chatModel.localUserCreated.value = true
+         getUserChatData(null)
+         appPrefs.chatLastStart.set(Clock.System.now())
+-        chatModel.chatRunning.value = true
++        // hearth: chatRunning здесь НЕ выставляется. Раньше флаг поднимался до
++        // apiStartChat(), и если старт падал, интерфейс продолжал показывать
++        // «чат запущен» у неработающего ядра. Приёмнику флаг не нужен: его цикл
++        // крутится по isActive и chatCtrl (см. startReceiver).
+         startReceiver()
+         setLocalDeviceName(appPrefs.deviceNameForRemoteAccess.get()!!)
+         if (appPreferences.onboardingStage.get() == OnboardingStage.OnboardingComplete && !chatModel.controller.appPrefs.privacyDeliveryReceiptsSet.get()) {
+@@ -627,6 +630,8 @@ object ChatController {
+         Log.d(TAG, "startChat: running")
+       }
+       apiStartChat()
++      // hearth: только теперь ядро действительно работает.
++      chatModel.chatRunning.value = true
+       appPrefs.chatStopped.set(false)
+       // hearth: приведение к своему узлу — ЗДЕСЬ, а не в одной ветке запуска.
+       // Раньше цепочка стояла в Core.kt и выполнялась только при обычном старте;
+@@ -636,6 +641,10 @@ object ChatController {
+       chat.hearth.hearthAfterChatStarted()
+     } catch (e: Throwable) {
+       Log.e(TAG, "failed starting chat $e")
++      // hearth: без этого неудачный старт остаётся помеченным как «работает» —
++      // ровно то, из-за чего на свежей установке галочка показывала запущенный
++      // чат при мёртвом ядре, и лечилось только ручным выключить/включить.
++      chatModel.chatRunning.value = false
+       throw e
+     }
+   }
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/WelcomeView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/WelcomeView.kt
+index 05a6a1a..8c06a48 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/WelcomeView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/WelcomeView.kt
+@@ -362,7 +362,15 @@ fun createProfileInNoProfileSetup(displayName: String, image: String? = null, cl
+     // hearth (ADR 0011): здесь впервые появляется пользователь, а значит впервые можно
+     // записать серверы — apiSetUserServers требует userId. Bundle, принятый на экране
+     // узла, до этого момента лежал отложенным.
+-    controller.startChat(user)
++    // hearth: старт чата не должен обрывать остальное. Раньше исключение отсюда
++    // улетало наружу, и не выполнялось НИЧЕГО из следующего: bundle не применялся,
++    // серверы оставались чужими, стадия онбординга не переключалась. Человек
++    // оставался с созданным профилем в приложении, которое не работает, и без
++    // единого следа на экране. Неудачу записываем и идём дальше: ниже всё равно
++    // проверяется, легли ли настройки узла, и при неудаче экран узла показывается
++    // заново — это состояние, из которого можно выбраться.
++    runCatching { controller.startChat(user) }
++      .onFailure { e -> Log.e(TAG, "hearth: чат не запустился при создании профиля: ${e.stackTraceToString()}") }
+     val nodeReady = chat.hearth.hearthApplyPendingBundle()
+     chat.hearth.hearthEnforceOwnServers()
+     chat.hearth.hearthRemovePresetContactCards()
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/database/DatabaseView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/database/DatabaseView.kt
+index 4b8c1a3..de3206b 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/database/DatabaseView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/database/DatabaseView.kt
+@@ -44,7 +44,7 @@ fun DatabaseView() {
+   val prefs = m.controller.appPrefs
+   val useKeychain = remember { mutableStateOf(prefs.storeDBPassphrase.get()) }
+   val chatLastStart = remember { mutableStateOf(prefs.chatLastStart.get()) }
+-  val stopped = remember { m.chatRunning }.value == false
++  val stopped = chat.hearth.HearthChatState.isStopped(remember { m.chatRunning }.value)
+   val appFilesCountAndSize = remember { mutableStateOf(directoryFileCountAndSize(appFilesDir.absolutePath)) }
+   val chatItemTTL = remember { mutableStateOf(m.chatItemTTL.value) }
+   Box(
+@@ -186,7 +186,7 @@ fun DatabaseManagementView() {
+   val useKeychain = remember { mutableStateOf(prefs.storeDBPassphrase.get()) }
+   val chatLastStart = remember { mutableStateOf(prefs.chatLastStart.get()) }
+   val chatArchiveFile = remember { mutableStateOf<String?>(null) }
+-  val stopped = remember { m.chatRunning }.value == false
++  val stopped = chat.hearth.HearthChatState.isStopped(remember { m.chatRunning }.value)
+   val saveArchiveLauncher = rememberFileChooserLauncher(false) { to: URI? ->
+     val archive = chatArchiveFile.value
+     if (archive != null && to != null) {
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt
+index c6a10a0..0a139a8 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt
+@@ -38,7 +38,7 @@ import chat.simplex.res.MR
+ 
+ @Composable
+ fun SettingsView(chatModel: ChatModel, setPerformLA: (Boolean) -> Unit, close: () -> Unit) {
+-  val stopped = chatModel.chatRunning.value == false
++  val stopped = chat.hearth.HearthChatState.isStopped(chatModel.chatRunning.value)
+   val showSettingsModal: (@Composable (ChatModel) -> Unit) -> (() -> Unit) = { modalView -> { ModalManager.start.showModal(settings = true, cardScreen = true) { modalView(chatModel) } } }
+   SettingsLayout(
+     stopped,
+@@ -134,7 +134,7 @@ fun HelpAndSupportView(
+   showCustomModal: (@Composable ModalData.(ChatModel, () -> Unit) -> Unit) -> (() -> Unit),
+ ) {
+   val uriHandler = LocalUriHandler.current
+-  val stopped = chatModel.chatRunning.value == false
++  val stopped = chat.hearth.HearthChatState.isStopped(chatModel.chatRunning.value)
+   val userDisplayName = chatModel.currentUser.value?.displayName ?: ""
+   ColumnWithScrollBar {
+     AppBarTitle(stringResource(MR.strings.help_and_support))
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthChatStateTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthChatStateTest.kt
+new file mode 100644
+index 0000000..7d373d5
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthChatStateTest.kt
+@@ -0,0 +1,52 @@
++package chat.hearth
++
++import kotlin.test.Test
++import kotlin.test.assertFalse
++import kotlin.test.assertTrue
++
++/**
++ * «Чат запущен» показывается только тогда, когда это правда.
++ *
++ * Тест написан по живой жалобе: человек удалил приложение, поставил заново, и чат не
++ * работал — при том что в настройках стояло «чат запущен». Помогало только вручную
++ * выключить и включить обратно.
++ *
++ * Причина — третье состояние. `chatRunning` это `Boolean?`, и `null` означает «ядро
++ * ещё ни разу не запускали». Сравнение `== false`, которым это место было написано в
++ * upstream, отправляет `null` в ветку «работает»: не равно `false` — значит не
++ * остановлен. Человеку показывали галочку у мёртвого ядра.
++ *
++ * Здесь проверяются все три значения поимённо. Если ребейз на новый тег upstream
++ * вернёт `== false`, тест назовёт ровно то, что сломалось.
++ */
++class HearthChatStateTest {
++
++  @Test
++  fun null_is_not_running() {
++    // Самый важный случай: свежая установка, ядро ещё не стартовало.
++    assertFalse(HearthChatState.isRunning(null), "null — это «не знаем», а не «работает»")
++    assertTrue(HearthChatState.isStopped(null), "неизвестность показываем как «остановлен»")
++  }
++
++  @Test
++  fun started_is_running() {
++    assertTrue(HearthChatState.isRunning(true))
++    assertFalse(HearthChatState.isStopped(true))
++  }
++
++  @Test
++  fun stopped_by_hand_is_not_running() {
++    assertFalse(HearthChatState.isRunning(false))
++    assertTrue(HearthChatState.isStopped(false))
++  }
++
++  @Test
++  fun running_and_stopped_never_agree() {
++    for (flag in listOf(null, true, false)) {
++      assertTrue(
++        HearthChatState.isRunning(flag) != HearthChatState.isStopped(flag),
++        "состояние $flag описано противоречиво"
++      )
++    }
++  }
++}
+diff --git a/apps/multiplatform/gradle.properties b/apps/multiplatform/gradle.properties
+index a37efc8..89e4dd0 100644
+--- a/apps/multiplatform/gradle.properties
++++ b/apps/multiplatform/gradle.properties
+@@ -26,8 +26,8 @@ kotlin.jvm.target=11
+ 
+ # hearth: своя нумерация поверх тега upstream. versionCode обязан расти
+ # монотонно — по нему приложение решает, новее ли сборка на узле.
+-android.version_name=7.0.1-h18
+-android.version_code=389
++android.version_name=7.0.1-h19
++android.version_code=390
+ 
+ desktop.version_name=7.0.1
+ desktop.version_code=157
