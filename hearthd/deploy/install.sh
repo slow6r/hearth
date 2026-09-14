@@ -82,6 +82,13 @@ fi
 # systemd's credential store: the APNs key lives here, 0600 root:root, outside every
 # backup path, and reaches ntf-server only through LoadCredential (docs/runbook-ntf.md).
 run install -d -m 0700 -o root -g root /etc/credstore
+# Каталог обновлений device_api (updates_dir по умолчанию). РОДИТЕЛЬ — root:root, и это
+# не косметика: /srv лежит вне /etc и /var, а на fels этим каталогом владел обычный
+# пользователь (fels:fels). Любой, кто вошёл под ним, мог подменить APK, который узел
+# раздаёт телефонам, — обновление подписано, но каталог отдавал бы чужой файл.
+# Сам updates — hearth:hearth: демон туда пишет.
+run install -d -m 0755 -o root   -g root   /srv/hearth
+run install -d -m 0750 -o hearth -g hearth /srv/hearth/updates
 
 say "3. binaries"
 for binary in hearthd hearthctl; do
@@ -163,6 +170,12 @@ fi
 # No unattended upgrades: the node has no egress, and a surprise restart is an outage.
 if systemctl is-enabled unattended-upgrades >/dev/null 2>&1; then
     warn "unattended-upgrades is enabled — disable it (ТЗ §11)"
+fi
+# Парольный вход по ssh. У всех, кому нужен узел, есть ключи; пароль — лишний способ
+# подобрать вход в машину, которая держит релеи семьи. Проверяем действующую настройку
+# (sshd -T), а не файл: значение может прийти из любого файла в sshd_config.d.
+if command -v sshd >/dev/null 2>&1 && sshd -T 2>/dev/null | grep -qi '^passwordauthentication yes'; then
+    warn 'ssh: PasswordAuthentication yes — закрыть (/etc/ssh/sshd_config.d/99-server.conf) и systemctl reload ssh'
 fi
 # Sleep would silently stop message delivery.
 run systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
