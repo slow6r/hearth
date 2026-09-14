@@ -49,15 +49,26 @@ HELP
     exit 1
 fi
 
-echo "== 5. Проверка размера диффа (цель ТЗ §8.1: < 500 строк, 0 в Haskell)"
+echo "== 5. Проверка размера диффа (цель ТЗ §8.1: < 500 строк, Haskell — только по списку)"
 git diff "$TAG..HEAD" --stat | tail -1
-HASKELL_CHANGES="$(git diff "$TAG..HEAD" --name-only | grep -c '\.hs$' || true)"
-if [[ "$HASKELL_CHANGES" -gt 0 ]]; then
-    echo "!! В диффе $HASKELL_CHANGES Haskell-файлов. Это блокер ревью (ТЗ §2.2, §8.3)." >&2
-    git diff "$TAG..HEAD" --name-only | grep '\.hs$' >&2
+# Правка Haskell по-прежнему блокер, кроме файлов из списка. Каждый файл в нём
+# появился по ADR (сейчас один — адрес push-сервера для iOS, docs/adr/0016). Файл,
+# которого в списке нет, останавливает ребейз, как и раньше.
+ALLOWLIST="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/ios/patches/haskell-allowlist.txt"
+UNLISTED="$(git diff "$TAG..HEAD" --name-only | grep '\.hs$' \
+    | grep -vxF -f <(grep -v '^#' "$ALLOWLIST" | sed '/^$/d') || true)"
+if [[ -n "$UNLISTED" ]]; then
+    echo "!! Haskell-файлы вне $ALLOWLIST. Это блокер ревью (ТЗ §2.2, §8.3):" >&2
+    printf '%s\n' "$UNLISTED" >&2
     exit 1
 fi
-echo "   Haskell не тронут."
+LISTED="$(git diff "$TAG..HEAD" --name-only | grep '\.hs$' || true)"
+if [[ -n "$LISTED" ]]; then
+    echo "   Haskell тронут только по списку — дифф прочитать глазами:"
+    git diff "$TAG..HEAD" -- $LISTED | sed 's/^/     /'
+else
+    echo "   Haskell не тронут."
+fi
 
 TOTAL="$(git diff "$TAG..HEAD" --numstat | awk '{added+=$1; removed+=$2} END {print added+removed}')"
 echo "   Всего изменённых строк: ${TOTAL:-0} (цель < 500)"

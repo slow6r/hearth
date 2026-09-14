@@ -37,6 +37,14 @@
 | [0008](adr/0008-multi-purpose-host.md) | **Многоцелевой узел: egress по пользователям** |
 | [0009](adr/0009-no-full-disk-encryption.md) | Узел без LUKS: принятое отступление |
 | [0010](adr/0010-device-api.md) | **Device API: публичный сервис узла для самих телефонов** |
+| [0011](adr/0011-baked-invite.md) | Приглашение, вшитое в сборку (заменено 0012) |
+| [0012](adr/0012-access-codes.md) | **Код доступа вместо вшитого приглашения** |
+| [0013](adr/0013-node-mode.md) | Режим узла: запрет, переживающий перезапуск |
+| [0014](adr/0014-signed-update-manifest.md) | Манифест обновлений подписан ключом, которого нет на узле |
+| [0015](adr/0015-ios-client-app-store.md) | **Свой iOS-клиент в App Store по ссылке** |
+| [0016](adr/0016-own-push-server.md) | **Свой push-сервер: APNs и правка Haskell** |
+
+iOS-клиент: [../ios/README.md](../ios/README.md).
 
 ## Как читать код
 

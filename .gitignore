@@ -39,6 +39,7 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+__pycache__/
 
 # --- Форк upstream и артефакты сборки ---
 # Форк подключается как submodule (android/README.md) и в этот репозиторий не

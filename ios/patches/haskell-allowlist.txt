@@ -1,0 +1,5 @@
+# Haskell-файлы форка, правка которых разрешена (ТЗ §2.2 — остальные блокер ревью).
+# Одна строка — один путь от корня simplex-chat. Каждая запись ссылается на ADR.
+#
+# docs/adr/0016: адрес push-сервера берётся из HEARTH_NTF_SERVERS, а не из списка SimpleX.
+src/Simplex/Chat/Library/Commands.hs

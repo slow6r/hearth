@@ -1,0 +1,14 @@
+# Пинованный upstream iOS-клиента (ТЗ §6.1, §8.1). `latest` запрещён.
+#
+# Тот же форк, что у Android: simplex-chat — монорепозиторий, apps/ios и
+# apps/multiplatform живут в одном дереве и в одной ветке hearth/<tag>
+# (android/FORK.md). Значения обязаны совпадать с android/UPSTREAM.
+
+simplex_chat_tag=v7.0.1
+
+# Ядро собирается из исходников этого же тега (docs/adr/0015). simplexmq для ядра
+# берётся не по тегу, а по коммиту из cabal.project форка:
+simplexmq_core_commit=efaad8e73436d60f5052f07dda6b71151ad5039b
+
+# ntf-server на узле — из тега simplexmq, как smp/xftp (relays/ntf, docs/adr/0016).
+simplexmq_tag=v7.0.1
