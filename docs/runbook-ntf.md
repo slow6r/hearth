@@ -147,8 +147,16 @@ ports = [443]
 
 ```bash
 hearthd --config /etc/hearth/hearthd.toml check
-nft -c -f /etc/hearth/nftables/hearth.nft && nft -f /etc/hearth/nftables/hearth.nft
+nft -c -f /etc/nftables.conf && nft -f /etc/nftables.conf
 ```
+
+Правила на живом узле перезагружаются **через `/etc/nftables.conf`**, а не через
+`hearth.nft` напрямую. В `hearth.nft` нет удаления таблицы, и повторный `nft -f` по нему
+допишет цепочки и правила второй раз. `nftables.conf` из `deploy/nftables/` делает
+`table` → `delete table` → `include` одной транзакцией: таблица заменяется целиком,
+таблицы Docker не трогаются. Перед загрузкой убедиться, что на узле `nftables.conf`
+именно такой (без `flush ruleset`), и грузить под таймером автоотката — как в
+`docs/deploy-fels-2026-09-09.md`, Э4. Замена таблицы обнуляет её счётчики.
 
 Роутер: проброс **2053/tcp** на узел (runbook-router-udm.md).
 
