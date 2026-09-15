@@ -1,0 +1,591 @@
+From 644ae010917675622040e5766b4a62c48f928b1f Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Tue, 15 Sep 2026 21:17:04 +0300
+Subject: [PATCH 31/31] =?UTF-8?q?0032:=20=D1=81=D1=82=D0=B8=D0=BA=D0=B5?=
+ =?UTF-8?q?=D1=80=D1=8B=20=E2=80=94=20=D0=BD=D0=B0=D0=B1=D0=BE=D1=80=D1=8B?=
+ =?UTF-8?q?=20=D1=81=20=D1=83=D0=B7=D0=BB=D0=B0,=20=D0=BF=D0=B0=D0=BD?=
+ =?UTF-8?q?=D0=B5=D0=BB=D1=8C=20=D0=B2=D1=8B=D0=B1=D0=BE=D1=80=D0=B0,=20?=
+ =?UTF-8?q?=D0=BE=D1=82=D0=BF=D1=80=D0=B0=D0=B2=D0=BA=D0=B0=20=D0=BA=D0=B0?=
+ =?UTF-8?q?=D0=BA=20=D0=BA=D0=B0=D1=80=D1=82=D0=B8=D0=BD=D0=BA=D0=B0;=20?=
+ =?UTF-8?q?=D0=B2=D0=B5=D1=80=D1=81=D0=B8=D1=8F=20h21?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Наборы импортируются из Telegram на рабочей станции (stickers/import-telegram.py) и
+лежат на узле в /srv/hearth/stickers; узел отдаёт их через device API по токену
+устройства (маршруты /stickers/index.json и /stickers/<набор>/<файл>).
+
+Клиент:
+- HearthStickers (commonMain): модели индекса и набора, разбор с белым списком имён —
+  тем же, что на узле; всё, что не прошло, отбрасывается ещё при разборе. Тесты.
+- HearthStickerStore (androidMain): кэш в filesDir/hearth-stickers, индекс не чаще раза
+  в час, каждый файл сверяется с sha256 из pack.json при скачивании и при повторном
+  открытии.
+- HearthStickerPicker (androidMain): панель с вкладками по наборам и сеткой 4 в ряд.
+  Выбранный стикер ложится в превью как картинка из галереи: файл WEBP как есть
+  (UploadContent.AnimatedImage — «не перекодировать», так уходят GIF, прозрачность
+  цела) и PNG-превью через resizeImageToStrSize, который сам берёт PNG при
+  прозрачности. URI — content:// через FileProvider: имя файла upstream читает через
+  contentResolver, для file:// получил бы null и назвал стикер .gif.
+- AttachmentOption.Sticker и пятая кнопка на панели вложений (ic_hearth_sticker).
+- Транспорт: fetchText/fetchBytes по любому пути device API с потолком размера.
+
+Только статические WEBP: анимированные (TGS) и видео (WEBM) импорт пропускает —
+проигрывателя для них в приложении нет. Получатель видит стикер как обычную картинку,
+поэтому старые сборки его тоже покажут.
+
+Версия 7.0.1-h21 (392).
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rFCpGgTKkXuYYaCC7Zsew
+---
+ .../hearth/HearthStickerPicker.android.kt     | 159 ++++++++++++++++++
+ .../chat/hearth/HearthStickerStore.android.kt |  65 +++++++
+ .../chat/hearth/HearthUpdate.android.kt       |  41 +++++
+ .../common/views/chat/ComposeView.android.kt  |  11 ++
+ .../helpers/ChooseAttachmentView.android.kt   |   5 +
+ .../kotlin/chat/hearth/HearthStickers.kt      |  74 ++++++++
+ .../views/helpers/ChooseAttachmentView.kt     |   2 +
+ .../resources/MR/images/ic_hearth_sticker.svg |   1 +
+ .../kotlin/chat/hearth/HearthStickersTest.kt  |  57 +++++++
+ .../common/views/chat/ComposeView.desktop.kt  |   2 +
+ apps/multiplatform/gradle.properties          |   4 +-
+ 11 files changed, 419 insertions(+), 2 deletions(-)
+ create mode 100644 apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthStickerPicker.android.kt
+ create mode 100644 apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthStickerStore.android.kt
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthStickers.kt
+ create mode 100644 apps/multiplatform/common/src/commonMain/resources/MR/images/ic_hearth_sticker.svg
+ create mode 100644 apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthStickersTest.kt
+
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthStickerPicker.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthStickerPicker.android.kt
+new file mode 100644
+index 0000000..d2837e1
+--- /dev/null
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthStickerPicker.android.kt
+@@ -0,0 +1,159 @@
++package chat.hearth
++
++import android.content.Context
++import android.graphics.BitmapFactory
++import androidx.compose.foundation.Image
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.horizontalScroll
++import androidx.compose.foundation.layout.*
++import androidx.compose.foundation.lazy.grid.GridCells
++import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
++import androidx.compose.foundation.lazy.grid.items
++import androidx.compose.foundation.rememberScrollState
++import androidx.compose.material.CircularProgressIndicator
++import androidx.compose.material.MaterialTheme
++import androidx.compose.material.Text
++import androidx.compose.material.TextButton
++import androidx.compose.runtime.*
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.ImageBitmap
++import androidx.compose.ui.graphics.asImageBitmap
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.text.style.TextAlign
++import androidx.compose.ui.unit.dp
++import androidx.core.content.FileProvider
++import chat.simplex.common.helpers.toURI
++import chat.simplex.common.platform.resizeImageToStrSize
++import chat.simplex.common.ui.theme.DEFAULT_PADDING
++import chat.simplex.common.views.helpers.AppBarTitle
++import chat.simplex.common.views.helpers.ModalManager
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import java.io.File
++import java.net.URI
++
++/**
++ * Панель выбора стикера.
++ *
++ * Наборы — с узла (HearthStickerStore), сетка четыре в ряд, вкладки по наборам. Выбранный
++ * стикер уходит в превью сообщения как картинка из галереи: файл WEBP как есть и
++ * PNG-превью с прозрачностью; отправка — той же кнопкой, что у любой картинки.
++ */
++object HearthStickerPicker {
++
++  fun show(onPicked: (URI, String) -> Unit) {
++    ModalManager.end.showModalCloseable { close ->
++      HearthStickerPickerView { uri, preview ->
++        close()
++        onPicked(uri, preview)
++      }
++    }
++  }
++}
++
++@Composable
++private fun HearthStickerPickerView(onPicked: (URI, String) -> Unit) {
++  val context = LocalContext.current
++  val transport = remember { HearthAndroidUpdateTransport.fromPrefs(context) }
++  val index = remember { mutableStateOf<Result<HearthStickerIndex>?>(null) }
++  val selected = remember { mutableStateOf<String?>(null) }
++  val pack = remember { mutableStateOf<HearthStickerPack?>(null) }
++
++  LaunchedEffect(Unit) {
++    if (transport == null) return@LaunchedEffect
++    val loaded = HearthStickerStore.index(context, transport)
++    index.value = loaded
++    selected.value = loaded.getOrNull()?.packs?.firstOrNull()?.name
++  }
++  LaunchedEffect(selected.value) {
++    val name = selected.value ?: return@LaunchedEffect
++    if (transport == null) return@LaunchedEffect
++    pack.value = null
++    pack.value = HearthStickerStore.pack(context, transport, name).getOrNull()
++  }
++
++  Column(Modifier.fillMaxSize()) {
++    AppBarTitle("Стикеры")
++    val loaded = index.value
++    when {
++      transport == null -> Note("Узел не настроен: стикеры берутся с него.")
++      loaded == null -> Note("Загружаем список…")
++      loaded.isFailure -> Note("Не удалось получить список с узла: ${loaded.exceptionOrNull()?.message}")
++      loaded.getOrThrow().packs.isEmpty() -> Note("На узле пока нет наборов.")
++      else -> {
++        val packs = loaded.getOrThrow().packs
++        Row(
++          Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = DEFAULT_PADDING),
++          horizontalArrangement = Arrangement.spacedBy(8.dp),
++        ) {
++          packs.forEach { p ->
++            val active = p.name == selected.value
++            TextButton(onClick = { selected.value = p.name }) {
++              Text(
++                p.title.ifEmpty { p.name },
++                color = if (active) MaterialTheme.colors.primary else MaterialTheme.colors.onBackground,
++              )
++            }
++          }
++        }
++        val current = pack.value
++        if (current == null) {
++          Note("Загружаем набор…")
++        } else {
++          LazyVerticalGrid(
++            columns = GridCells.Fixed(4),
++            modifier = Modifier.fillMaxSize().padding(horizontal = DEFAULT_PADDING / 2),
++          ) {
++            items(current.stickers, key = { it.file }) { st ->
++              StickerCell(context, transport, current.name, st, onPicked)
++            }
++          }
++        }
++      }
++    }
++  }
++}
++
++@Composable
++private fun StickerCell(
++  context: Context,
++  transport: HearthAndroidUpdateTransport,
++  packName: String,
++  st: HearthSticker,
++  onPicked: (URI, String) -> Unit,
++) {
++  val bitmap = remember(packName, st.file) { mutableStateOf<ImageBitmap?>(null) }
++  val file = remember(packName, st.file) { mutableStateOf<File?>(null) }
++  LaunchedEffect(packName, st.file) {
++    val f = HearthStickerStore.file(context, transport, packName, st).getOrNull() ?: return@LaunchedEffect
++    val bm = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(f.absolutePath)?.asImageBitmap() } ?: return@LaunchedEffect
++    file.value = f
++    bitmap.value = bm
++  }
++  Box(
++    Modifier
++      .aspectRatio(1f)
++      .padding(6.dp)
++      .clickable(enabled = bitmap.value != null) {
++        val f = file.value ?: return@clickable
++        val bm = bitmap.value ?: return@clickable
++        // content://, а не file://: имя файла upstream берёт через contentResolver, и для
++        // file:// он вернёт null — стикер ушёл бы под именем .gif. Провайдер приложения
++        // покрывает весь filesDir (file_paths.xml, my_files).
++        val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", f).toURI()
++        // Превью — как у любой картинки; для картинки с прозрачностью upstream сам берёт PNG.
++        onPicked(uri, resizeImageToStrSize(bm, maxDataSize = 14000))
++      },
++    contentAlignment = Alignment.Center,
++  ) {
++    val bm = bitmap.value
++    if (bm != null) Image(bm, contentDescription = st.emoji, Modifier.fillMaxSize())
++    else CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
++  }
++}
++
++@Composable
++private fun Note(text: String) {
++  Text(text, Modifier.fillMaxWidth().padding(DEFAULT_PADDING), textAlign = TextAlign.Center, style = MaterialTheme.typography.body1)
++}
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthStickerStore.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthStickerStore.android.kt
+new file mode 100644
+index 0000000..57d5555
+--- /dev/null
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthStickerStore.android.kt
+@@ -0,0 +1,65 @@
++package chat.hearth
++
++import android.content.Context
++import java.io.File
++import java.security.MessageDigest
++
++/**
++ * Локальный кэш стикеров: `filesDir/hearth-stickers/<набор>/`.
++ *
++ * Индекс перечитывается с узла не чаще раза в час; описание набора и сами файлы
++ * скачиваются один раз и живут, пока живёт приложение. filesDir, а не cacheDir: систему
++ * никто не просил чистить кэш посреди открытой панели, но она вправе.
++ *
++ * Каждый файл сверяется с sha256 из `pack.json` — и при скачивании, и при повторном
++ * открытии: подменённый или недокачанный файл не уйдёт собеседнику.
++ */
++object HearthStickerStore {
++
++  private const val INDEX_TTL_MS = 60L * 60 * 1000
++
++  private fun root(context: Context): File = File(context.filesDir, "hearth-stickers").apply { mkdirs() }
++
++  suspend fun index(context: Context, transport: HearthAndroidUpdateTransport): Result<HearthStickerIndex> {
++    val cache = File(root(context), "index.json")
++    val fresh = cache.isFile && System.currentTimeMillis() - cache.lastModified() < INDEX_TTL_MS
++    if (!fresh) {
++      val fetched = transport.fetchText(HearthStickers.INDEX_PATH)
++      fetched.onSuccess { cache.writeText(it) }
++      // Узел недоступен, а старый индекс есть — показываем его: стикеры уже в кэше.
++      val error = fetched.exceptionOrNull()
++      if (error != null && !cache.isFile) return Result.failure(error)
++    }
++    return HearthStickers.parseIndex(cache.readText())
++  }
++
++  suspend fun pack(context: Context, transport: HearthAndroidUpdateTransport, name: String): Result<HearthStickerPack> {
++    if (!HearthStickers.isSafePack(name)) return Result.failure(IllegalArgumentException("недопустимое имя набора"))
++    val cache = File(File(root(context), name).apply { mkdirs() }, "pack.json")
++    if (!cache.isFile) {
++      val fetched = transport.fetchText(HearthStickers.path(name, "pack.json"))
++      fetched.onSuccess { cache.writeText(it) }
++      val error = fetched.exceptionOrNull()
++      if (error != null) return Result.failure(error)
++    }
++    return HearthStickers.parsePack(cache.readText())
++  }
++
++  suspend fun file(context: Context, transport: HearthAndroidUpdateTransport, pack: String, sticker: HearthSticker): Result<File> {
++    if (!HearthStickers.isSafePack(pack) || !HearthStickers.isSafeFile(sticker.file) || sticker.file == "pack.json") {
++      return Result.failure(IllegalArgumentException("недопустимый путь стикера"))
++    }
++    val f = File(File(root(context), pack).apply { mkdirs() }, sticker.file)
++    if (f.isFile && (sticker.sha256.isEmpty() || sha256(f.readBytes()) == sticker.sha256)) return Result.success(f)
++    val fetched = transport.fetchBytes(HearthStickers.path(pack, sticker.file))
++    val bytes = fetched.getOrElse { return Result.failure(it) }
++    if (sticker.sha256.isNotEmpty() && sha256(bytes) != sticker.sha256) {
++      return Result.failure(IllegalStateException("стикер не совпал с описанием набора"))
++    }
++    f.writeBytes(bytes)
++    return Result.success(f)
++  }
++
++  private fun sha256(bytes: ByteArray): String =
++    MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
++}
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdate.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdate.android.kt
+index eea0f51..8b0ea59 100644
+--- a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdate.android.kt
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdate.android.kt
+@@ -170,6 +170,34 @@ class HearthAndroidUpdateTransport(
+     }
+   }
+ 
++  /** Небольшой текстовый документ по пути device API — индекс и описание набора стикеров. */
++  suspend fun fetchText(path: String, limit: Int = MANIFEST_LIMIT_BYTES): Result<String> = withContext(Dispatchers.IO) {
++    runCatching {
++      val conn = open(path)
++      try {
++        val code = conn.responseCode
++        if (code != 200) throw IllegalStateException("узел ответил $code")
++        conn.inputStream.use { it.readBoundedText(limit) }
++      } finally {
++        conn.disconnect()
++      }
++    }
++  }
++
++  /** Небольшой двоичный файл по пути device API — стикер. Потолок тот же, что у узла. */
++  suspend fun fetchBytes(path: String, limit: Int = STICKER_LIMIT_BYTES): Result<ByteArray> = withContext(Dispatchers.IO) {
++    runCatching {
++      val conn = open(path)
++      try {
++        val code = conn.responseCode
++        if (code != 200) throw IllegalStateException("узел ответил $code")
++        conn.inputStream.use { it.readBoundedBytes(limit) }
++      } finally {
++        conn.disconnect()
++      }
++    }
++  }
++
+   private fun open(path: String): HttpURLConnection =
+     (URL("https://$nodeHost:$port$path").openConnection() as HttpURLConnection).apply {
+       // Токен заголовком, а не в URL: URL оседает в логах прокси и в истории.
+@@ -184,6 +212,7 @@ class HearthAndroidUpdateTransport(
+     private const val BASE = "/updates"
+     private const val MANIFEST_LIMIT_BYTES = 64 * 1024
+     private const val BUNDLE_LIMIT_BYTES = 64 * 1024
++    private const val STICKER_LIMIT_BYTES = 4 * 1024 * 1024
+ 
+     /** Транспорт, настроенный по тому, что записал импорт bundle. */
+     fun fromPrefs(context: Context): HearthAndroidUpdateTransport? {
+@@ -196,6 +225,18 @@ class HearthAndroidUpdateTransport(
+   }
+ }
+ 
++private fun java.io.InputStream.readBoundedBytes(limit: Int): ByteArray {
++  val out = java.io.ByteArrayOutputStream()
++  val buf = ByteArray(16 * 1024)
++  while (true) {
++    val n = read(buf)
++    if (n < 0) break
++    if (out.size() + n > limit) throw IllegalStateException("ответ узла больше $limit байт")
++    out.write(buf, 0, n)
++  }
++  return out.toByteArray()
++}
++
+ private fun java.io.InputStream.readBoundedText(limit: Int): String {
+   val out = java.io.ByteArrayOutputStream()
+   val buf = ByteArray(8 * 1024)
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/simplex/common/views/chat/ComposeView.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/simplex/common/views/chat/ComposeView.android.kt
+index 719dfee..debcc70 100644
+--- a/apps/multiplatform/common/src/androidMain/kotlin/chat/simplex/common/views/chat/ComposeView.android.kt
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/simplex/common/views/chat/ComposeView.android.kt
+@@ -55,6 +55,17 @@ actual fun AttachmentSelection(
+         }
+         attachmentOption.value = null
+       }
++      AttachmentOption.Sticker -> {
++        // hearth: стикер ложится в превью как картинка из галереи — файл WEBP как есть
++        // (AnimatedImage = «не перекодировать», так уходят GIF; прозрачность цела) и
++        // PNG-превью; отправка — той же кнопкой, что у любой картинки.
++        chat.hearth.HearthStickerPicker.show { uri, preview ->
++          composeState.value = composeState.value.copy(
++            preview = ComposePreview.MediaPreview(listOf(preview), listOf(UploadContent.AnimatedImage(uri)))
++          )
++        }
++        attachmentOption.value = null
++      }
+       AttachmentOption.GalleryImage -> {
+         try {
+           galleryImageLauncher.launch(0)
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/simplex/common/views/helpers/ChooseAttachmentView.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/simplex/common/views/helpers/ChooseAttachmentView.android.kt
+index 3dace5f..d89a1f8 100644
+--- a/apps/multiplatform/common/src/androidMain/kotlin/chat/simplex/common/views/helpers/ChooseAttachmentView.android.kt
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/simplex/common/views/helpers/ChooseAttachmentView.android.kt
+@@ -11,6 +11,11 @@ import dev.icerock.moko.resources.compose.stringResource
+ 
+ @Composable
+ actual fun ChooseAttachmentButtons(attachmentOption: MutableState<AttachmentOption?>, hide: () -> Unit) {
++  // hearth: пятая кнопка — стикер; доли ширины пересчитаны на пять (1/5, 1/4, 1/3, 1/2, 1).
++  ActionButton(Modifier.fillMaxWidth(0.20f), null, "Стикер", icon = painterResource(MR.images.ic_hearth_sticker)) {
++    attachmentOption.value = AttachmentOption.Sticker
++    hide()
++  }
+   ActionButton(Modifier.fillMaxWidth(0.25f), null, stringResource(MR.strings.use_camera_button), icon = painterResource(MR.images.ic_camera_enhance)) {
+     attachmentOption.value = AttachmentOption.CameraPhoto
+     hide()
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthStickers.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthStickers.kt
+new file mode 100644
+index 0000000..946e0f4
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthStickers.kt
+@@ -0,0 +1,74 @@
++package chat.hearth
++
++import kotlinx.serialization.Serializable
++import kotlinx.serialization.json.Json
++
++/**
++ * Стикеры: что лежит на узле и как это читать.
++ *
++ * # Откуда берутся
++ *
++ * Наборы импортируются из Telegram с рабочей станции (`stickers/import-telegram.py`) и
++ * выкладываются на узел в `/srv/hearth/stickers`: `index.json` со списком наборов и по
++ * каталогу на набор — `pack.json` и `NNN.webp`. Узел раздаёт их через device API по
++ * токену устройства, тем же замком, что обновления. Только статические WEBP: для
++ * анимированных в приложении нет проигрывателя.
++ *
++ * # Как уходят в чат
++ *
++ * Стикер отправляется как обычная картинка: файл WEBP как есть (без перекодирования, как
++ * GIF — прозрачность сохраняется) плюс маленькое PNG-превью для списка сообщений. Значит
++ * получатель на любой версии приложения увидит картинку, даже если стикеров у него нет.
++ *
++ * # Имена
++ *
++ * Правила те же, что на узле (`is_safe_sticker_pack` / `is_safe_sticker_file`): всё, что не
++ * прошло белый список, отбрасывается ещё при разборе индекса и не превращается в путь.
++ */
++@Serializable
++data class HearthStickerIndex(val v: Int = 1, val packs: List<HearthStickerPackRef> = emptyList())
++
++@Serializable
++data class HearthStickerPackRef(val name: String, val title: String = "", val count: Int = 0, val cover: String = "")
++
++@Serializable
++data class HearthStickerPack(
++  val v: Int = 1,
++  val name: String,
++  val title: String = "",
++  val source: String = "",
++  val stickers: List<HearthSticker> = emptyList(),
++)
++
++@Serializable
++data class HearthSticker(val file: String, val emoji: String = "", val sha256: String = "", val bytes: Long = 0)
++
++object HearthStickers {
++
++  const val INDEX_PATH = "/stickers/index.json"
++
++  private val json = Json { ignoreUnknownKeys = true }
++
++  fun parseIndex(payload: String): Result<HearthStickerIndex> = runCatching {
++    val index = json.decodeFromString(HearthStickerIndex.serializer(), payload)
++    index.copy(packs = index.packs.filter { isSafePack(it.name) && (it.cover.isEmpty() || isSafeFile(it.cover)) })
++  }
++
++  fun parsePack(payload: String): Result<HearthStickerPack> = runCatching {
++    val pack = json.decodeFromString(HearthStickerPack.serializer(), payload)
++    if (!isSafePack(pack.name)) throw IllegalArgumentException("недопустимое имя набора")
++    pack.copy(stickers = pack.stickers.filter { isSafeFile(it.file) && it.file != "pack.json" })
++  }
++
++  fun isSafePack(name: String): Boolean =
++    name.isNotEmpty() && name.length <= 64 && name.all { it in 'a'..'z' || it in '0'..'9' || it == '_' }
++
++  fun isSafeFile(file: String): Boolean =
++    file == "pack.json" || (file.length == 8 && file.endsWith(".webp") && file.substring(0, 3).all { it.isDigit() })
++
++  /** Путь на узле; вызывать только для имён, прошедших проверку. */
++  fun path(pack: String, file: String): String {
++    require(isSafePack(pack) && isSafeFile(file)) { "недопустимый путь стикера" }
++    return "/stickers/$pack/$file"
++  }
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/helpers/ChooseAttachmentView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/helpers/ChooseAttachmentView.kt
+index 33cf7c2..14a8ed3 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/helpers/ChooseAttachmentView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/helpers/ChooseAttachmentView.kt
+@@ -12,6 +12,8 @@ sealed class AttachmentOption {
+   object GalleryImage: AttachmentOption()
+   object GalleryVideo: AttachmentOption()
+   object File: AttachmentOption()
++  // hearth: стикер из наборов на узле (HearthStickers).
++  object Sticker: AttachmentOption()
+ }
+ 
+ @Composable
+diff --git a/apps/multiplatform/common/src/commonMain/resources/MR/images/ic_hearth_sticker.svg b/apps/multiplatform/common/src/commonMain/resources/MR/images/ic_hearth_sticker.svg
+new file mode 100644
+index 0000000..c14d716
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/resources/MR/images/ic_hearth_sticker.svg
+@@ -0,0 +1 @@
++<svg xmlns="http://www.w3.org/2000/svg" height="22" viewBox="0 0 24 24" width="22"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm3.5-9c.83 0 1.5-.67 1.5-1.5S16.33 8 15.5 8 14 8.67 14 9.5s.67 1.5 1.5 1.5zm-7 0c.83 0 1.5-.67 1.5-1.5S9.33 8 8.5 8 7 8.67 7 9.5 7.67 11 8.5 11zm3.5 6.5c2.33 0 4.31-1.46 5.11-3.5H6.89c.8 2.04 2.78 3.5 5.11 3.5z"/></svg>
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthStickersTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthStickersTest.kt
+new file mode 100644
+index 0000000..f63ef10
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthStickersTest.kt
+@@ -0,0 +1,57 @@
++package chat.hearth
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertFailsWith
++import kotlin.test.assertFalse
++import kotlin.test.assertTrue
++
++/** Индекс и наборы стикеров: разбор того, что кладёт импорт, и белый список имён. */
++class HearthStickersTest {
++
++  // Ровно то, что пишет stickers/import-telegram.py.
++  private val index = """{"v": 1, "packs": [{"name": "animals", "title": "Just zoo it!", "count": 50, "cover": "001.webp"}]}"""
++  private val pack = """{"v": 1, "name": "animals", "title": "Just zoo it!", "source": "telegram:Animals",
++    "stickers": [{"file": "001.webp", "emoji": "🐱", "sha256": "ab", "bytes": 12345}, {"file": "002.webp", "emoji": "🐶"}]}"""
++
++  @Test
++  fun the_importer_output_parses() {
++    val i = HearthStickers.parseIndex(index).getOrThrow()
++    assertEquals(1, i.packs.size)
++    assertEquals("Just zoo it!", i.packs[0].title)
++    val p = HearthStickers.parsePack(pack).getOrThrow()
++    assertEquals(2, p.stickers.size)
++    assertEquals("🐶", p.stickers[1].emoji)
++  }
++
++  @Test
++  fun unknown_fields_do_not_break_older_apps() {
++    val withExtra = index.replace("\"v\": 1", "\"v\": 1, \"future\": true")
++    assertTrue(HearthStickers.parseIndex(withExtra).isSuccess)
++  }
++
++  @Test
++  fun unsafe_names_are_dropped_not_trusted() {
++    val bad = """{"packs": [{"name": "../updates", "title": "x"}, {"name": "Animals", "title": "x"}, {"name": "ok_1", "title": "x"}]}"""
++    assertEquals(listOf("ok_1"), HearthStickers.parseIndex(bad).getOrThrow().packs.map { it.name })
++    val badFiles = """{"name": "ok", "stickers": [{"file": "../../x.webp"}, {"file": "1.webp"}, {"file": "001.png"}, {"file": "007.webp"}]}"""
++    assertEquals(listOf("007.webp"), HearthStickers.parsePack(badFiles).getOrThrow().stickers.map { it.file })
++  }
++
++  @Test
++  fun a_pack_with_a_bad_name_is_rejected_whole() {
++    assertTrue(HearthStickers.parsePack("""{"name": "../x"}""").isFailure)
++  }
++
++  @Test
++  fun the_whitelist_matches_the_node() {
++    assertTrue(HearthStickers.isSafePack("animals"))
++    assertFalse(HearthStickers.isSafePack(""))
++    assertFalse(HearthStickers.isSafePack("x".repeat(65)))
++    assertTrue(HearthStickers.isSafeFile("pack.json"))
++    assertTrue(HearthStickers.isSafeFile("001.webp"))
++    assertFalse(HearthStickers.isSafeFile("index.json"))
++    assertFailsWith<IllegalArgumentException> { HearthStickers.path("a/b", "001.webp") }
++    assertEquals("/stickers/animals/001.webp", HearthStickers.path("animals", "001.webp"))
++  }
++}
+diff --git a/apps/multiplatform/common/src/desktopMain/kotlin/chat/simplex/common/views/chat/ComposeView.desktop.kt b/apps/multiplatform/common/src/desktopMain/kotlin/chat/simplex/common/views/chat/ComposeView.desktop.kt
+index dd9f3dd..13cfc82 100644
+--- a/apps/multiplatform/common/src/desktopMain/kotlin/chat/simplex/common/views/chat/ComposeView.desktop.kt
++++ b/apps/multiplatform/common/src/desktopMain/kotlin/chat/simplex/common/views/chat/ComposeView.desktop.kt
+@@ -24,6 +24,8 @@ actual fun AttachmentSelection(
+   LaunchedEffect(attachmentOption.value) {
+     when (attachmentOption.value) {
+       AttachmentOption.CameraPhoto -> {}
++      // hearth: стикеры есть только в Android-сборке.
++      AttachmentOption.Sticker -> {}
+       AttachmentOption.GalleryImage -> {
+         imageLauncher.launch("image/*")
+       }
+diff --git a/apps/multiplatform/gradle.properties b/apps/multiplatform/gradle.properties
+index d280632..cf14a24 100644
+--- a/apps/multiplatform/gradle.properties
++++ b/apps/multiplatform/gradle.properties
+@@ -26,8 +26,8 @@ kotlin.jvm.target=11
+ 
+ # hearth: своя нумерация поверх тега upstream. versionCode обязан расти
+ # монотонно — по нему приложение решает, новее ли сборка на узле.
+-android.version_name=7.0.1-h20
+-android.version_code=391
++android.version_name=7.0.1-h21
++android.version_code=392
+ 
+ desktop.version_name=7.0.1
+ desktop.version_code=157
