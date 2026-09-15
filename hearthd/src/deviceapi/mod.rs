@@ -146,6 +146,8 @@ pub async fn serve_on(
 fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/updates/manifest.json", get(update_manifest))
+        // Статический маршрут, поэтому выигрывает у `/updates/{file}` — как и строка выше.
+        .route("/updates/manifest.json.sig", get(update_manifest_signature))
         .route("/updates/{file}", get(update_file))
         .route("/stickers/index.json", get(sticker_index))
         .route("/stickers/{pack}/{file}", get(sticker_file))
@@ -334,6 +336,40 @@ async fn update_manifest(
 
     tracing::debug!(%device, "device api: manifest served");
     Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
+}
+
+/// Подпись манифеста обновления.
+///
+/// Отдельный маршрут, а не `/updates/{file}`: тот пропускает только `*.apk` и отвечал на
+/// подпись 400. Клиент со вшитым ключом (ADR 0014) на всё, кроме 200 и 404, считает
+/// проверку обновления неудавшейся, поэтому обновление по воздуху не ставилось ни на
+/// одном таком телефоне с того коммита, где появилась подпись (aac8697): подпись
+/// выкладывалась, но узел её не отдавал.
+///
+/// Отсутствие файла — честный 404: клиент со вшитым ключом откажет сам (fail-closed), а
+/// сборка без ключа пойдёт дальше, как задумано.
+async fn update_manifest_signature(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let device = authorize(&state, &headers).await?;
+    let path = state.config.device_api.updates_dir.join("manifest.json.sig");
+
+    let meta = tokio::fs::metadata(&path)
+        .await
+        .map_err(|_| ApiError(StatusCode::NOT_FOUND, "no manifest signature"))?;
+    if meta.len() > MANIFEST_LIMIT {
+        tracing::error!(path = %path.display(), "manifest signature is implausibly large");
+        return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "bad signature"));
+    }
+
+    let body = tokio::fs::read(&path).await.map_err(|e| {
+        tracing::error!(path = %path.display(), error = %e, "cannot read manifest signature");
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "bad signature")
+    })?;
+
+    tracing::debug!(%device, "device api: manifest signature served");
+    Ok(([(header::CONTENT_TYPE, "text/plain")], body).into_response())
 }
 
 async fn update_file(
@@ -1028,6 +1064,78 @@ mod tests {
         assert!(!is_safe_sticker_file("../pack.json"));
         // Индекс лежит уровнем выше и отдаётся своим маршрутом.
         assert!(!is_safe_sticker_file("index.json"));
+    }
+
+    async fn get_signature(state: &Arc<AppState>, token: &str) -> (StatusCode, Vec<u8>) {
+        let request = axum::http::Request::builder()
+            .method("GET")
+            .uri("/updates/manifest.json.sig")
+            .header(TOKEN_HEADER, token)
+            .body(Body::empty())
+            .expect("request");
+        let response = tower::ServiceExt::oneshot(router(state.clone()), request)
+            .await
+            .expect("response");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (status, body.to_vec())
+    }
+
+    #[tokio::test]
+    async fn a_device_gets_the_manifest_signature_and_an_honest_404_without_it() {
+        // Ровно тот сбой, из-за которого обновление по воздуху не ставилось: подпись
+        // лежала рядом с манифестом, а узел отвечал на неё 400.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = crate::state::tests::test_config(dir.path());
+        let updates = dir.path().join("updates");
+        std::fs::create_dir_all(&updates).expect("updates dir");
+        config.device_api.updates_dir = updates.clone();
+        let state = AppState::new(config, crate::sys::Sys::new(true)).expect("state");
+        let token = state
+            .devices
+            .write()
+            .await
+            .add("sig-check", crate::model::device::Platform::Android, None, 10)
+            .expect("device")
+            .token
+            .expect("token");
+
+        // Подписи нет: 404, а не 400 — клиент со вшитым ключом сам откажет (fail-closed).
+        let (status, _) = get_signature(&state, &token).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        std::fs::write(updates.join("manifest.json.sig"), b"c2lnbmF0dXJl
+").expect("seed sig");
+        let (status, body) = get_signature(&state, &token).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, b"c2lnbmF0dXJl
+".to_vec(), "отдаётся ровно файл подписи");
+    }
+
+    #[test]
+    fn the_signature_is_not_an_apk_name() {
+        // Именно поэтому у подписи свой маршрут: общий `/updates/{file}` её отвергает.
+        assert!(!is_safe_apk_name("manifest.json.sig"));
+        assert!(!is_safe_apk_name("manifest.json"));
+    }
+
+    #[tokio::test]
+    async fn the_manifest_signature_requires_a_device_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = claim_node(dir.path());
+        let request = axum::http::Request::builder()
+            .method("GET")
+            .uri("/updates/manifest.json.sig")
+            .body(Body::empty())
+            .expect("request");
+        let status = tower::ServiceExt::oneshot(router(state), request)
+            .await
+            .expect("response")
+            .status();
+        // 401, а не 400: запрос дошёл до своего обработчика, а не до `/updates/{file}`.
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
