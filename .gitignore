@@ -65,3 +65,7 @@ __pycache__/
 # держится не файлом, а манифестом узла: sha256 пиннится через `hearthctl manifest pin`,
 # а версия, коммит simplexmq и хеш патча записаны в docs/deploy-fels-2026-09-09.md.
 relays/ntf/dist/
+
+# Наборы стикеров, скачанные из Telegram: чужие картинки, в репозиторий не кладём.
+# Раздаёт узел из /srv/hearth/stickers; источник восстанавливается import-telegram.py.
+stickers/dist/

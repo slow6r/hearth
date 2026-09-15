@@ -147,6 +147,8 @@ fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/updates/manifest.json", get(update_manifest))
         .route("/updates/{file}", get(update_file))
+        .route("/stickers/index.json", get(sticker_index))
+        .route("/stickers/{pack}/{file}", get(sticker_file))
         .route("/turn-credentials", get(turn_credentials))
         .route("/enroll", axum::routing::post(enroll))
         .route("/claim", axum::routing::post(claim))
@@ -217,6 +219,89 @@ pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
 /// Без этой проверки `..%2f..%2fetc%2fshadow` отдал бы что угодно, до чего дотягивается
 /// пользователь `hearth` — включая секреты релеев. axum декодирует percent-encoding ДО
 /// того, как значение попадает сюда, так что проверять надо уже раскодированное.
+// ------------------------------------------------------------------ стикеры
+//
+// Наборы кладёт `stickers/import-telegram.py`: `index.json` и `<набор>/{pack.json,NNN.webp}`.
+// Замок тот же, что у обновлений, — токен устройства. Имена из пути проверяются по
+// белому списку ДО join(): всё, что не «строчные+цифры+_» для набора и не «NNN.webp» /
+// `pack.json` для файла, отвергается, и `..` туда не пролезает по построению.
+//
+// Файлы маленькие (стикер — десятки килобайт), поэтому читаются целиком, но с
+// потолком: подменённый или переполненный каталог не должен заставить узел отдавать
+// гигабайты одному телефону.
+const STICKER_FILE_LIMIT: u64 = 4 * 1024 * 1024;
+
+fn is_safe_sticker_pack(pack: &str) -> bool {
+    !pack.is_empty()
+        && pack.len() <= 64
+        && pack
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+fn is_safe_sticker_file(file: &str) -> bool {
+    if file == "pack.json" {
+        return true;
+    }
+    // Ровно `NNN.webp` — так нумерует импорт.
+    file.len() == 8 && file.ends_with(".webp") && file.as_bytes()[..3].iter().all(u8::is_ascii_digit)
+}
+
+fn sticker_content_type(file: &str) -> &'static str {
+    if file.ends_with(".json") {
+        "application/json"
+    } else {
+        "image/webp"
+    }
+}
+
+async fn serve_small_file(path: std::path::PathBuf, content_type: &'static str) -> ApiResult<Response> {
+    let meta = tokio::fs::metadata(&path)
+        .await
+        .map_err(|_| ApiError(StatusCode::NOT_FOUND, "no such file"))?;
+    if !meta.is_file() || meta.len() > STICKER_FILE_LIMIT {
+        return Err(ApiError(StatusCode::NOT_FOUND, "no such file"));
+    }
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot read"))?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, bytes.len())
+        .body(Body::from(bytes))
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot build response"))
+}
+
+async fn sticker_index(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    authorize(&state, &headers).await?;
+    serve_small_file(
+        state.config.device_api.stickers_dir.join("index.json"),
+        "application/json",
+    )
+    .await
+}
+
+async fn sticker_file(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath((pack, file)): AxumPath<(String, String)>,
+) -> ApiResult<Response> {
+    let device = authorize(&state, &headers).await?;
+    if !is_safe_sticker_pack(&pack) || !is_safe_sticker_file(&file) {
+        tracing::warn!(%device, %pack, %file, "device api: refused a suspicious sticker path");
+        return Err(ApiError(StatusCode::BAD_REQUEST, "bad sticker path"));
+    }
+    serve_small_file(
+        state.config.device_api.stickers_dir.join(&pack).join(&file),
+        sticker_content_type(&file),
+    )
+    .await
+}
+
 fn is_safe_apk_name(file: &str) -> bool {
     !file.is_empty()
         && !file.contains('/')
@@ -923,6 +1008,44 @@ mod tests {
             .await
             .expect("response")
             .status()
+    }
+
+    #[test]
+    fn sticker_paths_are_whitelisted() {
+        assert!(is_safe_sticker_pack("animals"));
+        assert!(is_safe_sticker_pack("just_zoo_it_2"));
+        assert!(!is_safe_sticker_pack(""));
+        // Только строчные: так пишет импорт, а лишняя свобода — лишняя поверхность.
+        assert!(!is_safe_sticker_pack("Animals"));
+        assert!(!is_safe_sticker_pack("../updates"));
+        assert!(!is_safe_sticker_pack("a/b"));
+        assert!(!is_safe_sticker_pack(&"x".repeat(65)));
+
+        assert!(is_safe_sticker_file("pack.json"));
+        assert!(is_safe_sticker_file("001.webp"));
+        assert!(!is_safe_sticker_file("1.webp"));
+        assert!(!is_safe_sticker_file("001.png"));
+        assert!(!is_safe_sticker_file("../pack.json"));
+        // Индекс лежит уровнем выше и отдаётся своим маршрутом.
+        assert!(!is_safe_sticker_file("index.json"));
+    }
+
+    #[tokio::test]
+    async fn stickers_require_a_device_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = claim_node(dir.path());
+        for uri in ["/stickers/index.json", "/stickers/animals/001.webp"] {
+            let request = axum::http::Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request");
+            let status = tower::ServiceExt::oneshot(router(state.clone()), request)
+                .await
+                .expect("response")
+                .status();
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
+        }
     }
 
     #[tokio::test]

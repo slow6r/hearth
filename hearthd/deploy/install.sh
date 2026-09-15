@@ -89,6 +89,9 @@ run install -d -m 0700 -o root -g root /etc/credstore
 # Сам updates — hearth:hearth: демон туда пишет.
 run install -d -m 0755 -o root   -g root   /srv/hearth
 run install -d -m 0750 -o hearth -g hearth /srv/hearth/updates
+# Стикеры (stickers/import-telegram.py). Узел их только читает: владелец root, группе
+# hearth — чтение, чтобы демон отдавал файлы, но не мог их подменить.
+run install -d -m 0750 -o root -g hearth /srv/hearth/stickers
 
 say "3. binaries"
 for binary in hearthd hearthctl; do

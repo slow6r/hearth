@@ -80,6 +80,11 @@ pub struct DeviceApi {
     /// Каталог с APK и manifest.json.
     #[serde(default = "DeviceApi::default_updates_dir")]
     pub updates_dir: PathBuf,
+    /// Каталог с наборами стикеров: `index.json` и `<набор>/{pack.json,NNN.webp}`.
+    /// Раздаётся телефонам по токену устройства, как обновления. Наполняется с рабочей
+    /// станции (`stickers/import-telegram.py`); узел его только читает.
+    #[serde(default = "DeviceApi::default_stickers_dir")]
+    pub stickers_dir: PathBuf,
 }
 
 impl Default for DeviceApi {
@@ -89,6 +94,7 @@ impl Default for DeviceApi {
             listen: Self::default_listen(),
             public_port: Self::default_public_port(),
             updates_dir: Self::default_updates_dir(),
+            stickers_dir: Self::default_stickers_dir(),
         }
     }
 }
@@ -104,6 +110,9 @@ impl DeviceApi {
     }
     fn default_updates_dir() -> PathBuf {
         PathBuf::from("/srv/hearth/updates")
+    }
+    fn default_stickers_dir() -> PathBuf {
+        PathBuf::from("/srv/hearth/stickers")
     }
 }
 
