@@ -170,6 +170,34 @@ class HearthAndroidUpdateTransport(
     }
   }
 
+  /** Небольшой текстовый документ по пути device API — индекс и описание набора стикеров. */
+  suspend fun fetchText(path: String, limit: Int = MANIFEST_LIMIT_BYTES): Result<String> = withContext(Dispatchers.IO) {
+    runCatching {
+      val conn = open(path)
+      try {
+        val code = conn.responseCode
+        if (code != 200) throw IllegalStateException("узел ответил $code")
+        conn.inputStream.use { it.readBoundedText(limit) }
+      } finally {
+        conn.disconnect()
+      }
+    }
+  }
+
+  /** Небольшой двоичный файл по пути device API — стикер. Потолок тот же, что у узла. */
+  suspend fun fetchBytes(path: String, limit: Int = STICKER_LIMIT_BYTES): Result<ByteArray> = withContext(Dispatchers.IO) {
+    runCatching {
+      val conn = open(path)
+      try {
+        val code = conn.responseCode
+        if (code != 200) throw IllegalStateException("узел ответил $code")
+        conn.inputStream.use { it.readBoundedBytes(limit) }
+      } finally {
+        conn.disconnect()
+      }
+    }
+  }
+
   private fun open(path: String): HttpURLConnection =
     (URL("https://$nodeHost:$port$path").openConnection() as HttpURLConnection).apply {
       // Токен заголовком, а не в URL: URL оседает в логах прокси и в истории.
@@ -184,6 +212,7 @@ class HearthAndroidUpdateTransport(
     private const val BASE = "/updates"
     private const val MANIFEST_LIMIT_BYTES = 64 * 1024
     private const val BUNDLE_LIMIT_BYTES = 64 * 1024
+    private const val STICKER_LIMIT_BYTES = 4 * 1024 * 1024
 
     /** Транспорт, настроенный по тому, что записал импорт bundle. */
     fun fromPrefs(context: Context): HearthAndroidUpdateTransport? {
@@ -194,6 +223,18 @@ class HearthAndroidUpdateTransport(
       return HearthAndroidUpdateTransport(context, host, port, token)
     }
   }
+}
+
+private fun java.io.InputStream.readBoundedBytes(limit: Int): ByteArray {
+  val out = java.io.ByteArrayOutputStream()
+  val buf = ByteArray(16 * 1024)
+  while (true) {
+    val n = read(buf)
+    if (n < 0) break
+    if (out.size() + n > limit) throw IllegalStateException("ответ узла больше $limit байт")
+    out.write(buf, 0, n)
+  }
+  return out.toByteArray()
 }
 
 private fun java.io.InputStream.readBoundedText(limit: Int): String {
