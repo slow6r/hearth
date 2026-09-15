@@ -48,6 +48,22 @@ actual fun HearthNodeSettingsView() {
     }
     SectionDividerSpaced()
 
+    // --- фон --------------------------------------------------------------------------
+    //
+    // Одиннадцать телефонов из тринадцати в семье — Huawei, а там система гасит фоновую
+    // службу своим «менеджером запуска», о котором стандартная проверка батареи не знает.
+    // Пункт есть всегда: на других телефонах он открывает сведения о приложении.
+    SectionView("ФОНОВАЯ РАБОТА") {
+      SectionItemView(click = { HearthHuawei.openLaunchSettings(context) }) {
+        Text(if (HearthHuawei.isHuawei) "Разрешить работу в фоне (Huawei)" else "Приложение в настройках системы")
+      }
+      SectionTextFooter(
+        if (HearthHuawei.isHuawei) HearthHuawei.FOOTER
+        else "Если сообщения приходят только при открытии приложения, проверьте, что системе разрешено держать его в фоне."
+      )
+    }
+    SectionDividerSpaced()
+
     // --- обновление ---------------------------------------------------------------
     SectionView("ОБНОВЛЕНИЕ") {
       SectionItemView(click = {

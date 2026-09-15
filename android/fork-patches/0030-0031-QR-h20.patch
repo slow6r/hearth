@@ -1,0 +1,678 @@
+From ce580ddeb2765ce63039c0d50566cb31b31ba271 Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Tue, 15 Sep 2026 15:16:57 +0300
+Subject: [PATCH 30/30] =?UTF-8?q?0031:=20=D0=BF=D1=80=D0=B8=D1=91=D0=BC=20?=
+ =?UTF-8?q?=D1=81=D0=BE=D0=BE=D0=B1=D1=89=D0=B5=D0=BD=D0=B8=D0=B9=20=D0=B2?=
+ =?UTF-8?q?=20=D1=84=D0=BE=D0=BD=D0=B5,=20=D0=B4=D1=83=D0=B1=D0=BB=D0=B8?=
+ =?UTF-8?q?=20=D1=87=D0=B0=D1=82=D0=BE=D0=B2,=20QR,=20=D1=87=D0=B8=D1=81?=
+ =?UTF-8?q?=D0=BB=D0=BE=20=D0=BD=D0=B0=20=D0=B8=D0=BA=D0=BE=D0=BD=D0=BA?=
+ =?UTF-8?q?=D0=B5;=20=D0=B2=D0=B5=D1=80=D1=81=D0=B8=D1=8F=20h20?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+По жалобам из семьи, узел на момент разбора раздавал h17.
+
+Крэш `Key "(null, @2)" was already used`. У addChat не было проверки на дубль — голый
+`chats.add(0, chat)` с двенадцатью вызывающими, — а список пересобирается целиком при
+каждом выходе на передний план. Гонка «hasChat → replaceAll → addChat» давала два чата с
+одним ключом, и LazyColumn ронял приложение. Защита в addChat и в updateChats, правило
+вынесено в HearthChatList и покрыто тестом на том самом стеке.
+
+«Сообщения перестают приходить, помогает выключить/включить чат». Это потерянные
+подписки — Wi-Fi в доме рвётся на перегруженном 2.4 ГГц, а Huawei гасит фоновую
+службу. Выключить/включить — это заново подписаться; мягкий аналог — reconnectAllServers,
+и теперь он зовётся при каждом выходе приложения на экран, не чаще раза в минуту
+(HearthResume, тест на ограничение и на часы назад).
+
+«Уведомления только при открытии». Одиннадцать телефонов из тринадцати — Huawei. У EMUI
+свой «менеджер запуска», который останавливает службу молча; стандартная проверка
+батареи его не видит и не предупреждает. Программно не обходится. HearthHuawei показывает
+объяснение с кнопкой прямо в нужный экран EMUI (перебор известных имён экрана, запасной —
+сведения о приложении) и даёт пункт в настройках узла.
+
+QR не читался, ссылки работали. Сканер проверяет строку в strIsSimplexLink ДО
+strConnectTarget, а там разбор шёл без hearthLinksToCore: ядро схему hearth: не знает,
+SimplexLink не находился, любой наш QR отвергался как «неверный код». Одна строка.
+
+Число непрочитанных на иконке. setNumber() в уведомлениях для обычных лаунчеров, и
+отдельный вызов провайдера Huawei (с разрешением CHANGE_BADGE в манифесте — без него он
+молча игнорируется). Считается по тем же правилам, что уведомления: заглушённые чаты не
+считаются, «только упоминания» считают упоминания. Обновляется при уведомлении и при
+входе/выходе с экрана.
+
+Версия 7.0.1-h20 (391).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rFCpGgTKkXuYYaCC7Zsew
+---
+ .../android/src/main/AndroidManifest.xml      |   4 +
+ .../main/java/chat/simplex/app/SimplexApp.kt  |  15 +++
+ .../simplex/app/model/NtfManager.android.kt   |   9 ++
+ .../kotlin/chat/hearth/HearthBadge.android.kt |  82 +++++++++++++
+ .../chat/hearth/HearthHuawei.android.kt       | 110 ++++++++++++++++++
+ .../chat/hearth/HearthSettingsView.android.kt |  16 +++
+ .../kotlin/chat/hearth/HearthChatList.kt      |  42 +++++++
+ .../kotlin/chat/hearth/HearthResume.kt        |  49 ++++++++
+ .../chat/simplex/common/model/ChatModel.kt    |  16 ++-
+ .../common/views/newchat/NewChatView.kt       |   6 +-
+ .../kotlin/chat/hearth/HearthChatListTest.kt  |  48 ++++++++
+ .../kotlin/chat/hearth/HearthResumeTest.kt    |  39 +++++++
+ apps/multiplatform/gradle.properties          |   4 +-
+ 13 files changed, 433 insertions(+), 7 deletions(-)
+ create mode 100644 apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthBadge.android.kt
+ create mode 100644 apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthHuawei.android.kt
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthChatList.kt
+ create mode 100644 apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthResume.kt
+ create mode 100644 apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthChatListTest.kt
+ create mode 100644 apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthResumeTest.kt
+
+diff --git a/apps/multiplatform/android/src/main/AndroidManifest.xml b/apps/multiplatform/android/src/main/AndroidManifest.xml
+index 1352fed..6a6f981 100644
+--- a/apps/multiplatform/android/src/main/AndroidManifest.xml
++++ b/apps/multiplatform/android/src/main/AndroidManifest.xml
+@@ -28,6 +28,10 @@
+   <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+   <uses-permission android:name="android.permission.WAKE_LOCK" />
++  <!-- hearth: число непрочитанных на иконке. Huawei и Honor не читают setNumber() у
++       уведомления, их лаунчер ждёт свой вызов CHANGE_BADGE, а без этого разрешения
++       он молча игнорируется. На остальных лаунчерах разрешение ни на что не влияет. -->
++  <uses-permission android:name="com.huawei.android.launcher.permission.CHANGE_BADGE" />
+   <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+   <uses-permission android:name="android.permission.VIBRATE" />
+   <uses-permission android:name="android.permission.INTERNET" />
+diff --git a/apps/multiplatform/android/src/main/java/chat/simplex/app/SimplexApp.kt b/apps/multiplatform/android/src/main/java/chat/simplex/app/SimplexApp.kt
+index ce47d2c..513d3dc 100644
+--- a/apps/multiplatform/android/src/main/java/chat/simplex/app/SimplexApp.kt
++++ b/apps/multiplatform/android/src/main/java/chat/simplex/app/SimplexApp.kt
+@@ -116,6 +116,9 @@ class SimplexApp: Application(), LifecycleEventObserver {
+           isAppOnForeground = true
+           if (chatModel.controller.appPrefs.onboardingStage.get() == OnboardingStage.OnboardingComplete && chatModel.currentUser.value != null) {
+             SimplexService.showBackgroundServiceNoticeIfNeeded()
++            // hearth: стандартная проверка батареи Huawei не видит — там свой
++            // «менеджер запуска», который убивает службу молча. См. HearthHuawei.
++            chat.hearth.HearthHuawei.showNoticeIfNeeded(SimplexApp.context)
+           }
+           /**
+            * We're starting service here instead of in [Lifecycle.Event.ON_START] because
+@@ -131,6 +134,18 @@ class SimplexApp: Application(), LifecycleEventObserver {
+           ) {
+             SimplexService.start()
+           }
++          // hearth: «сообщения перестали приходить, помогает выключить/включить чат» —
++          // это потерянные подписки. Мягкий аналог выключить/включить — переподключить
++          // релеи, не чаще раза в минуту. См. HearthResume.
++          if (chatModel.chatRunning.value == true && chat.hearth.HearthResume.claim(System.currentTimeMillis())) {
++            withBGApi { chatModel.controller.reconnectAllServers(null) }
++          }
++          chat.hearth.HearthBadge.sync(SimplexApp.context)
++        }
++        Lifecycle.Event.ON_STOP -> {
++          isAppOnForeground = false
++          // hearth: человек прочитал сообщения и ушёл — число на иконке должно упасть.
++          chat.hearth.HearthBadge.sync(SimplexApp.context)
+         }
+         else -> isAppOnForeground = false
+       }
+diff --git a/apps/multiplatform/android/src/main/java/chat/simplex/app/model/NtfManager.android.kt b/apps/multiplatform/android/src/main/java/chat/simplex/app/model/NtfManager.android.kt
+index eecbcfd..c4f0de2 100644
+--- a/apps/multiplatform/android/src/main/java/chat/simplex/app/model/NtfManager.android.kt
++++ b/apps/multiplatform/android/src/main/java/chat/simplex/app/model/NtfManager.android.kt
+@@ -123,6 +123,8 @@ object NtfManager {
+       .setLargeIcon(largeIcon)
+       .setColor(0xD9480F)
+       .setAutoCancel(true)
++      // hearth: число на иконке — лаунчеры Samsung и подобные берут его отсюда.
++      .setNumber(chat.hearth.HearthBadge.totalUnread())
+       .setVibrate(if (actions.isEmpty()) null else longArrayOf(0, 250, 250, 250))
+       .setContentIntent(chatPendingIntent(OpenChatAction, user.userId, chatId))
+       .setSilent(if (actions.isEmpty()) recentNotification else false)
+@@ -145,6 +147,7 @@ object NtfManager {
+       .setGroup(MessageGroup)
+       .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
+       .setGroupSummary(true)
++      .setNumber(chat.hearth.HearthBadge.totalUnread())
+       .setContentIntent(chatPendingIntent(ShowChatsAction, null))
+       .build()
+ 
+@@ -155,6 +158,8 @@ object NtfManager {
+         notify(0, summary)
+       }
+     }
++    // hearth: Huawei и Honor число из уведомления не читают — у них свой вызов.
++    chat.hearth.HearthBadge.sync(context)
+   }
+ 
+   fun notifyCallInvitation(invitation: RcvCallInvitation): Boolean {
+@@ -237,6 +242,7 @@ object NtfManager {
+       .setLargeIcon(null as Bitmap?)
+       .setColor(0xD9480F)
+       .setAutoCancel(true)
++      .setNumber(chat.hearth.HearthBadge.totalUnread())
+       .setVibrate(null)
+       .setContentIntent(chatPendingIntent(ShowChatsAction, null, null))
+       .setSilent(false)
+@@ -247,6 +253,7 @@ object NtfManager {
+       .setGroup(MessageGroup)
+       .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
+       .setGroupSummary(true)
++      .setNumber(chat.hearth.HearthBadge.totalUnread())
+       .setContentIntent(chatPendingIntent(ShowChatsAction, null))
+       .build()
+ 
+@@ -256,6 +263,8 @@ object NtfManager {
+         notify(0, summary)
+       }
+     }
++    // hearth: Huawei и Honor число из уведомления не читают — у них свой вызов.
++    chat.hearth.HearthBadge.sync(context)
+   }
+ 
+   fun cancelCallNotification() {
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthBadge.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthBadge.android.kt
+new file mode 100644
+index 0000000..c83c133
+--- /dev/null
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthBadge.android.kt
+@@ -0,0 +1,82 @@
++package chat.hearth
++
++import android.content.Context
++import android.content.Intent
++import android.net.Uri
++import android.os.Bundle
++import chat.simplex.common.platform.chatModel
++
++/**
++ * Число непрочитанных на иконке приложения.
++ *
++ * # Как это устроено в Android
++ *
++ * Единого способа нет. Большинство лаунчеров (Samsung, Xiaomi, Pixel — точкой) берут
++ * число из `setNumber()` уведомления, и это делает `NtfManager`. Huawei и Honor число из
++ * уведомления не читают вовсе: их лаунчер ждёт отдельный вызов своего провайдера
++ * `content://com.huawei.android.launcher.settings/badge/` (старые EMUI — рассылку
++ * `CHANGE_BADGE`), и на это нужно разрешение `com.huawei.android.launcher.permission.CHANGE_BADGE`
++ * в манифесте. Без вызова на Huawei число не появится никогда — а Huawei в семье
++ * одиннадцать из тринадцати.
++ *
++ * # Когда обновляется
++ *
++ *   * при каждом показанном уведомлении о сообщении — число выросло;
++ *   * при выходе приложения на передний план и при уходе с него — человек прочитал
++ *     сообщения, число должно упасть; ловить каждое «прочитано» внутри чата незачем,
++ *     на иконку смотрят снаружи приложения.
++ *
++ * Считаются только чаты с включёнными уведомлениями: если человек чат заглушил, число
++ * на иконке не должно его дёргать так же, как не дёргает уведомление.
++ */
++object HearthBadge {
++
++  fun totalUnread(): Int = try {
++    chatModel.chats.value.sumOf { chat ->
++      // Те же правила, что у уведомлений: ntfsEnabled(userMention) решает, дёргать ли
++      // человека. Заглушённый чат — ноль; «только упоминания» — только упоминания.
++      val info = chat.chatInfo
++      when {
++        info.ntfsEnabled(userMention = false) -> chat.chatStats.unreadCount
++        info.ntfsEnabled(userMention = true) -> chat.chatStats.unreadMentions
++        else -> 0
++      }
++    }
++  } catch (_: Exception) {
++    0
++  }
++
++  fun sync(context: Context) = apply(context, totalUnread())
++
++  fun apply(context: Context, count: Int) {
++    if (!HearthHuawei.isHuawei) return
++    val launcher = context.packageManager
++      .getLaunchIntentForPackage(context.packageName)?.component?.className ?: return
++    val n = count.coerceIn(0, 99)
++    try {
++      context.contentResolver.call(
++        Uri.parse("content://com.huawei.android.launcher.settings/badge/"),
++        "change_badge",
++        null,
++        Bundle().apply {
++          putString("package", context.packageName)
++          putString("class", launcher)
++          putInt("badgenumber", n)
++        },
++      )
++    } catch (_: Exception) {
++      // Старые EMUI: провайдера нет, работает рассылка.
++      try {
++        context.sendBroadcast(
++          Intent("com.huawei.android.launcher.action.CHANGE_BADGE").apply {
++            putExtra("package", context.packageName)
++            putExtra("class", launcher)
++            putExtra("badgenumber", n)
++          }
++        )
++      } catch (_: Exception) {
++        // лаунчер не Huawei или без поддержки — число покажет уведомление
++      }
++    }
++  }
++}
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthHuawei.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthHuawei.android.kt
+new file mode 100644
+index 0000000..9dd5845
+--- /dev/null
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthHuawei.android.kt
+@@ -0,0 +1,110 @@
++package chat.hearth
++
++import android.content.ComponentName
++import android.content.Context
++import android.content.Intent
++import android.net.Uri
++import android.os.Build
++import android.provider.Settings
++import chat.simplex.common.views.helpers.AlertManager
++
++/**
++ * Фоновая работа на Huawei и Honor.
++ *
++ * # В чём дело
++ *
++ * Сообщения к нам приходят только через фоновую службу: пуш-серверов Google в сборке
++ * нет намеренно. На Huawei (EMUI) и Honor (Magic UI) у системы есть свой «менеджер
++ * запуска приложений», который останавливает службу в фоне — молча и независимо от
++ * стандартной оптимизации батареи Android. Стандартная проверка
++ * `isIgnoringBatteryOptimizations()` при этом отвечает «всё разрешено», поэтому
++ * upstream-уведомление о батарее человека не предупреждает.
++ *
++ * Итог для семьи, где одиннадцать телефонов из тринадцати — Huawei: «уведомления
++ * приходят, только когда заходишь в приложение». Единственное лечение — руками в
++ * настройках: Батарея → Запуск приложений → Очаг → «Управлять вручную» и включить все
++ * три переключателя (автозапуск, вторичный запуск, работа в фоне). Так делает каждый
++ * мессенджер на Huawei; программно это не обходится.
++ *
++ * # Что делает этот файл
++ *
++ * Один раз за запуск процесса показывает объяснение с кнопкой, которая открывает нужный
++ * экран напрямую. Экран у разных версий EMUI называется по-разному, поэтому перебираются
++ * известные имена; если ни одно не открылось — обычные сведения о приложении. Отдельный
++ * пункт в настройках узла позволяет открыть тот же экран в любой момент.
++ */
++object HearthHuawei {
++
++  private const val PREFS = "hearth"
++  private const val KEY_OPENED = "huawei_launch_settings_opened"
++
++  @Volatile
++  private var shownThisProcess = false
++
++  val isHuawei: Boolean
++    get() = listOf(Build.MANUFACTURER, Build.BRAND).any {
++      it.equals("HUAWEI", ignoreCase = true) || it.equals("HONOR", ignoreCase = true)
++    }
++
++  // Порядок — от новых версий EMUI к старым.
++  private val LAUNCH_SCREENS = listOf(
++    "com.huawei.systemmanager" to "com.huawei.systemmanager.appcontrol.activity.StartupAppControlActivity",
++    "com.huawei.systemmanager" to "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity",
++    "com.huawei.systemmanager" to "com.huawei.systemmanager.optimize.process.ProtectActivity",
++  )
++
++  const val STEPS =
++    "Найдите Очаг в списке, выключите «Управлять автоматически» и включите все три " +
++      "переключателя: автозапуск, вторичный запуск, работа в фоне."
++
++  const val FOOTER =
++    "На Huawei и Honor система останавливает приложение в фоне, и сообщения приходят " +
++      "только при открытии. " + STEPS
++
++  /** Открыть экран управления запуском; вернуть, открылся ли именно он, а не запасной. */
++  fun openLaunchSettings(context: Context): Boolean {
++    for ((pkg, cls) in LAUNCH_SCREENS) {
++      try {
++        context.startActivity(
++          Intent().setComponent(ComponentName(pkg, cls)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++        )
++        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_OPENED, true).apply()
++        return true
++      } catch (_: Exception) {
++        // этой версии экрана нет — пробуем следующую
++      }
++    }
++    return try {
++      context.startActivity(
++        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
++          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++      )
++      false
++    } catch (_: Exception) {
++      false
++    }
++  }
++
++  /**
++   * Показать объяснение: раз за запуск процесса, пока человек хоть раз не открыл
++   * нужный экран. «Позже» откладывает до следующего запуска — не навсегда: цена
++   * молчания здесь — неприходящие сообщения.
++   */
++  fun showNoticeIfNeeded(context: Context) {
++    if (!isHuawei || shownThisProcess) return
++    val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
++    if (prefs.getBoolean(KEY_OPENED, false)) return
++    // Поверх чужого диалога не лезем — покажем при следующем выходе на экран.
++    if (AlertManager.shared.hasAlertsShown()) return
++    shownThisProcess = true
++    AlertManager.shared.showAlertDialog(
++      title = "Сообщения в фоне на Huawei",
++      text = "Чтобы сообщения приходили, когда Очаг закрыт, телефону надо разрешить ему " +
++        "работать в фоне. Иначе система останавливает приложение, и уведомления " +
++        "появляются только при открытии.\n\n" + STEPS,
++      confirmText = "Открыть настройки",
++      onConfirm = { openLaunchSettings(context) },
++      dismissText = "Позже",
++    )
++  }
++}
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt
+index ae8c588..bd987a6 100644
+--- a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthSettingsView.android.kt
+@@ -48,6 +48,22 @@ actual fun HearthNodeSettingsView() {
+     }
+     SectionDividerSpaced()
+ 
++    // --- фон --------------------------------------------------------------------------
++    //
++    // Одиннадцать телефонов из тринадцати в семье — Huawei, а там система гасит фоновую
++    // службу своим «менеджером запуска», о котором стандартная проверка батареи не знает.
++    // Пункт есть всегда: на других телефонах он открывает сведения о приложении.
++    SectionView("ФОНОВАЯ РАБОТА") {
++      SectionItemView(click = { HearthHuawei.openLaunchSettings(context) }) {
++        Text(if (HearthHuawei.isHuawei) "Разрешить работу в фоне (Huawei)" else "Приложение в настройках системы")
++      }
++      SectionTextFooter(
++        if (HearthHuawei.isHuawei) HearthHuawei.FOOTER
++        else "Если сообщения приходят только при открытии приложения, проверьте, что системе разрешено держать его в фоне."
++      )
++    }
++    SectionDividerSpaced()
++
+     // --- обновление ---------------------------------------------------------------
+     SectionView("ОБНОВЛЕНИЕ") {
+       SectionItemView(click = {
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthChatList.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthChatList.kt
+new file mode 100644
+index 0000000..4b99a36
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthChatList.kt
+@@ -0,0 +1,42 @@
++package chat.hearth
++
++/**
++ * Список чатов без дублей.
++ *
++ * # Откуда дубли
++ *
++ * У `ChatModel.chatsContext.addChat` нет проверки: это голый `chats.add(0, chat)`,
++ * а вызывающих у него двенадцать. Список при этом пересобирается целиком ещё и при
++ * каждом выходе приложения на передний план (`SimplexApp`, ON_START → `apiGetChats` →
++ * `replaceAll`). Гонка между двумя корутинами выглядит так:
++ *
++ *   1. приёмник сообщений: `hasChat(@2)` → false (список ещё старый или пустой);
++ *   2. главный поток: `replaceAll(новый список, в нём уже есть @2)`;
++ *   3. приёмник: `addChat(@2)` → второй `@2`.
++ *
++ * Дальше `LazyColumn` с ключом `(remoteHostId, id)` встречает два одинаковых ключа
++ * и роняет приложение: `Key "(null, @2)" was already used`. Именно этот стек и
++ * прислали из семьи. Сценарий особенно вероятен на Huawei: система убивает фоновую
++ * службу, а при открытии приложения накопившиеся события приходят залпом — ровно в
++ * тот момент, когда список пересобирается.
++ *
++ * # Правило
++ *
++ * Ключ — пара `(remoteHostId, id)`, как у `LazyColumn`. При совпадении остаётся
++ * ПЕРВОЕ вхождение: в `replaceAll` первым идёт то, что пришло из базы, а при
++ * `addChat` существующая запись уже не хуже добавляемой — обе описывают один чат,
++ * и у существующей могут быть счётчики непрочитанного, которых у новой нет.
++ */
++object HearthChatList {
++
++  /** Оставить по одному элементу на ключ, сохранив порядок первых вхождений. */
++  fun <T> dedupe(items: List<T>, key: (T) -> Any?): List<T> {
++    if (items.size < 2) return items
++    val seen = HashSet<Any?>(items.size)
++    val out = ArrayList<T>(items.size)
++    for (item in items) {
++      if (seen.add(key(item))) out.add(item)
++    }
++    return if (out.size == items.size) items else out
++  }
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthResume.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthResume.kt
+new file mode 100644
+index 0000000..48f6100
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthResume.kt
+@@ -0,0 +1,49 @@
++package chat.hearth
++
++/**
++ * Переподключение к релеям при выходе приложения на передний план — но не чаще
++ * раза в минуту.
++ *
++ * # Зачем
++ *
++ * Жалоба из семьи: «сообщения приходят, потом перестают, помогает только выключить
++ * и включить „чат запущен“». Выключить/включить — это `apiStopChat` + `apiStartChat`,
++ * то есть заново подписаться на все очереди. Значит подписки теряются и сами не
++ * восстанавливаются. Причин две, и обе подтверждены: Wi-Fi в доме рвётся из-за
++ * перегруженного 2.4 ГГц, а на Huawei система убивает фоновую службу.
++ *
++ * Мягкий аналог выключить/включить — `reconnectAllServers`: ядро переустанавливает
++ * соединения и подписки, не останавливая чат. Upstream зовёт его только при смене
++ * сети. Здесь он зовётся ещё и при каждом выходе на передний план: именно в этот
++ * момент человек ждёт сообщений и замечает, что их нет.
++ *
++ * # Почему с ограничением
++ *
++ * Выход на передний план случается и десять раз в минуту — переключение между
++ * приложениями. Переподключать все релеи на каждое — это шторм соединений на узел и
++ * лишний расход батареи. Минута — достаточно редко, чтобы не мешать, и достаточно
++ * часто, чтобы «открыл — и сообщения пришли» работало.
++ */
++object HearthResume {
++
++  const val MIN_GAP_MS: Long = 60_000
++
++  @Volatile
++  private var lastReconnectMs: Long = 0
++
++  /** Чистое правило: пора ли переподключаться, если последний раз был в [lastMs]. */
++  fun shouldReconnect(lastMs: Long, nowMs: Long, minGapMs: Long = MIN_GAP_MS): Boolean =
++    lastMs == 0L || nowMs - lastMs >= minGapMs || nowMs < lastMs
++
++  /** Отметить попытку, если по правилу пора; вернуть, пора ли. */
++  fun claim(nowMs: Long): Boolean {
++    if (!shouldReconnect(lastReconnectMs, nowMs)) return false
++    lastReconnectMs = nowMs
++    return true
++  }
++
++  /** Для тестов и для сброса при остановке чата. */
++  fun reset() {
++    lastReconnectMs = 0
++  }
++}
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/ChatModel.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/ChatModel.kt
+index c9c3095..ccea81b 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/ChatModel.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/model/ChatModel.kt
+@@ -399,6 +399,12 @@ object ChatModel {
+       }
+ 
+     suspend fun addChat(chat: Chat) {
++      // hearth: у двенадцати вызывающих проверки на дубль нет ни у одного, а список
++      // пересобирается целиком при каждом выходе на передний план. Гонка «hasChat →
++      // replaceAll → addChat» давала два чата с одним ключом, и LazyColumn ронял
++      // приложение: Key "(null, @2)" was already used. Существующая запись не хуже
++      // добавляемой — у неё могут быть счётчики, которых у новой нет. См. HearthChatList.
++      if (getChatIndex(chat.remoteHostId, chat.id) >= 0) return
+       chats.add(index = 0, chat)
+       popChatCollector.throttlePopChat(chat.remoteHostId, chat.id, currentPosition = 0)
+     }
+@@ -466,17 +472,19 @@ object ChatModel {
+     }
+ 
+     fun updateChats(newChats: List<Chat>, keepingChatId: String? = null) {
++      // hearth: то же правило на входе списка целиком — ключ тот же, что у LazyColumn.
++      val unique = chat.hearth.HearthChatList.dedupe(newChats) { it.remoteHostId to it.id }
+       if (keepingChatId != null) {
+         val chatToKeep = getChat(keepingChatId)
+-        val indexToRemove = newChats.indexOfFirst { it.id == keepingChatId }
++        val indexToRemove = unique.indexOfFirst { it.id == keepingChatId }
+         if (chatToKeep != null && indexToRemove != -1) {
+-          val remainingNewChats = newChats.toMutableList().apply { removeAt(indexToRemove) }
++          val remainingNewChats = unique.toMutableList().apply { removeAt(indexToRemove) }
+           chats.replaceAll(listOf(chatToKeep) + remainingNewChats)
+         } else {
+-          chats.replaceAll(newChats)
++          chats.replaceAll(unique)
+         }
+       } else {
+-        chats.replaceAll(newChats)
++        chats.replaceAll(unique)
+       }
+       popChatCollector.clear()
+ 
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/NewChatView.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/NewChatView.kt
+index ede971c..2d70da9 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/NewChatView.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/simplex/common/views/newchat/NewChatView.kt
+@@ -822,7 +822,11 @@ private fun createInvitation(
+ }
+ 
+ fun strIsSimplexLink(str: String): Boolean {
+-  val parsedMd = parseToMarkdown(str)
++  // hearth: сканер QR проверяет строку ЗДЕСЬ, до strConnectTarget, а QR кодирует ссылку
++  // в нашем виде — hearth:/… и hearth://…. Ядро такой схемы не знает, разбор не находил
++  // SimplexLink, и любой наш QR отвергался как «неверный код» — при том что та же
++  // ссылка текстом проходила: там конверсия есть. Возвращаем ядру его вид и здесь.
++  val parsedMd = parseToMarkdown(chat.simplex.common.model.hearthLinksToCore(str))
+   return parsedMd != null && parsedMd.size == 1 && parsedMd[0].format is Format.SimplexLink
+ }
+ 
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthChatListTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthChatListTest.kt
+new file mode 100644
+index 0000000..a7ae587
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthChatListTest.kt
+@@ -0,0 +1,48 @@
++package chat.hearth
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertSame
++
++/**
++ * Дубли чатов не доходят до списка.
++ *
++ * Тест написан по крэшу из семьи: `Key "(null, @2)" was already used` — два чата с
++ * одним ключом в `LazyColumn`. Ключ здесь тот же, что у списка: пара
++ * (remoteHostId, id), и остаётся первое вхождение.
++ */
++class HearthChatListTest {
++
++  private data class Chat(val rh: Long?, val id: String, val unread: Int = 0)
++
++  @Test
++  fun the_family_crash_two_at_2_become_one() {
++    val list = listOf(Chat(null, "@2", unread = 3), Chat(null, "@5"), Chat(null, "@2"))
++    val out = HearthChatList.dedupe(list) { it.rh to it.id }
++    assertEquals(listOf(Chat(null, "@2", unread = 3), Chat(null, "@5")), out)
++  }
++
++  @Test
++  fun first_occurrence_wins_and_keeps_its_counters() {
++    val list = listOf(Chat(null, "@1", unread = 7), Chat(null, "@1", unread = 0))
++    assertEquals(7, HearthChatList.dedupe(list) { it.rh to it.id }.single().unread)
++  }
++
++  @Test
++  fun same_id_on_different_hosts_is_two_chats() {
++    val list = listOf(Chat(null, "@2"), Chat(1L, "@2"))
++    assertEquals(2, HearthChatList.dedupe(list) { it.rh to it.id }.size)
++  }
++
++  @Test
++  fun a_clean_list_is_returned_as_is() {
++    val list = listOf(Chat(null, "@1"), Chat(null, "@2"), Chat(null, "#3"))
++    assertSame(list, HearthChatList.dedupe(list) { it.rh to it.id })
++  }
++
++  @Test
++  fun order_is_preserved() {
++    val list = listOf(Chat(null, "#9"), Chat(null, "@2"), Chat(null, "#9"), Chat(null, "@1"))
++    assertEquals(listOf("#9", "@2", "@1"), HearthChatList.dedupe(list) { it.rh to it.id }.map { it.id })
++  }
++}
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthResumeTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthResumeTest.kt
+new file mode 100644
+index 0000000..c0eb3b0
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthResumeTest.kt
+@@ -0,0 +1,39 @@
++package chat.hearth
++
++import kotlin.test.Test
++import kotlin.test.assertFalse
++import kotlin.test.assertTrue
++
++/** Переподключение при выходе на передний план — не чаще раза в минуту. */
++class HearthResumeTest {
++
++  @Test
++  fun first_time_always_reconnects() {
++    assertTrue(HearthResume.shouldReconnect(lastMs = 0, nowMs = 5))
++  }
++
++  @Test
++  fun within_a_minute_is_skipped() {
++    assertFalse(HearthResume.shouldReconnect(lastMs = 100_000, nowMs = 100_000 + 59_999))
++  }
++
++  @Test
++  fun a_minute_later_reconnects_again() {
++    assertTrue(HearthResume.shouldReconnect(lastMs = 100_000, nowMs = 100_000 + 60_000))
++  }
++
++  @Test
++  fun a_clock_that_went_backwards_does_not_block_forever() {
++    // Если часы перевели назад, ждать «минуту от будущего» нельзя.
++    assertTrue(HearthResume.shouldReconnect(lastMs = 500_000, nowMs = 100_000))
++  }
++
++  @Test
++  fun claim_marks_the_attempt() {
++    HearthResume.reset()
++    assertTrue(HearthResume.claim(nowMs = 1_000))
++    assertFalse(HearthResume.claim(nowMs = 2_000))
++    assertTrue(HearthResume.claim(nowMs = 1_000 + 60_000))
++    HearthResume.reset()
++  }
++}
+diff --git a/apps/multiplatform/gradle.properties b/apps/multiplatform/gradle.properties
+index 89e4dd0..d280632 100644
+--- a/apps/multiplatform/gradle.properties
++++ b/apps/multiplatform/gradle.properties
+@@ -26,8 +26,8 @@ kotlin.jvm.target=11
+ 
+ # hearth: своя нумерация поверх тега upstream. versionCode обязан расти
+ # монотонно — по нему приложение решает, новее ли сборка на узле.
+-android.version_name=7.0.1-h19
+-android.version_code=390
++android.version_name=7.0.1-h20
++android.version_code=391
+ 
+ desktop.version_name=7.0.1
+ desktop.version_code=157
