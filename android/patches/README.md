@@ -22,8 +22,9 @@
 | 0011 | [Обновление с домашнего узла и самозаведение устройств](0011-self-update.md) | `AndroidManifest.xml`, экран настроек, префы, `gradle.properties` | ~45 |
 | 0012 | [Только arm64-v8a, и почему не флагом](0012-abi-arm64-only.md) | `android/build.gradle.kts` | ~15 |
 | 0013 | [Только свои серверы и свой вид ссылок](0013-own-servers-and-links.md) | онбординг, `Core.kt`, `WelcomeView.kt`, разбор и показ ссылок | ~60 |
+| 0014 | [Уведомление службы без значка в статус-баре](0014-hide-service-notification.md) | `SimplexService.kt` | ~25 |
 
-Итого ~450 строк + overlay-файлы (`android/overlay/`), которые в чужих файлах не живут
+Итого ~475 строк + overlay-файлы (`android/overlay/`), которые в чужих файлах не живут
 и при ребейзе не конфликтуют.
 
 ---

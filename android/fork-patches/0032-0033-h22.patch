@@ -1,0 +1,130 @@
+From 17cea4ce2c92befa2680d4917c4360c28a2000ee Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Wed, 16 Sep 2026 09:49:32 +0300
+Subject: [PATCH 32/32] =?UTF-8?q?0033:=20=D1=83=D0=B2=D0=B5=D0=B4=D0=BE?=
+ =?UTF-8?q?=D0=BC=D0=BB=D0=B5=D0=BD=D0=B8=D0=B5=20=D1=84=D0=BE=D0=BD=D0=BE?=
+ =?UTF-8?q?=D0=B2=D0=BE=D0=B9=20=D1=81=D0=BB=D1=83=D0=B6=D0=B1=D1=8B=20?=
+ =?UTF-8?q?=D0=B1=D0=B5=D0=B7=20=D0=B7=D0=BD=D0=B0=D1=87=D0=BA=D0=B0=20?=
+ =?UTF-8?q?=D0=B2=20=D1=81=D1=82=D0=B0=D1=82=D1=83=D1=81-=D0=B1=D0=B0?=
+ =?UTF-8?q?=D1=80=D0=B5;=20=D0=B2=D0=B5=D1=80=D1=81=D0=B8=D1=8F=20h22?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Постоянное «Очаг · идёт приём сообщений» в статус-баре мозолит глаза, а убрать его
+совсем нельзя: Android требует уведомление у foreground-службы, и без него служба
+перестаёт быть foreground — на 12+ система убивает её в течение минуты, то есть
+сообщения перестают приходить. Поэтому убираем не уведомление, а его видимость.
+
+Уведомление службы переехало на отдельный канал с IMPORTANCE_MIN: значка в статус-баре
+нет, на экране блокировки нет (VISIBILITY_SECRET), звука нет. В шторке оно остаётся —
+свёрнутым внизу, в «тихих». Это тот минимум, ниже которого система не пускает.
+
+Новый id канала, а не правка старого: важность фиксируется при создании, последующие
+вызовы createNotificationChannel её игнорируют, и у тех, у кого приложение уже стоит,
+канал так и остался бы IMPORTANCE_LOW. Пересоздание с тем же id не помогает — Android
+помнит настройки удалённых каналов.
+
+Старый канал оставлен и создаётся по-прежнему: через него идёт showPassphraseNotification
+(«введите пароль от БД», ошибки инициализации). Один общий MIN-канал на службу и на эти
+алерты означал бы, что человек не увидит, почему приложение не стартует.
+
+Чего это не гарантирует: MIUI и EMUI иногда показывают уведомления фоновых служб
+независимо от важности канала; на Android 8.0/8.1 (minSdk 26) система может показать
+своё «приложение работает в фоне». Если человек сам поменяет важность канала в
+настройках — его выбор победит, кнопка «Скрыть» в уведомлении ведёт именно туда.
+
+Версия 7.0.1-h22 (393).
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ .../java/chat/simplex/app/SimplexService.kt   | 27 ++++++++++++++++---
+ apps/multiplatform/gradle.properties          |  4 +--
+ 2 files changed, 25 insertions(+), 6 deletions(-)
+
+diff --git a/apps/multiplatform/android/src/main/java/chat/simplex/app/SimplexService.kt b/apps/multiplatform/android/src/main/java/chat/simplex/app/SimplexService.kt
+index 8c0a482..9b23f6a 100644
+--- a/apps/multiplatform/android/src/main/java/chat/simplex/app/SimplexService.kt
++++ b/apps/multiplatform/android/src/main/java/chat/simplex/app/SimplexService.kt
+@@ -165,11 +165,22 @@ class SimplexService: Service() {
+   private fun createNotificationChannel(): NotificationManager? {
+     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+       val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+-      val channel = NotificationChannel(NOTIFICATION_CHANNEL_ID, NOTIFICATION_CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW).let {
++      // hearth: видимый канал для важных служебных уведомлений (пароль БД, ошибки инициализации).
++      val alertChannel = NotificationChannel(NOTIFICATION_CHANNEL_ID, NOTIFICATION_CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW).let {
+         it.setShowBadge(false) // no long-press badge
+         it
+       }
+-      notificationManager.createNotificationChannel(channel)
++      notificationManager.createNotificationChannel(alertChannel)
++      // hearth: отдельный канал минимальной важности под уведомление foreground-службы.
++      // Совсем убрать уведомление нельзя — система требует его у foreground-службы, — но при
++      // IMPORTANCE_MIN значок не попадает в статус-бар, а уведомление сворачивается вниз шторки.
++      // Важность канала фиксируется при создании, поэтому заведён новый id, а не правка старого.
++      val serviceChannel = NotificationChannel(SERVICE_NOTIFICATION_CHANNEL_ID, SERVICE_NOTIFICATION_CHANNEL_NAME, NotificationManager.IMPORTANCE_MIN).let {
++        it.setShowBadge(false) // no long-press badge
++        it.lockscreenVisibility = Notification.VISIBILITY_SECRET // и не светить на экране блокировки
++        it
++      }
++      notificationManager.createNotificationChannel(serviceChannel)
+       return notificationManager
+     }
+     return null
+@@ -180,7 +191,7 @@ class SimplexService: Service() {
+       PendingIntent.getActivity(this, 0, notificationIntent, PendingIntent.FLAG_IMMUTABLE)
+     }
+ 
+-    val builder =  NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
++    val builder =  NotificationCompat.Builder(this, SERVICE_NOTIFICATION_CHANNEL_ID)
+       .setSmallIcon(R.drawable.ntf_service_icon)
+       .setColor(0xD9480F)
+       .setContentTitle(title)
+@@ -189,13 +200,17 @@ class SimplexService: Service() {
+       .setSilent(true)
+       .setShowWhen(false) // no date/time
+       .setOngoing(true) // Starting SDK 33 / Android 13, foreground notifications can be swiped away
++      // hearth: минимальный приоритет и служебная категория — не всплывать и не занимать статус-бар
++      .setPriority(NotificationCompat.PRIORITY_MIN)
++      .setCategory(NotificationCompat.CATEGORY_SERVICE)
++      .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+ 
+     // Shows a button which opens notification channel settings
+     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+       val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+       val setupIntent = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+       setupIntent.putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+-      setupIntent.putExtra(Settings.EXTRA_CHANNEL_ID, NOTIFICATION_CHANNEL_ID)
++      setupIntent.putExtra(Settings.EXTRA_CHANNEL_ID, SERVICE_NOTIFICATION_CHANNEL_ID)
+       val setup = PendingIntent.getActivity(this, 0, setupIntent, flags)
+       builder.addAction(0, generalGetString(MR.strings.hide_notification), setup)
+     }
+@@ -306,9 +321,13 @@ class SimplexService: Service() {
+ 
+   companion object {
+     const val TAG = "SIMPLEX_SERVICE"
++    // hearth: канал важных служебных уведомлений — пароль от БД, ошибки инициализации.
+     const val NOTIFICATION_CHANNEL_ID = "chat.simplex.app.SIMPLEX_SERVICE_NOTIFICATION"
+     // hearth: имя канала уведомлений человек видит в системных настройках приложения.
+     const val NOTIFICATION_CHANNEL_NAME = "Очаг"
++    // hearth: канал уведомления фоновой службы, скрытый из статус-бара (IMPORTANCE_MIN).
++    const val SERVICE_NOTIFICATION_CHANNEL_ID = "chat.simplex.app.SIMPLEX_SERVICE_NOTIFICATION_MIN"
++    const val SERVICE_NOTIFICATION_CHANNEL_NAME = "Очаг · фоновая работа"
+     const val SIMPLEX_SERVICE_ID = 6789
+     const val SERVICE_START_WORKER_VERSION = BuildConfig.VERSION_CODE
+     const val SERVICE_START_WORKER_INTERVAL_MINUTES = 3 * 60L
+diff --git a/apps/multiplatform/gradle.properties b/apps/multiplatform/gradle.properties
+index cf14a24..2a9d4b6 100644
+--- a/apps/multiplatform/gradle.properties
++++ b/apps/multiplatform/gradle.properties
+@@ -26,8 +26,8 @@ kotlin.jvm.target=11
+ 
+ # hearth: своя нумерация поверх тега upstream. versionCode обязан расти
+ # монотонно — по нему приложение решает, новее ли сборка на узле.
+-android.version_name=7.0.1-h21
+-android.version_code=392
++android.version_name=7.0.1-h22
++android.version_code=393
+ 
+ desktop.version_name=7.0.1
+ desktop.version_code=157
