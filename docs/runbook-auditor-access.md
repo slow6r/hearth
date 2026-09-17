@@ -45,6 +45,34 @@ ssh fels@192.168.1.72 "sudo ssh-keygen -lf /home/auditor/.ssh/authorized_keys"
 Отпечаток из последней команды сверить с тем, что аудит называет у себя
 (`ssh-keygen -lf auditor_ed25519.pub`). Совпал — доступ выдан тому, кому собирались.
 
+`useradd` оставляет в `shadow` `!` — «учётка заблокирована». На Debian это входу по ключу не
+мешает, но на части систем мешает, поэтому у `auditor` стоит `*`: пароля нет, блокировки нет.
+
+```bash
+ssh fels@192.168.1.72 "sudo usermod -p '*' auditor"
+```
+
+## Проверить, что доступ действительно работает
+
+Чужим ключом войти нельзя, а «файлы разложены правильно» — это не проверка. Боевая проверка
+делается временным ключом, который тут же отзывается.
+
+```bash
+ssh-keygen -t ed25519 -N "" -C temp-probe -f /tmp/probe -q
+ssh fels@192.168.1.72 'sudo tee -a /home/auditor/.ssh/authorized_keys > /dev/null' < /tmp/probe.pub
+
+ssh -i /tmp/probe auditor@192.168.1.72 'whoami; sudo -n true'
+# ожидание: whoami → auditor; sudo → «требуется указать пароль»
+
+# вернуть файл к одному настоящему ключу и убедиться, что временный отвергнут
+ssh fels@192.168.1.72 'sudo tee /home/auditor/.ssh/authorized_keys > /dev/null' < auditor.pub
+ssh -i /tmp/probe auditor@192.168.1.72 true    # ожидание: Permission denied (publickey)
+rm -f /tmp/probe /tmp/probe.pub
+```
+
+Последние две строки обязательны: проверка, после которой остаётся лишний ключ, хуже отсутствия
+проверки.
+
 ## Отозвать
 
 ```bash
