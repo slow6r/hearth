@@ -21,6 +21,7 @@
 | [runbook-device-lost.md](runbook-device-lost.md) | Телефон потерян или украден (§10.4) |
 | [runbook-rotate-address.md](runbook-rotate-address.md) | Компрометация CA или пароля релея (§10.5) |
 | [runbook-updates.md](runbook-updates.md) | Обновление компонентов (§10.6) |
+| [runbook-auditor-access.md](runbook-auditor-access.md) | Доступ аудитора к узлу: отдельная учётка без sudo, выдача и отзыв ключа |
 | [runbook-restore-drill.md](runbook-restore-drill.md) | Квартальная проверка восстановления (§10.7) |
 
 ## Решения (ADR)
