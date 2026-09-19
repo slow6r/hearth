@@ -1,0 +1,409 @@
+From b32344ad9fe4dd61ffd304f793267f1d632e7741 Mon Sep 17 00:00:00 2001
+From: slow6r <fedor_ramoz@mail.ru>
+Date: Sat, 19 Sep 2026 10:44:11 +0300
+Subject: [PATCH 34/34] =?UTF-8?q?0035:=20=D0=B4=D0=BE=D1=81=D1=82=D1=83?=
+ =?UTF-8?q?=D0=BF=D0=BD=D0=B0=D1=8F=20=D0=B2=D0=B5=D1=80=D1=81=D0=B8=D1=8F?=
+ =?UTF-8?q?=20=D0=BE=D0=B1=D0=BD=D0=BE=D0=B2=D0=BB=D0=B5=D0=BD=D0=B8=D1=8F?=
+ =?UTF-8?q?=20=D1=83=D1=85=D0=BE=D0=B4=D0=B8=D1=82=20=D0=B2=20=D1=88=D1=82?=
+ =?UTF-8?q?=D0=BE=D1=80=D0=BA=D1=83;=20=D0=B2=D0=B5=D1=80=D1=81=D0=B8?=
+ =?UTF-8?q?=D1=8F=20h24?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Разбор — в основном репозитории, коммит efc5f1e.
+
+Проверка при запуске находила новую версию и оставляла её на экране «Домашний узел», а
+в шторку уходили только неустранимые отказы и молчание узла. То есть человек узнавал о
+сломанном обновлении, но не о готовом, и §1.4 держался на том, вспомнит ли кто-нибудь
+открыть настройки.
+
+Правило «говорить ли» вынесено в commonMain и считает не только день, но и какой
+versionCode уже объявляли: вышла версия новее — говорим сразу, тот же самый — не чаще
+раза за окно. Иначе security-релиз, выпущенный через день после обычного, ждал бы
+неделю.
+
+Проверено: 34 класса, 306 Kotlin-тестов, ноль падений.
+
+Версия 7.0.1-h24 (395).
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ .../chat/hearth/HearthUpdates.android.kt      |  68 ++++++++-
+ .../kotlin/chat/hearth/HearthPrefs.kt         |  21 +++
+ .../kotlin/chat/hearth/HearthUpdates.kt       |  60 ++++++++
+ .../chat/hearth/HearthUpdateOfferTest.kt      | 134 ++++++++++++++++++
+ apps/multiplatform/gradle.properties          |   4 +-
+ 5 files changed, 283 insertions(+), 4 deletions(-)
+ create mode 100644 apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthUpdateOfferTest.kt
+
+diff --git a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdates.android.kt b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdates.android.kt
+index b32bf15..cdde10b 100644
+--- a/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdates.android.kt
++++ b/apps/multiplatform/common/src/androidMain/kotlin/chat/hearth/HearthUpdates.android.kt
+@@ -2,6 +2,7 @@ package chat.hearth
+ 
+ import android.app.NotificationChannel
+ import android.app.NotificationManager
++import android.app.PendingIntent
+ import android.content.Context
+ import android.os.Build
+ import androidx.core.app.NotificationCompat
+@@ -152,8 +153,14 @@ object HearthUpdates {
+     val result = checker(context, transport, installedVersionCode(context)).check()
+     remember(result)
+     when (result) {
+-      is HearthUpdateCheck.Available ->
++      is HearthUpdateCheck.Available -> {
+         Log.w("hearth", "на узле есть версия ${result.manifest.versionName}")
++        // Экран «Узел» человек может не открыть ни разу за год — ровно по этой причине
++        // туда же, в шторку, уходят отказ и молчание. Доступная версия до недавнего
++        // времени была единственным исходом, остававшимся только в настройках: человек
++        // узнавал о сломанном обновлении, но не о готовом.
++        offerUpdate(context, result.manifest)
++      }
+       is HearthUpdateCheck.UpToDate ->
+         Log.d("hearth", "обновлений нет, узел отвечает")
+       is HearthUpdateCheck.Failed -> {
+@@ -208,7 +215,63 @@ object HearthUpdates {
+    * Разрешения на уведомления может не быть, менеджера может не оказаться, прошивка
+    * Huawei может отказать — но проверка обновлений не должна из-за этого срываться.
+    */
+-  private fun show(context: Context, title: String, text: String): Boolean = runCatching {
++  /**
++   * Сказать в шторку, что на узле готова новая версия.
++   *
++   * Правило «говорить ли» — [HearthUpdateOffer.shouldAnnounce], и оно намеренно живёт в
++   * commonMain: это единственная часть, которую можно проверить тестом без устройства.
++   * Здесь остаётся то, что без Android не проверяется, — показ и запись отметки.
++   *
++   * Отметка ставится ТОЛЬКО если уведомление действительно показано. Иначе телефон, где
++   * уведомления запрещены, записал бы «сказано» и замолчал на неделю, ничего не сказав.
++   */
++  private fun offerUpdate(context: Context, manifest: HearthUpdateManifest) {
++    val today = hearthNowEpochDays()
++    val announce = HearthUpdateOffer.shouldAnnounce(
++      versionCode = manifest.versionCode,
++      announcedVersionCode = HearthPrefs.updateOfferedVersionCode,
++      announcedDay = HearthPrefs.updateOfferedDay,
++      todayEpochDays = today,
++    )
++    if (!announce) return
++    val shown = show(
++      context,
++      HearthUpdateOffer.TITLE,
++      HearthUpdateOffer.text(manifest.versionName),
++      openApp(context),
++    )
++    if (shown) {
++      HearthPrefs.updateOfferedVersionCode = manifest.versionCode.toLong()
++      HearthPrefs.updateOfferedDay = today
++    }
++  }
++
++  /**
++   * Куда ведёт нажатие на уведомление.
++   *
++   * Уведомление «есть новая версия», по которому некуда нажать, отправляет человека
++   * искать экран самостоятельно — а мы в тексте этот экран и называем.
++   *
++   * Точка входа берётся у системы по имени пакета, а не `Intent(context, MainActivity::class)`:
++   * `MainActivity` лежит в модуле приложения, а этот файл — в общем модуле, и модуль
++   * приложения зависит от него, а не наоборот. Ссылка на класс просто не собралась бы.
++   */
++  private fun openApp(context: Context): PendingIntent? = runCatching {
++    val intent = context.packageManager.getLaunchIntentForPackage(context.packageName) ?: return null
++    PendingIntent.getActivity(
++      context,
++      0,
++      intent,
++      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
++    )
++  }.getOrNull()
++
++  private fun show(
++    context: Context,
++    title: String,
++    text: String,
++    contentIntent: PendingIntent? = null,
++  ): Boolean = runCatching {
+     val mgr = context.getSystemService(NotificationManager::class.java) ?: return false
+     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && mgr.getNotificationChannel(CHANNEL) == null) {
+       mgr.createNotificationChannel(
+@@ -227,6 +290,7 @@ object HearthUpdates {
+         .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+         .setOnlyAlertOnce(true)
+         .setAutoCancel(true)
++        .apply { if (contentIntent != null) setContentIntent(contentIntent) }
+         .build(),
+     )
+     true
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthPrefs.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthPrefs.kt
+index 5c18312..f06413d 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthPrefs.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthPrefs.kt
+@@ -69,6 +69,23 @@ object HearthPrefs {
+     get() = readDay(UPDATE_PROBLEM_NOTICE_DAY)
+     set(value) = writeDay(UPDATE_PROBLEM_NOTICE_DAY, value)
+ 
++  /**
++   * Какой `versionCode` уже объявляли человеку в шторке как доступный.
++   *
++   * Хранится именно версия, а не только день: повод здесь не длящийся, а сменяющийся.
++   * Вышла версия новее объявленной — это новость, и ждать конца окна нельзя, иначе в
++   * эту разницу попадёт security-релиз, выпущенный через день после обычного. Разбор —
++   * [HearthUpdateOffer.shouldAnnounce].
++   */
++  var updateOfferedVersionCode: Long?
++    get() = readDay(UPDATE_OFFERED_VERSION)
++    set(value) = writeDay(UPDATE_OFFERED_VERSION, value)
++
++  /** День, когда про эту версию сказали: тот же versionCode повторяем не чаще раза в окно. */
++  var updateOfferedDay: Long?
++    get() = readDay(UPDATE_OFFERED_DAY)
++    set(value) = writeDay(UPDATE_OFFERED_DAY, value)
++
+   /**
+    * Узел ответил: забыть счёт неудачных дней.
+    *
+@@ -240,6 +257,8 @@ object HearthPrefs {
+     failedUpdateCheckDays = 0
+     lastFailedCheckDay = null
+     updateProblemNoticeDay = null
++    updateOfferedVersionCode = null
++    updateOfferedDay = null
+   }
+ 
+   private const val BUNDLE_HOST = "hearthBundleHost"
+@@ -254,6 +273,8 @@ object HearthPrefs {
+   private const val FAILED_CHECK_DAYS = "hearthFailedUpdateCheckDays"
+   private const val LAST_FAILED_CHECK_DAY = "hearthLastFailedUpdateCheckDay"
+   private const val UPDATE_PROBLEM_NOTICE_DAY = "hearthUpdateProblemNoticeDay"
++  private const val UPDATE_OFFERED_VERSION = "hearthUpdateOfferedVersion"
++  private const val UPDATE_OFFERED_DAY = "hearthUpdateOfferedDay"
+ 
+   /**
+    * Значения нет.
+diff --git a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthUpdates.kt b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthUpdates.kt
+index 8ca8c79..7e5e5cc 100644
+--- a/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthUpdates.kt
++++ b/apps/multiplatform/common/src/commonMain/kotlin/chat/hearth/HearthUpdates.kt
+@@ -16,3 +16,63 @@ package chat.hearth
+  * тем же приёмом, что у [hearthRefreshIceServers].
+  */
+ expect suspend fun hearthCheckUpdatesQuietly()
++
++/**
++ * Говорить ли человеку в шторку, что на узле есть новая версия.
++ *
++ * # Зачем понадобилось отдельное правило
++ *
++ * Проверка при запуске нашла новую версию и клала строку на экран «Домашний узел» —
++ * туда, куда по своей воле не заходят. В шторку уходили только неустранимые отказы и
++ * молчание узла, то есть человек узнавал о СЛОМАННОМ обновлении, но не о доступном.
++ * Практически это означало, что §1.4 («security-релиз в контуре за ≤ 7 дней») держался
++ * на том, вспомнит ли кто-нибудь открыть настройки.
++ *
++ * # Почему счётчик по версии, а не по дню
++ *
++ * У [HearthUpdates.warnIfSilent] и [HearthUpdates.warnAboutRefusal] поводы длящиеся:
++ * узел молчит или ключа нет, и напоминать о них чаще раза в окно — значит приучить не
++ * читать. Здесь повод другой: он не длится, а СМЕНЯЕТСЯ. Вышла версия новее той, о
++ * которой уже сказали, — это новость, и ждать конца окна нельзя: именно в эту разницу
++ * попадает security-релиз, выпущенный через день после обычного.
++ *
++ * Поэтому помним не только день, но и какой versionCode уже объявляли. Сменился —
++ * говорим сразу; тот же самый — не чаще раза за окно.
++ *
++ * # Часы назад
++ *
++ * Если день на телефоне оказался РАНЬШЕ записанного, разность отрицательна и обычная
++ * проверка «прошло ли окно» замолчала бы до тех пор, пока часы не догонят — на год
++ * вперёд переведённые часы означали бы год тишины. Считаем это поводом сказать: лучше
++ * лишнее уведомление, чем пропущенный security-релиз.
++ */
++object HearthUpdateOffer {
++
++  const val TITLE: String = "Очаг: есть новая версия"
++
++  fun shouldAnnounce(
++    versionCode: Int,
++    announcedVersionCode: Long?,
++    announcedDay: Long?,
++    todayEpochDays: Long,
++    repeatAfterDays: Long = HearthUpdateTrust.STALE_AFTER_DAYS,
++  ): Boolean {
++    if (announcedVersionCode != versionCode.toLong()) return true
++    if (announcedDay == null) return true
++    if (todayEpochDays < announcedDay) return true
++    return todayEpochDays - announcedDay >= repeatAfterDays
++  }
++
++  /**
++   * Текст уведомления.
++   *
++   * Прямо сказано, что само оно не скачается: [HearthUpdates.checkQuietly] намеренно не
++   * качает APK — сотни мегабайт по мобильной сети без спроса это счёт за трафик, а не
++   * забота. Без этой фразы «есть новая версия» читается как «оно уже ставится».
++   */
++  fun text(versionName: String): String =
++    "На узле готова версия $versionName. Откройте «Настройки → Домашний узел» и нажмите " +
++      "«Проверить обновление»: приложение скачает её и предложит установить. Само оно не " +
++      "качает — обновление весит сотни мегабайт, и тратить на него мобильный трафик без " +
++      "спроса неправильно."
++}
+diff --git a/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthUpdateOfferTest.kt b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthUpdateOfferTest.kt
+new file mode 100644
+index 0000000..909c9ee
+--- /dev/null
++++ b/apps/multiplatform/common/src/commonTest/kotlin/chat/hearth/HearthUpdateOfferTest.kt
+@@ -0,0 +1,134 @@
++package chat.hearth
++
++import kotlin.test.Test
++import kotlin.test.assertFalse
++import kotlin.test.assertTrue
++
++/**
++ * Когда про доступную версию говорят в шторку.
++ *
++ * Правило вынесено в commonMain ради этих тестов: показ уведомления без устройства не
++ * проверить, а решение «говорить или молчать» — единственное место, где можно ошибиться
++ * тихо. Ошибка в одну сторону приучает не читать уведомления, в другую — прячет
++ * security-релиз.
++ */
++class HearthUpdateOfferTest {
++
++  private val window = HearthUpdateTrust.STALE_AFTER_DAYS
++
++  @Test
++  fun про_версию_о_которой_ещё_не_говорили_говорим_сразу() {
++    assertTrue(
++      HearthUpdateOffer.shouldAnnounce(
++        versionCode = 394,
++        announcedVersionCode = null,
++        announcedDay = null,
++        todayEpochDays = 100,
++      )
++    )
++  }
++
++  @Test
++  fun ту_же_версию_в_тот_же_день_не_повторяем() {
++    assertFalse(
++      HearthUpdateOffer.shouldAnnounce(
++        versionCode = 394,
++        announcedVersionCode = 394L,
++        announcedDay = 100,
++        todayEpochDays = 100,
++      )
++    )
++  }
++
++  @Test
++  fun ту_же_версию_внутри_окна_не_повторяем() {
++    assertFalse(
++      HearthUpdateOffer.shouldAnnounce(
++        versionCode = 394,
++        announcedVersionCode = 394L,
++        announcedDay = 100,
++        todayEpochDays = 100 + window - 1,
++      )
++    )
++  }
++
++  @Test
++  fun ту_же_версию_после_окна_напоминаем() {
++    assertTrue(
++      HearthUpdateOffer.shouldAnnounce(
++        versionCode = 394,
++        announcedVersionCode = 394L,
++        announcedDay = 100,
++        todayEpochDays = 100 + window,
++      )
++    )
++  }
++
++  /**
++   * Ради этого случая и хранится версия, а не только день: security-релиз, вышедший на
++   * следующий день после обычного, обязан дойти немедленно, а не через неделю.
++   */
++  @Test
++  fun новая_версия_на_следующий_день_говорится_не_дожидаясь_окна() {
++    assertTrue(
++      HearthUpdateOffer.shouldAnnounce(
++        versionCode = 395,
++        announcedVersionCode = 394L,
++        announcedDay = 100,
++        todayEpochDays = 101,
++      )
++    )
++  }
++
++  /**
++   * Понижение версии на узле — тоже смена, и о ней лучше сказать: молча промолчать
++   * означало бы, что откат раздачи невидим.
++   */
++  @Test
++  fun версия_ниже_объявленной_тоже_считается_сменой() {
++    assertTrue(
++      HearthUpdateOffer.shouldAnnounce(
++        versionCode = 393,
++        announcedVersionCode = 394L,
++        announcedDay = 100,
++        todayEpochDays = 101,
++      )
++    )
++  }
++
++  /**
++   * Часы, переведённые назад, давали бы отрицательную разность — и обычная проверка
++   * «прошло ли окно» замолчала бы до тех пор, пока часы не догонят.
++   */
++  @Test
++  fun часы_назад_не_затыкают_уведомление_навсегда() {
++    assertTrue(
++      HearthUpdateOffer.shouldAnnounce(
++        versionCode = 394,
++        announcedVersionCode = 394L,
++        announcedDay = 500,
++        todayEpochDays = 100,
++      )
++    )
++  }
++
++  @Test
++  fun день_без_версии_не_считается_объявленным() {
++    assertTrue(
++      HearthUpdateOffer.shouldAnnounce(
++        versionCode = 394,
++        announcedVersionCode = null,
++        announcedDay = 100,
++        todayEpochDays = 100,
++      )
++    )
++  }
++
++  @Test
++  fun в_тексте_есть_версия_и_сказано_что_само_не_скачается() {
++    val text = HearthUpdateOffer.text("7.0.1-h24")
++    assertTrue(text.contains("7.0.1-h24"))
++    assertTrue(text.contains("не") && text.contains("качает"))
++    assertTrue(text.contains("Домашний узел"))
++  }
++}
+diff --git a/apps/multiplatform/gradle.properties b/apps/multiplatform/gradle.properties
+index d8b52bf..68250da 100644
+--- a/apps/multiplatform/gradle.properties
++++ b/apps/multiplatform/gradle.properties
+@@ -26,8 +26,8 @@ kotlin.jvm.target=11
+ 
+ # hearth: своя нумерация поверх тега upstream. versionCode обязан расти
+ # монотонно — по нему приложение решает, новее ли сборка на узле.
+-android.version_name=7.0.1-h23
+-android.version_code=394
++android.version_name=7.0.1-h24
++android.version_code=395
+ 
+ desktop.version_name=7.0.1
+ desktop.version_code=157
