@@ -22,6 +22,20 @@ if grep -q 'REPLACE-WITH-PINNED-TAG' <<<"$ACTIVE"; then
     status=1
 fi
 
+# Свой бинарник обязан быть запинен ВМЕСТЕ с коммитом. Без него манифест доказывает
+# «файл тот же, что запинен», но не «запинен файл из коммита X»: pin измеряет то, что
+# подсунули, а строка version = "0.1.0" подтверждает лишь то, что её кто-то напечатал.
+# У upstream-бинарей коммита нет и не должно быть: там внешний якорь — GPG-подпись.
+for own in hearthd hearthctl; do
+    ENTRY="$(awk "/name = \"$own\"/,/^\$/" <<<"$ACTIVE")"
+    [[ -n "$ENTRY" ]] || continue
+    if ! grep -qE '^commit[[:space:]]*=' <<<"$ENTRY"; then
+        echo "  !! у записи $own нет коммита — происхождение сборки не записано."
+        echo "     hearthctl manifest pin --name $own"
+        status=1
+    fi
+done
+
 if command -v hearthctl >/dev/null; then
     echo "  hearthctl manifest verify:"
     if hearthctl manifest verify 2>&1 | sed 's/^/    /'; then
