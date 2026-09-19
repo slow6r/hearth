@@ -31,7 +31,7 @@
 | **Restore on AC power loss** | **Power On** | После отключения света машина поднимется сама. Без этого мессенджер лежит до прихода человека |
 | Wi-Fi | Disabled | У сервера не должно быть радиоинтерфейсов |
 | Bluetooth | Disabled | То же |
-| Secure Boot | Disabled | Иначе Debian с LUKS ставится с лишними сложностями |
+| Secure Boot | Disabled | Debian с LUKS ставится проще. Включать имеет смысл **только вместе с FDE**, и прежде всего в варианте «LUKS + разблокировка по TPM»: без Secure Boot значения PCR ничего содержательного не измеряют. На узле без шифрования Secure Boot не даёт ничего — тот, кто добрался до диска, правит `initramfs` напрямую ([ADR 0009](adr/0009-no-full-disk-encryption.md)) |
 | Intel PTT (fTPM) | Enabled | Пригодится, если позже переведёте разблокировку на TPM |
 
 Первый пункт проверьте не на слово: после установки выдерните питание из розетки,
@@ -81,6 +81,21 @@ groups gym
 
 **Автологин зала:** Настройки → Пользователи → `gym` → Автоматический вход.
 
+> **Условие, без которого этот шаг делать нельзя.** Автовход допустим **только** для
+> учётки, которой нет ни в группе `sudo`, ни в `sudoers`. Проверьте перед включением, а
+> не после:
+>
+> ```bash
+> groups gym | tr ' ' '\n' | grep -x sudo    # ожидается: пусто
+> sudo -n -l -U gym                          # ожидается: отказ, не список правил
+> ```
+>
+> На `fels` это условие не проверили, и автовход приземлился на учётку с
+> `NOPASSWD: ALL` — то есть машина круглосуточно стоит в зале с открытой
+> root-эквивалентной сессией ([ADR 0008](adr/0008-multi-purpose-host.md), дополнение
+> 2026-09-18). Разбор и обратный порядок:
+> [runbook-host-hardening.md](runbook-host-hardening.md).
+
 ---
 
 ## 4. Экран гаснет, машина работает
@@ -96,7 +111,10 @@ sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.ta
 gsettings set org.gnome.desktop.session idle-delay 600
 gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing'
 gsettings set org.gnome.settings-daemon.plugins.power power-button-action 'nothing'
-# блокировку экрана можно не включать: gym всё равно без прав
+# блокировку экрана можно не включать — но ТОЛЬКО потому, что gym без прав.
+# Если автовход стоит на учётке с sudo, эта строка означает «root-шелл у телевизора
+# круглосуточно»: сначала уберите sudo (runbook-host-hardening.md §1.2), потом решайте
+# про локскрин. Проверка условия — в §3 выше.
 gsettings set org.gnome.desktop.screensaver lock-enabled false
 ```
 
@@ -202,7 +220,9 @@ sudo apt install nut
 ## Порядок проверки, когда всё встало
 
 ```bash
-hearthctl health                          # все сервисы ok
+hearthctl health                          # все сервисы ok; строка backup= на новом
+                                          # узле честно скажет Down, пока не отработал
+                                          # первый бэкап (hearthctl backup now)
 hearthctl egress                          # egress_drop = 0, app_egress растёт — так и надо
 sudo tests/acceptance/run-all.sh          # A1, A2, A3, A12
 TARGET=<node.host> ./a04-port-scan.sh     # с телефона по мобильной сети: 7443 и 22 закрыты

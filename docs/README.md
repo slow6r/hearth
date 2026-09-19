@@ -21,6 +21,7 @@
 | [runbook-device-lost.md](runbook-device-lost.md) | Телефон потерян или украден (§10.4) |
 | [runbook-rotate-address.md](runbook-rotate-address.md) | Компрометация CA или пароля релея (§10.5) |
 | [runbook-updates.md](runbook-updates.md) | Обновление компонентов (§10.6) |
+| [runbook-host-hardening.md](runbook-host-hardening.md) | Среда узла `fels`: автовход, sudo, шифрование swap, Secure Boot, версия coturn — что делается сегодня, что в окно обслуживания, что принимается как риск |
 | [runbook-auditor-access.md](runbook-auditor-access.md) | Доступ аудитора к узлу: отдельная учётка без sudo, выдача и отзыв ключа |
 | [runbook-restore-drill.md](runbook-restore-drill.md) | Квартальная проверка восстановления (§10.7) |
 
@@ -36,7 +37,7 @@
 | [0006](adr/0006-state-dir-in-backup.md) | Четвёртый каталог в бэкапе сверх трёх из §10.1 |
 | [0007](adr/0007-public-relay-no-vpn.md) | **Публичный релей вместо доступа только через WireGuard** |
 | [0008](adr/0008-multi-purpose-host.md) | **Многоцелевой узел: egress по пользователям** |
-| [0009](adr/0009-no-full-disk-encryption.md) | Узел без LUKS: принятое отступление |
+| [0009](adr/0009-no-full-disk-encryption.md) | Узел без LUKS: принятое отступление. Таблица компенсаций зависит от статуса разделения пользователей на узле — при ревью сверять с [ADR 0008](adr/0008-multi-purpose-host.md) и `a18-host-env.sh`, а не с памятью |
 | [0010](adr/0010-device-api.md) | **Device API: публичный сервис узла для самих телефонов** |
 | [0011](adr/0011-baked-invite.md) | Приглашение, вшитое в сборку (заменено 0012) |
 | [0012](adr/0012-access-codes.md) | **Код доступа вместо вшитого приглашения** |
