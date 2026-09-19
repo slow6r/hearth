@@ -1,0 +1,2 @@
+  // hearth (patches/0004-ice-servers.md): источник вычищен так же, как call.js.
+  const defaultIceServers: RTCIceServer[] = []

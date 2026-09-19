@@ -1,0 +1,4 @@
+  const defaultIceServers: RTCIceServer[] = [
+    {urls: ["stuns:stun.simplex.im:443"]},
+    {urls: ["turns:turn.simplex.im:443?transport=tcp"], username: "private2", credential: "REDACTED"},
+  ]

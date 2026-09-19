@@ -1,0 +1,15 @@
+const processCommand = (function () {
+    // hearth (patches/0004-ice-servers.md): пусто, и это не забывчивость.
+    //
+    // Здесь у upstream стояли stun.simplex.im и turn.simplex.im с креденшелами.
+    // Fallback'а быть не должно: если ICE не пришли с bundle, звонок обязан честно
+    // не состояться.
+    const defaultIceServers = [];
+    function getCallConfig(encodedInsertableStreams, iceServers, relay) {
+        return {
+            peerConnectionConfig: {
+                iceServers: iceServers !== null && iceServers !== void 0 ? iceServers : defaultIceServers,
+                iceTransportPolicy: relay ? "relay" : "all",
+            },
+        };
+    }

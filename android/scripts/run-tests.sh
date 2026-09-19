@@ -22,8 +22,25 @@ FORK="${FORK_DIR:-$HERE/simplex-chat}/apps/multiplatform"
 # проверялась бы прошлая копия в форке, а не то, что сейчас в репозитории.
 bash "$HERE/scripts/sync-overlay.sh"
 
+# СВЕЖЕСТЬ ПРОГОНА. Метку времени ставим до запуска и сверяем с ней каждый XML:
+# при UP-TO-DATE Gradle не выполняет тесты, а сводка молча показывает прошлые
+# числа. Сама проверка живёт в lib и прогоняется в scripts/tests/run.sh.
+# shellcheck source=lib/test-freshness.sh
+source "$HERE/scripts/lib/test-freshness.sh"
+
+MARK="$(mktemp)"
+trap 'rm -f "$MARK"' EXIT
+
 cd "$FORK"
 ./gradlew :common:desktopTest --no-daemon
+
+# Не падаем, а честно перезапускаем: раз задача сочтена выполненной, числа ниже
+# были бы прошлыми.
+if ! fresh_results "$MARK" common/build/test-results; then
+    echo
+    echo "== результаты не обновились (Gradle счёл задачу UP-TO-DATE) — прогоняем принудительно"
+    ./gradlew :common:desktopTest --rerun-tasks --no-daemon
+fi
 
 echo
 echo "== итоги по классам"
@@ -38,5 +55,17 @@ done < <(find common/build/test-results -name 'TEST-*.xml' 2>/dev/null | sort)
 # отработала вхолостую, и «ничего не упало» тут ничего не значит.
 if [ "$found" -eq 0 ]; then
     echo "  !! результатов тестов нет — прогон не состоялся" >&2
+    exit 1
+fi
+
+# Итоговые числа одной строкой: их и просят в отчётах о проверке.
+find common/build/test-results -name 'TEST-*.xml' -print0 2>/dev/null \
+    | xargs -0 grep -ho 'tests="[0-9]*" skipped="[0-9]*" failures="[0-9]*" errors="[0-9]*"' \
+    | awk -F'"' '{t+=$2; s+=$4; f+=$6; e+=$8} END {printf "== всего: классов %d, тестов %d, пропущено %d, падений %d, ошибок %d\n", NR, t, s, f, e}'
+
+# Последняя проверка свежести: если и после принудительного прогона XML старше
+# метки, значит числа выше — прошлые, и отчёт о зелёных тестах будет ложью.
+if ! fresh_results "$MARK" common/build/test-results; then
+    echo "  !! результаты старше запуска — тесты физически не перезапускались" >&2
     exit 1
 fi

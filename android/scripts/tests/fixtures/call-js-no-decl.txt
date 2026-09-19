@@ -1,0 +1,4 @@
+const processCommand = (function () {
+    function getCallConfig(encodedInsertableStreams, iceServers, relay) {
+        return { peerConnectionConfig: { iceServers: iceServers } };
+    }

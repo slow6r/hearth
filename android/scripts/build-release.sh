@@ -3,6 +3,22 @@
 #
 # Подпись здесь НЕ выполняется: ключ подписи офлайновый и hardware-backed (YubiKey/
 # pkcs11), в CI его нет, подпись — отдельный ручной шаг на доверенной машине.
+#
+# ЧТО ПАСПОРТ ДОКАЗЫВАЕТ, А ЧТО НЕТ — назвать прямо, как в relays/ntf/build-ntf-server.sh.
+#
+#   доказывает:   из какого коммита форка и из какого коммита ЭТОГО репозитория
+#                 (overlay, скрипты, вшитый адрес узла) собран APK; какие именно
+#                 значения вшил bake-node.sh; каким инструментом собрано;
+#   НЕ доказывает: воспроизводимость APK из Git. Нативное ядро libsimplex.so/
+#                 libsupport.so мы не собираем — оно берётся из официального APK
+#                 пинованного тега upstream (см. ниже). Значит полной цепочки
+#                 «исходники → байты приложения» нет и не будет, пока ядро приходит
+#                 чужой сборкой. Доверие к этой части держится на двух вещах: подписи
+#                 APK нашим ключом и совпадении sha256 обеих .so с официальным
+#                 артефактом пинованного тега. Это меньше, чем воспроизводимость, и
+#                 говорить об этом надо честно, а не обходить.
+#                 Gradle/AGP/JDK тоже не пиннятся по digest — версии печатаются в
+#                 паспорт, но образа сборки нет.
 set -euo pipefail
 
 FORK_DIR="${FORK_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../simplex-chat" && pwd)}"
@@ -44,6 +60,90 @@ else
     FORK_COMMIT="unknown"
 fi
 
+# Патч 0004 (ICE): проверяем ИСХОДНИКИ, а не только готовый APK.
+#
+# verify-apk.sh смотрит в ассет собранного APK — и это правильная проверка, но она
+# случается после сборки, когда время уже потрачено. Здесь то же самое по дереву
+# форка, сразу после раскладки overlay: дешевле и раньше.
+#
+# Отдельная история — packages/simplex-chat-webrtc/src/call.ts, из которого call.js и
+# ПОРОЖДАЕТСЯ. В нём публичные серверы upstream стоят до сих пор вместе с рабочими
+# креденшелами: патч 0004 правил только результат сборки пакета, но не его источник.
+# В APK это сегодня не попадает — webrtc-пакет мы не пересобираем, — поэтому здесь
+# предупреждение, а не остановка: гейт, который валит каждую сборку из-за файла,
+# которого в сборке нет, оставит семью без обновлений, а починить его этим скриптом
+# нельзя (правка call.ts — патч к форку). Как только пакет пересоберут, вернувшиеся
+# адреса поймает проверка call.js выше — уже жёстко.
+CHECKS_LIB="$(dirname "${BASH_SOURCE[0]}")/lib/apk-checks.sh"
+# shellcheck source=lib/apk-checks.sh
+source "$CHECKS_LIB"
+CALL_JS_PATH="$FORK_DIR/apps/multiplatform/common/src/commonMain/resources/assets/www/call.js"
+if [ ! -f "$CALL_JS_PATH" ]; then
+    echo "нет $CALL_JS_PATH — звонковый ассет пропал, собирать нечего" >&2
+    exit 1
+fi
+CALL_JS="$(cat "$CALL_JS_PATH")"
+for ice_check in check_no_public_ice check_ice_defaults_empty; do
+    if out="$("$ice_check" "$CALL_JS" "assets/www/call.js")"; then
+        echo "== $out"
+    else
+        echo "== ПАТЧ 0004 НАРУШЕН: $out" >&2
+        exit 1
+    fi
+done
+CALL_TS_PATH="$FORK_DIR/packages/simplex-chat-webrtc/src/call.ts"
+if [ -f "$CALL_TS_PATH" ]; then
+    if ! out="$(check_no_public_ice "$(cat "$CALL_TS_PATH")" "packages/simplex-chat-webrtc/src/call.ts")"; then
+        echo "ВНИМАНИЕ: $out" >&2
+        echo "  В APK это не попадает: call.js собран отдельно и проверен выше." >&2
+        echo "  Но пересборка webrtc-пакета вернёт публичные серверы — патч 0004 надо" >&2
+        echo "  распространить и на call.ts (см. android/patches/0004-ice-servers.md)." >&2
+    fi
+fi
+
+# Коммит ЭТОГО репозитория. Половина изменений живёт здесь: overlay, скрипты,
+# bake-node.sh. Гейт чистоты форка покрывает их лишь косвенно — он ловит расхождение
+# разложенного с закоммиченным В ФОРКЕ, а правка overlay, не попавшая в git messanger,
+# уедет в сборку и не оставит следа. Ровно этим способом и потерялся h15, только в
+# другом дереве.
+OVERLAY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if git -C "$OVERLAY_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    OVERLAY_DIRTY="$(git -C "$OVERLAY_DIR" status --porcelain)"
+    if [ -n "$OVERLAY_DIRTY" ]; then
+        echo "== дерево overlay (messanger) изменено:" >&2
+        printf '%s\n' "$OVERLAY_DIRTY" >&2
+        if [ "${HEARTH_ALLOW_DIRTY:-0}" = "1" ]; then
+            echo "ВНИМАНИЕ: HEARTH_ALLOW_DIRTY=1 — собираю из изменённого дерева." >&2
+            echo "Такую сборку НЕЛЬЗЯ раздавать: её нечем сопоставить с исходниками." >&2
+        else
+            echo >&2
+            echo "Закоммитьте изменения в messanger и повторите." >&2
+            echo "Для заведомо черновой сборки: HEARTH_ALLOW_DIRTY=1 ./build-release.sh" >&2
+            exit 1
+        fi
+    fi
+    OVERLAY_COMMIT="$(git -C "$OVERLAY_DIR" rev-parse HEAD)"
+    echo "== Коммит overlay (messanger): $OVERLAY_COMMIT"
+else
+    echo "ВНИМАНИЕ: $OVERLAY_DIR не git-репозиторий — overlay не с чем сопоставить." >&2
+    OVERLAY_COMMIT="unknown"
+fi
+
+# Что вшил bake-node.sh. Именно эти три значения отличают нашу сборку от чистого
+# upstream, и именно их не было в паспорте: APK с чужим адресом узла выглядел бы
+# точно так же.
+NODE_RES="$FORK_DIR/apps/multiplatform/android/src/main/res/raw/hearth_node.json"
+NODE_CA="$FORK_DIR/apps/multiplatform/android/src/main/res/raw/hearth_ca.pem"
+NODE_KEY="$FORK_DIR/apps/multiplatform/android/src/main/res/raw/hearth_release_key.pub"
+baked() {
+    if [ -f "$1" ]; then sha256sum "$1" | cut -d' ' -f1; else echo "absent"; fi
+}
+NODE_HOST_BAKED="absent"
+if [ -f "$NODE_RES" ]; then
+    # Адрес узла не тайна (его видно в любом соединении с релеем), поэтому пишем как есть.
+    NODE_HOST_BAKED="$(tr -d ' \n' < "$NODE_RES")"
+fi
+
 cd "$FORK_DIR/apps/multiplatform"
 
 # Нативное ядро на Haskell мы не собираем (android/README.md, раздел «Стратегия»):
@@ -83,6 +183,10 @@ sha256sum "$APK"
 BUILD_INFO="${APK%.apk}.build-info.txt"
 {
     echo "fork_commit=$FORK_COMMIT"
+    echo "overlay_commit=$OVERLAY_COMMIT"
+    echo "node_baked=$NODE_HOST_BAKED"
+    echo "node_ca_sha256=$(baked "$NODE_CA")"
+    echo "release_key_sha256=$(baked "$NODE_KEY")"
     echo "version_name=$(grep -E '^android.version_name=' gradle.properties | cut -d= -f2)"
     echo "version_code=$(grep -E '^android.version_code=' gradle.properties | cut -d= -f2)"
     echo "apk_sha256=$(sha256sum "$APK" | cut -d' ' -f1)"

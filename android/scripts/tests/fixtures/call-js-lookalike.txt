@@ -1,0 +1,17 @@
+const processCommand = (function () {
+    // hearth: свой узел, чужого здесь нет. Поддомены названы через дефис — и ровно
+    // этим запись была похожа на публичный сервер, пока точка в шаблоне проверки
+    // означала «любой символ»: stun.simplex.im совпадало с stun-simplex-im.
+    const defaultIceServers = [];
+    const nodeIceServers = [
+        { urls: ["stun:stun-simplex-im.myhearth.ru:3478"] },
+        { urls: ["turns:hearth:parol@turn-simplex-im.myhearth.ru:5349"] },
+    ];
+    function getCallConfig(encodedInsertableStreams, iceServers, relay) {
+        return {
+            peerConnectionConfig: {
+                iceServers: iceServers !== null && iceServers !== void 0 ? iceServers : defaultIceServers,
+                iceTransportPolicy: relay ? "relay" : "all",
+            },
+        };
+    }

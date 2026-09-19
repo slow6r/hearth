@@ -1,0 +1,9 @@
+Binary APK
+Package name=chat.simplex.app id=7f
+  type raw id=10 entryCount=3
+    resource 0x7f100000 raw/hearth_allow_unsigned_updates
+      () (file) res/raw/hearth_allow_unsigned_updates type=RAW_STRING
+    resource 0x7f100001 raw/hearth_ca
+      () (file) res/raw/hearth_ca.pem type=RAW_STRING
+    resource 0x7f100002 raw/hearth_node
+      () (file) res/raw/hearth_node.json type=RAW_STRING

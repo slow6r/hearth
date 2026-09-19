@@ -103,13 +103,29 @@ if [[ ${#STRINGS} -lt 100000 ]]; then
     echo "dex разобран подозрительно коротко (${#STRINGS} байт) — проверка недостоверна" >&2
     exit 2
 fi
-for host in "smp1.simplex.im" "smp8.simplex.im" "xftp1.simplex.im" "ntf1.simplex.im" "stun.l.google.com"; do
+for host in "smp1.simplex.im" "smp8.simplex.im" "xftp1.simplex.im" "ntf1.simplex.im" "stun.l.google.com" "stun.simplex.im" "turn.simplex.im"; do
     if grep -qF "$host" <<<"$STRINGS"; then
         fail "в dex найдена строка $host"
     else
         pass "нет $host"
     fi
 done
+
+echo
+echo "== Патч 0004: звонки не знают публичных STUN/TURN (ассеты, а не dex)"
+# Единственная правка форка по звонкам живёт в ассете, а не в коде: проверки выше
+# разбирают только classes*.dex и её не видят. Ребейз, вернувший upstream-овский
+# call.js, до сих пор проходил гейт зелёным — а вместе с ним возвращались публичные
+# серверы SimpleX с рабочими креденшелами и молчаливый откат на них.
+CALL_JS="$(unzip -p "$APK" 'assets/www/call.js' 2>/dev/null || true)"
+if [[ ${#CALL_JS} -lt 10000 ]]; then
+    # Та же логика, что у dex выше: «разобралось подозрительно коротко» — это
+    # неизвестность, а не чистота, и останавливает она весь гейт, а не одну проверку.
+    echo "assets/www/call.js не прочитан или подозрительно короток (${#CALL_JS} байт) — проверка недостоверна" >&2
+    exit 2
+fi
+check check_no_public_ice "$CALL_JS" "assets/www/call.js"
+check check_ice_defaults_empty "$CALL_JS" "assets/www/call.js"
 
 echo
 echo "== Нативное ядро: ровно то, что выпустил upstream"
@@ -144,13 +160,12 @@ if [[ -n "$NODE_PATH" ]]; then
     NODE_RES="$(unzip -p "$APK" "$NODE_PATH" 2>/dev/null || true)"
 fi
 check check_node_resource "$NODE_RES"
-# Ключ подписи манифестов (ADR 0014). Без него сборка не умеет отличить наш
-# манифест обновления от подсунутого захваченным узлом.
-if grep -q 'raw/hearth_release_key' <<<"$RES_TABLE"; then
-    pass "ключ подписи манифестов вшит"
-else
-    fail "нет ресурса raw/hearth_release_key — обновления не проверяются (ADR 0014)"
-fi
+# Ключ подписи манифестов и отказ от неё (ADR 0014). Разбор — в lib/apk-checks.sh, и
+# он прогоняется по фикстурам: раньше обе проверки были подстрочным grep прямо здесь и
+# не проверялись ничем, хотя именно на второй держится обещание «релиз не может
+# отказаться от проверки подписи обновлений».
+check check_release_key_present "$RES_TABLE"
+check check_no_unsigned_updates_flag "$RES_TABLE"
 if grep -q 'raw/hearth_invite' <<<"$RES_TABLE"; then
     fail "остался ресурс raw/hearth_invite — это вшитый секрет (ADR 0012)"
 else
