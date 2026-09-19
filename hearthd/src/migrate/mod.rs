@@ -47,12 +47,59 @@ pub struct ImportReport {
     pub next_steps: Vec<String>,
 }
 
+/// Причина режима на время импорта. Одна строка на обе точки, где она ставится.
+const IMPORT_REASON: &str = "перенос узла: идёт импорт архива на этот узел";
+
 /// Stop the relays and produce the final encrypted archive (ТЗ §10.2 п.3).
+///
+/// Запрет ставится ПЕРВЫМ действием, до единой команды `systemctl stop`. Раньше он
+/// стоял в конце, рядом с записью статуса, и всё время шифрования архива и rsync —
+/// на живом узле это минуты и десятки минут — режим оставался `normal`. Надзор с его
+/// пятнадцатисекундным тиком видел молчащий порт и поднимал релей обратно: store log
+/// менялся прямо во время чтения архиватором, а отчёт рапортовал об остановке,
+/// которой уже не было.
+///
+/// Fail-closed на всех путях: если режим не записался, экспорт не начинается вовсе и
+/// ничего не остановлено; если оборвался любой следующий шаг, режим НЕ снимается —
+/// релеи остаются стоять, пока человек не разберётся и не выполнит
+/// `hearthctl mode clear`.
 pub async fn export(state: &Arc<AppState>) -> Result<ExportReport> {
+    state
+        .set_mode(
+            crate::model::mode::NodeMode::Migration,
+            "перенос узла: начат `hearthctl migrate export`",
+            Vec::new(),
+        )
+        .await?;
+
+    match export_held(state).await {
+        Ok(report) => Ok(report),
+        Err(e) => {
+            state
+                .alerts
+                .emit(
+                    Alert::critical(
+                        "migrate",
+                        format!(
+                            "экспорт переноса прерван: {e}. Узел остался в режиме переноса, \
+                             релеи не поднимутся сами — разберитесь и снимите режим: \
+                             hearthctl mode clear"
+                        ),
+                    )
+                    .sticky(true),
+                )
+                .await;
+            Err(e)
+        }
+    }
+}
+
+/// Сам экспорт. Вызывается только после того, как узел уже удержан.
+async fn export_held(state: &Arc<AppState>) -> Result<ExportReport> {
     let config = state.config.clone();
     let started = Utc::now();
 
-    // 1. Stop the relays first: the store log must not change while it is being copied.
+    // 1. Stop the relays: the store log must not change while it is being copied.
     let mut stopped = Vec::new();
     for relay in config.relays() {
         if !relay.enabled {
@@ -107,17 +154,6 @@ pub async fn export(state: &Arc<AppState>) -> Result<ExportReport> {
         status.copied_to = copied_to.clone();
     }
     state.save_migrate_status().await?;
-
-    // Иначе supervisor поднимет релеи обратно на ближайшем тике, и после импорта на
-    // новом узле в сети окажутся два релея с одним CA и одним адресом — ровно то
-    // расщепление, которое этот модуль объявляет недопустимым.
-    state
-        .set_mode(
-            crate::model::mode::NodeMode::Migration,
-            "перенос узла: выполнен `hearthctl migrate export`",
-            Vec::new(),
-        )
-        .await?;
 
     state
         .alerts
@@ -204,6 +240,14 @@ fn next_steps_after_export(config: &crate::config::Config) -> Vec<String> {
          address is a split brain (ТЗ §10.2 п.5)."
             .into(),
     );
+    // Почему `systemctl start` здесь теперь ничего не поднимает — иначе это выглядит
+    // как поломка узла, а не как работающий запрет.
+    steps.push(
+        "Узел остаётся в режиме переноса: релеи не поднимутся ни надзором, ни после \
+         перезагрузки, ни по `systemctl start` (гейт режима пометит юнит пропущенным). \
+         Снимается только вручную: hearthctl mode clear."
+            .into(),
+    );
     steps.push(
         "After the new node is verified: cryptsetup luksErase (or destroy) this disk \
          (ТЗ §10.2 п.7)."
@@ -232,14 +276,27 @@ pub async fn import(
         }
     }
 
-    // Relays must not be running while their state directory is replaced.
-    for relay in state.config.relays() {
-        if relay.enabled {
-            systemd::stop(&state.sys, &relay.unit).await?;
-        }
+    let live = is_live_import(destination);
+    if live {
+        hold_for_import(state).await?;
     }
 
     let restored = archive::decrypt_and_extract(archive_path, identity_file, destination)?;
+
+    if live {
+        // В архиве лежит node-mode.json ЧУЖОГО узла — state_dir целиком входит в
+        // backup.paths, — и распаковка только что затёрла им наш. Режим узла это
+        // свойство ЭТОЙ машины и этого переноса, а не переносимая часть личности:
+        // иначе новый узел стартует с чужой причиной в `hearthctl status`, а при
+        // экспорте из карантина — ещё и с чужим карантином.
+        state
+            .set_mode(
+                crate::model::mode::NodeMode::Migration,
+                IMPORT_REASON,
+                Vec::new(),
+            )
+            .await?;
+    }
 
     // Verify the binaries on THIS machine against the manifest that just arrived
     // (ТЗ §10.2 п.4: "проверка sha256 бинарей").
@@ -288,6 +345,21 @@ pub async fn import(
                 .into(),
         );
     }
+    // Снятие режима — отдельным шагом ПЕРЕД стартом служб: узел удерживается в
+    // переносе намеренно, и без этой строки оператор увидит юниты, которые «стартуют
+    // и молчат» (гейт помечает их пропущенными), без единой подсказки почему.
+    //
+    // Именно ЛОКАЛЬНОЕ снятие. Сетевое (`hearthctl mode clear`) идёт в admin API
+    // работающего hearthd, а на этом шаге его заведомо нет: импорт сам отказывается
+    // идти при живом демоне, и запускают его только следующей строкой. Раньше здесь
+    // стояла сетевая команда — обязательный шаг, который оператор физически не мог
+    // выполнить, и получал ошибку соединения посреди переезда.
+    next_steps.push(
+        "sudo hearthctl mode clear --local — узел удерживается в режиме переноса, \
+         пока вы не убедились, что старый выключен и проброс портов переключён. \
+         Снимается на самом узле: hearthd ещё не запущен, admin API отвечать некому"
+            .into(),
+    );
     next_steps.push(format!(
         "systemctl enable --now {} hearthd",
         units.join(" ")
@@ -308,6 +380,69 @@ pub async fn import(
         integrity_notes,
         next_steps,
     })
+}
+
+/// Импорт на ЭТОТ узел, а не репетиция в отдельный каталог (A13).
+///
+/// Отличие принципиальное. Живой импорт заменяет каталоги работающего узла — перед
+/// ним узел обязан быть удержан, а после распаковки удержан повторно. Репетиция не
+/// трогает ни одну работающую службу и не должна ни останавливать релеи, ни менять
+/// режим рабочего узла: раньше она делала и то и другое.
+fn is_live_import(destination: &Path) -> bool {
+    destination == Path::new("/")
+}
+
+/// Удержать узел на время импорта.
+///
+/// Порядок обязателен: сначала запрет, потом остановка. Если режим не записался,
+/// импорт не начинается и ничего не остановлено — противоречивого состояния нет.
+async fn hold_for_import(state: &Arc<AppState>) -> Result<()> {
+    refuse_if_the_daemon_is_running(state).await?;
+    state
+        .set_mode(
+            crate::model::mode::NodeMode::Migration,
+            IMPORT_REASON,
+            Vec::new(),
+        )
+        .await?;
+
+    // Relays must not be running while their state directory is replaced.
+    for relay in state.config.relays() {
+        if relay.enabled {
+            systemd::stop(&state.sys, &relay.unit).await?;
+        }
+    }
+    // TURN — тоже часть контура режима (ADR 0013): на узле, который прямо сейчас
+    // принимает чужое состояние, не должно остаться ни одной службы, отвечающей
+    // семье. `export` останавливает его по тем же причинам.
+    if state.config.turn.enabled {
+        systemd::stop(&state.sys, &state.config.turn.unit).await?;
+    }
+    Ok(())
+}
+
+/// Отказаться импортировать при живом hearthd.
+///
+/// `migrate import` идёт отдельным процессом со своим `AppState`, а работающий демон
+/// держит свою копию режима в памяти и читает файл только при старте (state.rs). Наша
+/// запись режима до него не дойдёт, и его надзор поднимет релей прямо во время
+/// распаковки его каталога. Проверяем самое простое, что нельзя перепутать: отвечает
+/// ли admin API. Fail-closed — если по адресу кто-то есть, импорт не начинается.
+async fn refuse_if_the_daemon_is_running(state: &Arc<AppState>) -> Result<()> {
+    let addr = state.config.api.listen;
+    let probe = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await;
+    if matches!(probe, Ok(Ok(_))) {
+        return Err(Error::Conflict(format!(
+            "admin API отвечает на {addr}: hearthd работает. Импорт заменяет каталоги \
+             релеев под работающим демоном — остановите его и повторите: \
+             systemctl stop hearthd"
+        )));
+    }
+    Ok(())
 }
 
 /// Hash the manifest's binaries on this machine.
@@ -374,6 +509,239 @@ mod tests {
         (identity.to_public().to_string(), path)
     }
 
+    /// Адрес, на котором НЕ МОЖЕТ никто слушать.
+    ///
+    /// Раньше здесь брали свободный порт: `bind("127.0.0.1:0")` и тут же отпускали
+    /// его вместе с сокетом. Это не «заведомо никто», а гонка с операционной системой
+    /// — отпущенный порт успевал занять кто-то другой, проба «демон жив» отвечала да,
+    /// и тест падал на ожидании запрета изредка и без объяснений.
+    ///
+    /// Порт 0 — не адресат: он означает «любой свободный» только при `bind`, а при
+    /// `connect` отвергается ядром сразу и на всех системах, где идут эти тесты. Ни
+    /// одного сокета для этого не создаётся, значит и занять его некому.
+    fn a_dead_address() -> std::net::SocketAddr {
+        std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0))
+    }
+
+    /// Сделать запись файла режима невозможной, не трогая права.
+    fn break_the_mode_file(state: &AppState) {
+        let path = state.config.paths.node_mode_file();
+        let _ = std::fs::remove_file(&path);
+        std::fs::create_dir_all(&path).expect("каталог на месте файла режима");
+    }
+
+    fn stops(state: &AppState) -> Vec<String> {
+        state
+            .sys
+            .recorded()
+            .into_iter()
+            .filter(|cmd| cmd.starts_with("systemctl stop "))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_dead_address_never_answers() {
+        // Дефект: «мёртвый» адрес получали как bind("127.0.0.1:0") + немедленный drop
+        // сокета, и отпущенный порт изредка успевал занять кто-то другой. Проба «жив
+        // ли демон» отвечала да, hold_for_import отказывался ставить запрет, и тест
+        // import_does_not_inherit_the_old_nodes_mode падал раз в несколько прогонов —
+        // то есть проверял удачу, а не код. Проверяем само свойство адреса.
+        for _ in 0..32 {
+            let addr = a_dead_address();
+            assert_eq!(addr.port(), 0, "порт 0 не адресат — занять его некому");
+            assert!(
+                tokio::net::TcpStream::connect(addr).await.is_err(),
+                "адрес обязан быть мёртвым по построению, а не по удаче: {addr}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn export_holds_the_node_before_it_stops_anything() {
+        // Порядок «сначала запрет, потом остановка» проверяется с той стороны, где
+        // его видно наверняка: если запрет записать нельзя, не должно быть выдано ни
+        // одной команды остановки.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = seed_node(dir.path());
+        let (recipient, _key) = keyfile(dir.path());
+        config.backup.recipients = vec![recipient];
+
+        let state = AppState::new(config, Sys::new(true)).expect("state");
+        break_the_mode_file(&state);
+
+        export(&state)
+            .await
+            .expect_err("экспорт без запрета недопустим");
+        assert!(stops(&state).is_empty(), "получили {:?}", stops(&state));
+    }
+
+    #[tokio::test]
+    async fn a_failed_archive_leaves_the_node_in_migration() {
+        // Ошибка на любом шаге не снимает запрет: релеи уже остановлены, и поднимать
+        // их обратно — значит получить два живых релея с одним CA.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = seed_node(dir.path());
+        // Получателей нет — age не примет такой архив.
+        config.backup.recipients = Vec::new();
+
+        let state = AppState::new(config, Sys::new(true)).expect("state");
+        export(&state).await.expect_err("архив без получателей");
+
+        assert_eq!(
+            state.node_mode().await,
+            crate::model::mode::NodeMode::Migration
+        );
+        let alerts = state.alerts.query(None, None, 20).await;
+        assert!(
+            alerts
+                .iter()
+                .any(|a| a.summary.contains("hearthctl mode clear")),
+            "человек обязан узнать, почему узел молчит: {alerts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_holds_the_relays_too() {
+        // Импорт заменяет каталоги релеев, и до первой остановки узел обязан быть
+        // удержан: иначе надзор поднимет релей прямо во время распаковки.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = seed_node(dir.path());
+        config.api.listen = a_dead_address();
+        let state = AppState::new(config, Sys::new(true)).expect("state");
+
+        hold_for_import(&state).await.expect("hold");
+
+        assert_eq!(
+            state.node_mode().await,
+            crate::model::mode::NodeMode::Migration
+        );
+        // coturn стоит в том же списке, и это не косметика: ADR 0013 обещает узел,
+        // который в не-normal режиме не обслуживает семью НИЧЕМ. Пока TURN не
+        // останавливали, на узле, принимающем чужое состояние, оставался открытый
+        // медиа-ретранслятор, и надзор поднимал его обратно через check_interval_secs.
+        assert_eq!(
+            stops(&state),
+            vec![
+                "systemctl stop smp-server.service".to_string(),
+                "systemctl stop xftp-server.service".to_string(),
+                "systemctl stop coturn.service".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_import_that_cannot_hold_the_node_stops_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = seed_node(dir.path());
+        config.api.listen = a_dead_address();
+        let state = AppState::new(config, Sys::new(true)).expect("state");
+        break_the_mode_file(&state);
+
+        hold_for_import(&state)
+            .await
+            .expect_err("импорт без запрета недопустим");
+        assert!(stops(&state).is_empty(), "получили {:?}", stops(&state));
+    }
+
+    #[tokio::test]
+    async fn an_import_refuses_to_run_under_a_live_daemon() {
+        // hearthd держит режим в памяти и перечитывает файл только при старте: наша
+        // запись до него не дойдёт, а его надзор поднимет релей во время распаковки.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let mut config = seed_node(dir.path());
+        config.api.listen = listener.local_addr().expect("addr");
+        let state = AppState::new(config, Sys::new(true)).expect("state");
+
+        let err = hold_for_import(&state)
+            .await
+            .expect_err("живой демон обязан остановить импорт");
+        assert!(matches!(err, Error::Conflict(_)), "got {err:?}");
+        assert!(stops(&state).is_empty());
+        assert!(state.node_mode().await.relays_allowed());
+    }
+
+    #[tokio::test]
+    async fn import_does_not_inherit_the_old_nodes_mode() {
+        // node-mode.json лежит в state_dir, а state_dir целиком уезжает в архив.
+        // Распаковка приносит режим ЧУЖОГО узла и затирает наш.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = seed_node(dir.path());
+        config.api.listen = a_dead_address();
+        let state = AppState::new(config.clone(), Sys::new(true)).expect("state");
+        hold_for_import(&state).await.expect("hold");
+
+        // Так выглядит распаковка архива узла, который экспортировали из карантина.
+        let foreign = crate::model::mode::NodeState::enter(
+            crate::model::mode::NodeMode::Quarantine,
+            "хеш smp-server не совпал на СТАРОМ узле",
+            vec!["smp-server".into()],
+        );
+        crate::store::write_json_atomic(
+            state.config.paths.node_mode_file(),
+            &foreign,
+            crate::store::MODE_STATE,
+        )
+        .expect("write");
+
+        // Ровно то, что делает `import` сразу после decrypt_and_extract.
+        state
+            .set_mode(
+                crate::model::mode::NodeMode::Migration,
+                IMPORT_REASON,
+                Vec::new(),
+            )
+            .await
+            .expect("re-assert");
+        drop(state);
+
+        let state = AppState::new(config, Sys::new(true)).expect("restart");
+        let node = state.mode.read().await.clone();
+        assert_eq!(node.mode, crate::model::mode::NodeMode::Migration);
+        assert!(
+            node.reason.contains("импорт"),
+            "причина обязана говорить про импорт, а не про чужой инцидент: {}",
+            node.reason
+        );
+        assert!(node.findings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_rehearsal_into_a_scratch_dir_does_not_touch_the_live_mode() {
+        // Репетиция (A13) распаковывает архив в отдельный каталог. Останавливать из-за
+        // неё релеи работающего узла и менять его режим — значит устроить дома
+        // настоящий простой ради проверки.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = seed_node(dir.path());
+        let (recipient, key) = keyfile(dir.path());
+        config.backup.recipients = vec![recipient];
+
+        let state = AppState::new(config, Sys::new(true)).expect("state");
+        let report = export(&state).await.expect("export");
+        state.clear_mode().await.expect("оператор снял режим");
+        state.sys.forget_recorded();
+
+        import(
+            &state,
+            &report.archive,
+            &key,
+            &dir.path().join("rehearsal"),
+            None,
+        )
+        .await
+        .expect("import");
+
+        assert!(state.node_mode().await.relays_allowed());
+        assert!(stops(&state).is_empty(), "получили {:?}", stops(&state));
+    }
+
+    #[test]
+    fn only_the_real_root_counts_as_a_live_import() {
+        assert!(is_live_import(Path::new("/")));
+        assert!(!is_live_import(Path::new("/tmp/rehearsal")));
+        assert!(!is_live_import(Path::new("new-node")));
+    }
+
     #[tokio::test]
     async fn export_stops_relays_and_produces_a_verifiable_archive() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -400,6 +768,10 @@ mod tests {
             .any(|s| s.contains("port forwarding")));
         assert!(report.next_steps.iter().any(|s| s.contains("split brain")));
 
+        assert!(
+            !state.node_mode().await.relays_allowed(),
+            "к моменту возврата узел обязан быть удержан, иначе отчёт врёт про остановку"
+        );
         let status = state.migrate.read().await;
         assert!(status.relays_stopped);
         assert_eq!(status.sha256.as_deref(), Some(report.sha256.as_str()));
@@ -417,6 +789,8 @@ mod tests {
             user: "hearth-backup".into(),
             path: "/srv/hearth-backup".into(),
             ssh_key: dir.path().join("id_ed25519"),
+            verify_digest: true,
+            max_delete: 3,
         });
 
         // dry-run Sys: rsync is recorded, not executed.
@@ -461,6 +835,35 @@ mod tests {
         let restored_ca = dest.join(ca_member);
         assert_eq!(std::fs::read(restored_ca).expect("read"), b"RELAY-CA");
         assert!(imported.next_steps.iter().any(|s| s.contains("nftables")));
+        // Без этой строки оператор увидит юниты, которые «стартуют и молчат».
+        let clear = imported
+            .next_steps
+            .iter()
+            .position(|s| s.contains("hearthctl mode clear"))
+            .expect("шаг со снятием режима");
+        let enable = imported
+            .next_steps
+            .iter()
+            .position(|s| s.contains("systemctl enable"))
+            .expect("шаг со стартом служб");
+        assert!(clear < enable, "снятие режима идёт до старта служб");
+        // И этот шаг обязан быть ИСПОЛНИМ в этот момент. Сетевое снятие идёт в admin
+        // API, которого до старта hearthd нет: инструкция с ним отправляла оператора
+        // за ошибкой соединения посреди переезда.
+        assert!(
+            imported.next_steps[clear].contains("mode clear --local"),
+            "{}",
+            imported.next_steps[clear]
+        );
+        assert!(
+            !imported
+                .next_steps
+                .iter()
+                .take(enable)
+                .any(|s| s.contains("mode clear") && !s.contains("--local")),
+            "до старта демона сетевого снятия режима быть не может: {:?}",
+            imported.next_steps
+        );
         // The manifest is not part of this fixture, so integrity cannot be confirmed.
         assert!(!imported.integrity_ok);
     }

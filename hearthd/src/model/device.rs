@@ -99,6 +99,61 @@ impl Device {
     pub fn is_active(&self) -> bool {
         self.revoked.is_none()
     }
+
+    /// Запись об устройстве без секретов — для выгрузки аудиту.
+    ///
+    /// # Почему проекция, а не фильтр постфактум
+    ///
+    /// Выгрузка для аудита (`deploy/audit-dump.sh`) существует затем, чтобы
+    /// проверяющий увидел состояние узла, не получив ничего лишнего. Наивный дамп
+    /// реестра устройств был бы утечкой ровно одним полем — [`Device::token`], тем
+    /// самым, которым телефон качает обновления и берёт TURN-креды.
+    ///
+    /// Вырезать его `jq`'ом на выходе — значит поставить защиту в место, где о ней
+    /// забудут при первой правке: новое секретное поле в `Device` не заметит ни
+    /// фильтр, ни человек. Проекция ведёт себя наоборот — новое поле в неё придётся
+    /// ДОБАВИТЬ руками, и худшее, что даёт забывчивость, — неполный отчёт.
+    pub fn public(&self) -> DevicePublic {
+        DevicePublic {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            platform: self.platform,
+            created: self.created,
+            revoked: self.revoked,
+            bundles_issued: self.bundles_issued,
+            last_bundle: self.last_bundle,
+            note: self.note.clone(),
+            enrolled_by: self.enrolled_by.clone(),
+            has_token: self.token.is_some(),
+        }
+    }
+}
+
+/// Устройство без секретов: то же самое, но без [`Device::token`] и без
+/// `install_id`.
+///
+/// `install_id` убран не как секрет (он и не секрет), а как ключ идемпотентности:
+/// знание чужого `install_id` — половина того, что нужно для повтора заведения, и
+/// выгрузке он не нужен ни для чего.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevicePublic {
+    pub id: String,
+    pub name: String,
+    pub platform: Platform,
+    #[serde(with = "crate::model::rfc3339")]
+    pub created: DateTime<Utc>,
+    #[serde(default, with = "crate::model::rfc3339::option")]
+    pub revoked: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub bundles_issued: u32,
+    #[serde(default, with = "crate::model::rfc3339::option")]
+    pub last_bundle: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrolled_by: Option<String>,
+    /// Выдан ли устройству токен device API. Сам токен не выдаётся никогда.
+    pub has_token: bool,
 }
 
 /// The persisted registry (`/etc/hearth/devices.json`).
@@ -139,6 +194,40 @@ impl DeviceRegistry {
         self.devices.iter().filter(|d| d.is_active())
     }
 
+    /// Действует ли доступ устройства — с учётом того, кто его завёл.
+    ///
+    /// Собственного поля `revoked` мало. [`revoke`](Self::revoke) гасит потомков одним
+    /// обходом в момент вызова, и запись, появившаяся ПОСЛЕ обхода, в него не попадёт
+    /// — а больше её никто не проверит. Поэтому право предъявить токен решается по
+    /// цепочке `enrolled_by`: отозван предок — отозван и потомок. Это делает исход
+    /// гонки «отзыв против заведения» безвредным и без всяких блокировок.
+    ///
+    /// Оборванная цепочка (родителя в реестре нет) и замкнутая в кольцо (файл правят
+    /// руками) обе означают отказ: держать доступ не на чем, а зацикливаться узлу
+    /// нельзя.
+    pub fn is_usable(&self, id: &str) -> bool {
+        let mut seen: Vec<&str> = Vec::new();
+        let mut current = id;
+        loop {
+            let Some(device) = self.get(current) else {
+                return false;
+            };
+            if device.revoked.is_some() || seen.contains(&current) {
+                return false;
+            }
+            seen.push(current);
+            match device.enrolled_by.as_deref() {
+                Some(parent) => current = parent,
+                None => return true,
+            }
+        }
+    }
+
+    /// Устройства, чей доступ действует. Именно по ним ищется предъявленный токен.
+    pub fn usable(&self) -> impl Iterator<Item = &Device> {
+        self.devices.iter().filter(|d| self.is_usable(&d.id))
+    }
+
     /// Register a device. Fails on duplicate id or when the circle is full.
     pub fn add(
         &mut self,
@@ -146,6 +235,26 @@ impl DeviceRegistry {
         platform: Platform,
         note: Option<String>,
         max_devices: usize,
+    ) -> Result<Device> {
+        let device = self.prepare(name, platform, note, max_devices, None, None)?;
+        self.commit(device)
+    }
+
+    /// Собрать запись и убедиться, что для неё есть место. Реестр не меняется.
+    ///
+    /// Отделено от записи ради одного: `enrolled_by` и `install_id` обязаны быть в
+    /// записи СРАЗУ, а не проставляться шагом позже. Шаг позже — это мгновение, в
+    /// котором запись уже есть, а родства или ключа идемпотентности у неё ещё нет: в
+    /// первом случае отзыв родителя не гасит ребёнка, во втором повтор заводит
+    /// дубликат. Падение процесса в этом мгновении делает такую запись вечной.
+    fn prepare(
+        &self,
+        name: &str,
+        platform: Platform,
+        note: Option<String>,
+        max_devices: usize,
+        install_id: Option<&str>,
+        enrolled_by: Option<&str>,
     ) -> Result<Device> {
         let name = name.trim();
         if name.is_empty() {
@@ -165,7 +274,7 @@ impl DeviceRegistry {
                 "device limit reached ({max_devices}); revoke a device first (ТЗ §1.1)"
             )));
         }
-        let device = Device {
+        Ok(Device {
             id,
             name: name.to_string(),
             platform,
@@ -174,22 +283,123 @@ impl DeviceRegistry {
             bundles_issued: 0,
             last_bundle: None,
             note,
-            install_id: None,
-            enrolled_by: None,
+            install_id: install_id.map(str::to_string),
+            enrolled_by: enrolled_by.map(str::to_string),
             // Свой секрет на устройство. 32 байта: подбирать нечего, а короче делать
             // незачем — он едет в QR, который человек всё равно не набирает руками.
             token: Some(crate::store::random_hex(32)),
-        };
+        })
+    }
+
+    /// Записать подготовленную запись: сначала в память, следом на диск.
+    ///
+    /// При отказе диска запись снимается обратно. Иначе она живёт в памяти процесса
+    /// до перезапуска — занимает имя и слот в круге, — а после перезапуска исчезает:
+    /// то, что видит процесс, расходится с тем, что переживёт рестарт.
+    fn commit(&mut self, device: Device) -> Result<Device> {
         self.devices.push(device.clone());
-        self.save()?;
+        if let Err(e) = self.save() {
+            self.devices.pop();
+            return Err(e);
+        }
         Ok(device)
     }
 
-    /// Найти устройство по ключу установки.
+    /// Завести устройство ПО ПРОСЬБЕ уже заведённого — одним неделимым действием.
+    ///
+    /// Проверка приглашающего, суточный бюджет и создание записи происходят под одним
+    /// `&mut self`. Раньше это были четыре независимых захвата блокировки, и отзыв
+    /// приглашающего, прошедший между ними, оставлял заведённое устройство с рабочим
+    /// доступом: обход потомков его ещё не видел, а повторно приглашающего никто не
+    /// проверял.
+    pub fn add_child(
+        &mut self,
+        name: &str,
+        platform: Platform,
+        note: Option<String>,
+        max_devices: usize,
+        parent: &str,
+        max_per_day: usize,
+    ) -> std::result::Result<Device, EnrollError> {
+        if !self.is_usable(parent) {
+            return Err(EnrollError::InviterRevoked);
+        }
+        // Бюджет считается здесь же: снаружи он считался по другому снимку реестра.
+        let since = Utc::now() - chrono::Duration::days(1);
+        let recent = self.children_since(parent, since);
+        if recent >= max_per_day {
+            return Err(EnrollError::BudgetExhausted(recent));
+        }
+        let device = self
+            .prepare(name, platform, note, max_devices, None, Some(parent))
+            .map_err(EnrollError::Refused)?;
+        self.commit(device).map_err(EnrollError::Storage)
+    }
+
+    /// Найти устройство по ключу установки — только то, чей доступ действует.
     pub fn by_install_id(&self, install_id: &str) -> Option<&Device> {
         self.devices
             .iter()
-            .find(|d| d.install_id.as_deref() == Some(install_id) && d.revoked.is_none())
+            .find(|d| d.install_id.as_deref() == Some(install_id) && self.is_usable(&d.id))
+    }
+
+    /// То же, но не глядя на отзыв.
+    ///
+    /// Нужен там, где «такой установки нет» и «эту установку из круга выгнали» — два
+    /// разных ответа: во втором случае заводить её заново под новым именем нельзя,
+    /// иначе отзыв отменяется первым же живым кодом.
+    pub fn by_install_id_any(&self, install_id: &str) -> Option<&Device> {
+        self.devices
+            .iter()
+            .find(|d| d.install_id.as_deref() == Some(install_id))
+    }
+
+    /// Завести устройство ПО ПРИГЛАШЕНИЮ — или вернуть уже заведённое.
+    ///
+    /// Второй элемент ответа — «это повтор»: вызывающий по нему возвращает занятое
+    /// использование приглашения, потому что нового устройства не появилось.
+    ///
+    /// Проверка ключа установки и создание записи происходят под одним `&mut self`, а
+    /// сам ключ проставляется в момент создания. Раньше это были три операции, и
+    /// между ними телефон, повторивший запрос после обрыва, успевал завестись дважды.
+    pub fn claim_device(
+        &mut self,
+        install_id: Option<&str>,
+        requested_name: &str,
+        platform: Platform,
+        note: Option<String>,
+        max_devices: usize,
+    ) -> Result<(Device, bool)> {
+        if let Some(install_id) = install_id {
+            if let Some(device) = self.by_install_id_any(install_id).cloned() {
+                if self.is_usable(&device.id) {
+                    return Ok((device, true));
+                }
+                return Err(Error::Unauthorized(format!(
+                    "установка `{install_id}` отозвана вместе с устройством `{}`",
+                    device.id
+                )));
+            }
+        }
+        // Имя приходит от приложения — это модель телефона, и два одинаковых телефона
+        // в семье не редкость. Совпадение имени не повод отказать человеку в
+        // заведении, поэтому подбираем свободное, а не отвечаем 409, как это делает
+        // `/enroll`, где имя набирает человек и повтор — почти всегда его опечатка.
+        let mut attempt = 0;
+        let device = loop {
+            let name = if attempt == 0 {
+                requested_name.to_string()
+            } else {
+                format!("{requested_name} {}", attempt + 1)
+            };
+            match self.prepare(&name, platform, note.clone(), max_devices, install_id, None) {
+                Ok(device) => break device,
+                Err(Error::Conflict(_)) if attempt < 9 => attempt += 1,
+                Err(e) => return Err(e),
+            }
+        };
+        let device = self.commit(device)?;
+        Ok((device, false))
     }
 
     /// Запомнить ключ установки за устройством.
@@ -197,8 +407,17 @@ impl DeviceRegistry {
         let device = self
             .get_mut(id)
             .ok_or_else(|| Error::NotFound(format!("device `{id}`")))?;
-        device.install_id = Some(install_id.to_string());
-        self.save()
+        let previous = device.install_id.replace(install_id.to_string());
+        if let Err(e) = self.save() {
+            // Память обязана совпасть с тем, что переживёт перезапуск: иначе процесс
+            // считает ключ записанным, а после рестарта его нет — и повтор заводит
+            // дубликат ровно тогда, когда узлу и без того плохо.
+            if let Some(device) = self.get_mut(id) {
+                device.install_id = previous;
+            }
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Записать, кто завёл это устройство.
@@ -206,8 +425,14 @@ impl DeviceRegistry {
         let device = self
             .get_mut(id)
             .ok_or_else(|| Error::NotFound(format!("device `{id}`")))?;
-        device.enrolled_by = Some(parent.to_string());
-        self.save()
+        let previous = device.enrolled_by.replace(parent.to_string());
+        if let Err(e) = self.save() {
+            if let Some(device) = self.get_mut(id) {
+                device.enrolled_by = previous;
+            }
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Физически убрать запись.
@@ -216,10 +441,16 @@ impl DeviceRegistry {
     /// навсегда занимает и слот `max_devices`, и имя. Отзыв для этого не годится —
     /// отозванное устройство остаётся в реестре и продолжает занимать имя.
     pub fn remove(&mut self, id: &str) -> Result<()> {
-        let before = self.devices.len();
-        self.devices.retain(|d| d.id != id);
-        if self.devices.len() != before {
-            self.save()?;
+        let Some(index) = self.devices.iter().position(|d| d.id == id) else {
+            return Ok(());
+        };
+        let removed = self.devices.remove(index);
+        if let Err(e) = self.save() {
+            // Откат отката: если запись не удалось убрать с диска, она обязана
+            // остаться и в памяти. Иначе после перезапуска «убранная» запись
+            // воскресает и снова занимает имя, которое процесс считал свободным.
+            self.devices.insert(index, removed);
+            return Err(e);
         }
         Ok(())
     }
@@ -245,6 +476,7 @@ impl DeviceRegistry {
         // Обход в ширину: список устройств короткий (десятки), рекурсия не нужна.
         let mut queue = vec![id.to_string()];
         let mut seen: Vec<String> = Vec::new();
+        let mut marked: Vec<String> = Vec::new();
         while let Some(current) = queue.pop() {
             if seen.contains(&current) {
                 continue;
@@ -260,6 +492,7 @@ impl DeviceRegistry {
             if let Some(device) = self.get_mut(&current) {
                 if device.revoked.is_none() {
                     device.revoked = Some(now);
+                    marked.push(current);
                 }
             }
         }
@@ -267,7 +500,18 @@ impl DeviceRegistry {
             .get(id)
             .cloned()
             .ok_or_else(|| Error::NotFound(format!("device `{id}`")))?;
-        self.save()?;
+        if let Err(e) = self.save() {
+            // Отзыв, оставшийся только в памяти, — худший исход из возможных: админ
+            // видит ошибку и считает, что отзыв не прошёл, процесс до перезапуска
+            // ведёт себя как «отозвано», а после перезапуска отзыва нет вовсе.
+            // Снимаем отметку ровно с тех, кому её поставили этим вызовом.
+            for id in &marked {
+                if let Some(device) = self.get_mut(id) {
+                    device.revoked = None;
+                }
+            }
+            return Err(e);
+        }
         Ok(device)
     }
 
@@ -281,12 +525,39 @@ impl DeviceRegistry {
                 "device `{id}` is revoked; a bundle must not be issued to it"
             )));
         }
+        let previous = (device.bundles_issued, device.last_bundle);
         device.bundles_issued += 1;
         device.last_bundle = Some(Utc::now());
         let device = device.clone();
-        self.save()?;
+        if let Err(e) = self.save() {
+            if let Some(device) = self.get_mut(id) {
+                (device.bundles_issued, device.last_bundle) = previous;
+            }
+            return Err(e);
+        }
         Ok(device)
     }
+}
+
+/// Почему заведение «с уже заведённого устройства» не состоялось.
+///
+/// Отдельный тип, а не текст внутри [`Error`]: вызывающий отвечает на каждый случай
+/// по-своему — отказ доступа, исчерпанный бюджет, занятое имя, отказ диска, — и
+/// различать их разбором строки значит однажды ответить 409 там, где надо 401.
+#[derive(Debug, thiserror::Error)]
+pub enum EnrollError {
+    /// Приглашающего нет, он отозван или отозван кто-то из его предков.
+    #[error("приглашающее устройство отозвано или неизвестно")]
+    InviterRevoked,
+    /// Суточный бюджет исчерпан; внутри — сколько уже заведено за сутки.
+    #[error("суточный бюджет исчерпан: за сутки заведено {0}")]
+    BudgetExhausted(usize),
+    /// Имя занято, пустое или круг полон — ответ запросу, а не ошибка узла.
+    #[error("{0}")]
+    Refused(#[source] Error),
+    /// Реестр не удалось записать на диск.
+    #[error("{0}")]
+    Storage(#[source] Error),
 }
 
 #[cfg(test)]
@@ -370,10 +641,225 @@ mod tests {
     }
     use super::*;
 
+    /// Именно этот тест отделяет выгрузку для аудита от утечки: в обезличенной
+    /// проекции не должно быть токена устройства ни в каком виде.
+    #[test]
+    fn the_public_projection_carries_no_device_token() {
+        let (_dir, mut reg) = registry();
+        let device = reg
+            .add("Мама — Pixel 8", Platform::Android, Some("note".into()), 10)
+            .expect("add");
+        let secret = device.token.clone().expect("токен выдаётся при заведении");
+
+        let json = serde_json::to_string(&device.public()).expect("json");
+        assert!(
+            !json.contains(&secret),
+            "секрет устройства попал в обезличенную проекцию: {json}"
+        );
+        assert!(
+            !json.contains("\"token\""),
+            "поля token быть не должно: {json}"
+        );
+        assert!(!json.contains("install_id"), "{json}");
+
+        // Полезное при этом сохранено: без него отчёт бессмысленен.
+        assert!(json.contains("mama-pixel-8"));
+        assert!(json.contains("\"has_token\":true"));
+
+        // И весь список целиком — тоже без секретов.
+        let all: Vec<DevicePublic> = reg.devices.iter().map(Device::public).collect();
+        let json = serde_json::to_string(&all).expect("json");
+        assert!(!json.contains(&secret), "{json}");
+    }
+
     fn registry() -> (tempfile::TempDir, DeviceRegistry) {
         let dir = tempfile::tempdir().expect("tempdir");
         let reg = DeviceRegistry::load(dir.path().join("devices.json")).expect("load");
         (dir, reg)
+    }
+
+    /// Сломать запись реестра: на месте файла — каталог, и переименовать временный
+    /// файл поверх него нельзя ни на одной системе. Так воспроизводится отказ диска.
+    fn break_writing(dir: &tempfile::TempDir) {
+        let path = dir.path().join("devices.json");
+        if path.is_file() {
+            std::fs::remove_file(&path).expect("убрать файл");
+        }
+        std::fs::create_dir(&path).expect("занять имя каталогом");
+    }
+
+    #[test]
+    fn a_revoked_inviter_cannot_enrol_anyone() {
+        // Ровно та гонка, ради которой заведение стало одной транзакцией: раньше
+        // проверка приглашающего и создание записи были разными захватами, и отзыв,
+        // прошедший между ними, оставлял ребёнка с рабочим доступом.
+        let (_dir, mut reg) = registry();
+        let parent = reg.add("Родитель", Platform::Android, None, 10).unwrap();
+        reg.revoke(&parent.id).unwrap();
+
+        let err = reg
+            .add_child("Ребёнок", Platform::Android, None, 10, &parent.id, 5)
+            .unwrap_err();
+        assert!(
+            matches!(err, EnrollError::InviterRevoked),
+            "получено {err:?}"
+        );
+        assert_eq!(reg.devices.len(), 1, "реестр не должен вырасти");
+    }
+
+    #[test]
+    fn a_child_that_slipped_past_a_revocation_cannot_use_its_token() {
+        // Исход гонки, если она всё-таки состоялась: у ребёнка собственное поле
+        // revoked пустое, потому что обход потомков его не застал. Право предъявить
+        // токен всё равно обязано считаться по цепочке.
+        let (_dir, mut reg) = registry();
+        let parent = reg.add("Родитель", Platform::Android, None, 10).unwrap();
+        let child = reg.add("Ребёнок", Platform::Android, None, 10).unwrap();
+        reg.note_enrolled_by(&child.id, &parent.id).unwrap();
+        // Гасим родителя в обход revoke(), иначе обход потомков задел бы ребёнка.
+        reg.get_mut(&parent.id).unwrap().revoked = Some(Utc::now());
+
+        assert!(reg.get(&child.id).unwrap().revoked.is_none());
+        assert!(!reg.is_usable(&child.id), "предок отозван — доступа нет");
+        assert_eq!(reg.usable().count(), 0);
+    }
+
+    #[test]
+    fn a_broken_parent_link_is_refused_and_a_cycle_does_not_hang() {
+        let (_dir, mut reg) = registry();
+        let device = reg.add("Телефон", Platform::Android, None, 10).unwrap();
+        reg.note_enrolled_by(&device.id, "кого-нет").unwrap();
+        assert!(!reg.is_usable(&device.id), "держать доступ не на чем");
+
+        reg.get_mut(&device.id).unwrap().enrolled_by = Some(device.id.clone());
+        assert!(
+            !reg.is_usable(&device.id),
+            "кольцо — это отказ, а не вечный цикл"
+        );
+    }
+
+    #[test]
+    fn the_daily_budget_is_spent_inside_the_same_transaction() {
+        let (_dir, mut reg) = registry();
+        let parent = reg.add("Родитель", Platform::Android, None, 10).unwrap();
+        reg.add_child("Первый", Platform::Android, None, 10, &parent.id, 1)
+            .unwrap();
+
+        let err = reg
+            .add_child("Второй", Platform::Android, None, 10, &parent.id, 1)
+            .unwrap_err();
+        assert!(
+            matches!(err, EnrollError::BudgetExhausted(1)),
+            "получено {err:?}"
+        );
+    }
+
+    #[test]
+    fn add_child_records_the_parent_in_the_same_write() {
+        // Родство проставлялось вторым шагом, и между шагами запись существовала без
+        // него: отзыв родителя такого ребёнка не находил.
+        let (dir, mut reg) = registry();
+        let parent = reg.add("Родитель", Platform::Android, None, 10).unwrap();
+        let child = reg
+            .add_child("Ребёнок", Platform::Android, None, 10, &parent.id, 5)
+            .unwrap();
+        assert_eq!(child.enrolled_by.as_deref(), Some(parent.id.as_str()));
+
+        let reloaded = DeviceRegistry::load(dir.path().join("devices.json")).unwrap();
+        assert_eq!(
+            reloaded.get(&child.id).unwrap().enrolled_by.as_deref(),
+            Some(parent.id.as_str()),
+            "родство обязано быть на диске уже после первой записи"
+        );
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_ghost() {
+        let (dir, mut reg) = registry();
+        break_writing(&dir);
+
+        assert!(reg.add("Телефон", Platform::Android, None, 10).is_err());
+        assert!(
+            reg.devices.is_empty(),
+            "запись, не попавшая на диск, не должна занимать имя и слот в памяти"
+        );
+    }
+
+    #[test]
+    fn a_failed_write_does_not_revoke_in_memory_only() {
+        // Худший исход кластера: админ видит ошибку и считает, что отзыв не прошёл,
+        // процесс до перезапуска ведёт себя как «отозвано», а после — как будто
+        // отзыва не было вовсе.
+        let (dir, mut reg) = registry();
+        let parent = reg.add("Родитель", Platform::Android, None, 10).unwrap();
+        let child = reg
+            .add_child("Ребёнок", Platform::Android, None, 10, &parent.id, 5)
+            .unwrap();
+        break_writing(&dir);
+
+        assert!(reg.revoke(&parent.id).is_err());
+        assert!(reg.get(&parent.id).unwrap().revoked.is_none());
+        assert!(
+            reg.get(&child.id).unwrap().revoked.is_none(),
+            "потомку отметку тоже обязаны снять"
+        );
+    }
+
+    #[test]
+    fn a_failed_write_does_not_count_a_bundle_or_drop_a_record() {
+        let (dir, mut reg) = registry();
+        let device = reg.add("Телефон", Platform::Android, None, 10).unwrap();
+        break_writing(&dir);
+
+        assert!(reg.note_bundle_issued(&device.id).is_err());
+        assert_eq!(reg.get(&device.id).unwrap().bundles_issued, 0);
+        assert!(reg.get(&device.id).unwrap().last_bundle.is_none());
+
+        assert!(reg.remove(&device.id).is_err());
+        assert!(
+            reg.get(&device.id).is_some(),
+            "не убранная с диска запись обязана остаться и в памяти"
+        );
+    }
+
+    #[test]
+    fn a_claim_is_idempotent_by_install_id() {
+        let (dir, mut reg) = registry();
+        let (first, repeat) = reg
+            .claim_device(Some("inst-1"), "Pixel 8", Platform::Android, None, 10)
+            .unwrap();
+        assert!(!repeat);
+        assert_eq!(first.install_id.as_deref(), Some("inst-1"));
+        let reloaded = DeviceRegistry::load(dir.path().join("devices.json")).unwrap();
+        assert_eq!(
+            reloaded.get(&first.id).unwrap().install_id.as_deref(),
+            Some("inst-1"),
+            "ключ обязан быть на диске уже после первой записи"
+        );
+
+        let (second, repeat) = reg
+            .claim_device(Some("inst-1"), "Pixel 8", Platform::Android, None, 10)
+            .unwrap();
+        assert!(repeat, "повтор не заводит второе устройство");
+        assert_eq!(second.id, first.id);
+        assert_eq!(reg.devices.len(), 1);
+    }
+
+    #[test]
+    fn a_revoked_install_does_not_come_back_under_a_new_name() {
+        // Раньше отзыв держался ровно до следующего claim: ключ установки искался
+        // только среди действующих, и та же установка заводилась заново.
+        let (_dir, mut reg) = registry();
+        let (device, _) = reg
+            .claim_device(Some("inst-1"), "Pixel 8", Platform::Android, None, 10)
+            .unwrap();
+        reg.revoke(&device.id).unwrap();
+
+        let err = reg
+            .claim_device(Some("inst-1"), "Pixel 8", Platform::Android, None, 10)
+            .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)), "получено {err:?}");
+        assert_eq!(reg.devices.len(), 1);
     }
 
     #[test]

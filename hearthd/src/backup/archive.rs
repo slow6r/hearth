@@ -38,14 +38,27 @@ pub struct ArchiveInfo {
     /// night is a backup nobody has.
     #[serde(default)]
     pub unreadable: Vec<String>,
+    /// Источники, которых на диске нет вовсе.
+    ///
+    /// Раньше они не попадали никуда, кроме строчки в journald: ни в `members`, ни в
+    /// `unreadable`. Размонтированный `/var/opt/simplex` — то есть вся переписка —
+    /// давал зелёный успех с валидным sha256, и узнавали об этом при восстановлении.
+    /// Отсутствие источника обязано быть отдельным состоянием: «есть и прочитан»,
+    /// «есть и не прочитан» и «отсутствует» — три разных факта, а не два.
+    #[serde(default)]
+    pub missing: Vec<String>,
 }
 
 /// Build `tar.gz.age` from a list of directories.
 ///
 /// Paths are stored without their leading `/`, so `/etc/opt/simplex` becomes
 /// `etc/opt/simplex` and the archive extracts cleanly onto `/` on the new node.
-/// Missing directories are skipped with a warning rather than failing the run: a node
-/// without xftp still deserves a backup of everything else.
+///
+/// Отсутствующий каталог не обрывает сборку — узел без xftp заслуживает копии всего
+/// остального, — но и не исчезает бесследно: он попадает в [`ArchiveInfo::missing`].
+/// Решение, провал это или нет, принимает вызывающий по списку обязательных путей
+/// ([`crate::backup::required_paths_report`]): здесь нет знания о том, что именно
+/// обязательно для ЭТОГО узла.
 pub fn create_encrypted(
     sources: &[PathBuf],
     output: &Path,
@@ -74,12 +87,27 @@ pub fn create_encrypted(
 
     let mut members = Vec::new();
     let mut unreadable = Vec::new();
+    let mut missing = Vec::new();
     let mut builder = tar::Builder::new(gz);
     builder.follow_symlinks(false);
     for source in sources {
-        if !source.exists() {
-            tracing::warn!(path = %source.display(), "backup source is missing, skipped");
-            continue;
+        // `Path::exists()` — это `metadata().is_ok()`: он отвечает false и когда пути
+        // нет, и когда демону (он работает под `hearth`) закрыт родительский каталог.
+        // Два разных отказа сливались в один и оба уходили в тишину, поэтому здесь
+        // разбирается сама ошибка, а не булев ответ.
+        match std::fs::symlink_metadata(source) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!(path = %source.display(), "backup source is missing, skipped");
+                missing.push(source.display().to_string());
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                tracing::warn!(path = %source.display(), "backup source is unreadable, skipped");
+                unreadable.push(source.display().to_string());
+                continue;
+            }
+            Err(e) => return Err(Error::io(source, e)),
         }
         let name = archive_name(source);
         append_tree(&mut builder, &name, source, &mut unreadable)?;
@@ -110,12 +138,20 @@ pub fn create_encrypted(
             "backup could not read these paths and left them out of the archive"
         );
     }
+    if !missing.is_empty() {
+        tracing::warn!(
+            count = missing.len(),
+            paths = %missing.join(", "),
+            "backup sources do not exist and are absent from the archive"
+        );
+    }
     Ok(ArchiveInfo {
         path: output.to_path_buf(),
         size_bytes,
         sha256: sha256_file(output)?,
         members,
         unreadable,
+        missing,
     })
 }
 
@@ -269,7 +305,12 @@ fn parse_identities(path: &Path) -> Result<Vec<age::x25519::Identity>> {
 }
 
 /// `/etc/opt/simplex` -> `etc/opt/simplex`; relative paths are kept as they are.
-fn archive_name(path: &Path) -> String {
+///
+/// Видно всему крейту: тем же именем [`crate::backup`] проверяет, что обязательный
+/// путь действительно лежит в архиве. Сравнение нормализованных имён, а не подстрок
+/// сырых путей, — единственный способ не спутать `/var/lib/hearth` с
+/// `/var/lib/hearth-old`.
+pub(crate) fn archive_name(path: &Path) -> String {
     let mut parts = Vec::new();
     for component in path.components() {
         match component {
@@ -421,6 +462,13 @@ mod tests {
         )
         .expect("create");
         assert_eq!(info.members.len(), 2);
+        // Раньше отсутствующий источник не оставлял следа нигде, кроме журнала.
+        assert_eq!(
+            info.missing,
+            vec![dir.path().join("does-not-exist").display().to_string()],
+            "отсутствующий источник обязан быть виден в описи"
+        );
+        assert!(info.unreadable.is_empty());
 
         let err = create_encrypted(
             &[dir.path().join("nope")],
@@ -431,6 +479,40 @@ mod tests {
         assert!(err
             .to_string()
             .contains("none of the configured backup paths exist"));
+    }
+
+    /// EACCES на источнике — не то же самое, что его отсутствие: в первом случае
+    /// данные есть и их не скопировали, во втором копировать нечего.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_source_is_not_reported_as_missing() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Под root права игнорируются, EACCES не возникает — проверять нечего.
+        // Неизвестный uid («не знаю») тоже пропускаем: проверять права, не зная их,
+        // значит получить тест, который падает через раз.
+        if crate::sys::effective_uid_is_root() != Some(false) {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sources = seed_tree(dir.path());
+        let locked_parent = dir.path().join("locked");
+        let locked = locked_parent.join("state");
+        std::fs::create_dir_all(&locked).expect("mkdir");
+        std::fs::set_permissions(&locked_parent, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod");
+
+        let (recipient, _id) = keypair();
+        let mut with_locked = sources.clone();
+        with_locked.push(locked.clone());
+        let info = create_encrypted(&with_locked, &dir.path().join("c.age"), &[recipient]);
+
+        // Права возвращаются ДО assert: иначе провал теста оставит неудаляемый каталог.
+        std::fs::set_permissions(&locked_parent, std::fs::Permissions::from_mode(0o700))
+            .expect("chmod back");
+        let info = info.expect("create");
+        assert_eq!(info.unreadable, vec![locked.display().to_string()]);
+        assert!(info.missing.is_empty(), "путь существует, он лишь закрыт");
     }
 
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {

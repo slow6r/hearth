@@ -48,6 +48,13 @@ version = "distro"
 sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 source = "debian:coturn"
 
+# Свой бинарник. В отличие от upstream-записей, у него нет внешнего якоря доверия
+# (GPG-подписи релиза), поэтому `hearthctl manifest pin --name hearthd` дописывает сюда
+# ещё два поля — `commit` и `tree_sha256`, — которые спрашивает у самого файла
+# (`hearthd build-info`). В проверку целостности они НЕ входят: иначе перепин версии
+# ронял бы узел в карантин из-за строки, которую никто не измеряет. Это запись о
+# происхождении, и сверяется она с /var/lib/hearth/installed.build-info и с журналом
+# демона (tests/acceptance/a16-provenance.sh).
 [[binary]]
 name = "hearthd"
 path = "/usr/local/bin/hearthd"

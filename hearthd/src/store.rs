@@ -236,15 +236,156 @@ fn write_atomic_owned(
         }
     }
     std::fs::rename(&tmp, path).map_err(|e| Error::io(path, e))?;
+    sync_parent(path)?;
+    Ok(())
+}
+
+/// Досинхронизировать КАТАЛОГ после переименования.
+///
+/// `sync_all` на временном файле сохраняет его содержимое, но не запись каталога,
+/// которая связала это содержимое с окончательным именем. После пропадания питания
+/// каталог может вернуться в состояние «нового файла ещё нет» при полностью
+/// сохранном содержимом — а для node-mode.json это ровно тот случай, ради которого
+/// запрет и записывается на диск: он обязан пережить не перезапуск демона, а
+/// выдернутый шнур. На не-unix это no-op: там нет способа открыть каталог.
+fn sync_parent(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let parent = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            // Относительное имя без каталога — синхронизировать нечего, кроме «.».
+            _ => Path::new("."),
+        };
+        let dir = std::fs::File::open(parent).map_err(|e| Error::io(parent, e))?;
+        dir.sync_all().map_err(|e| Error::io(parent, e))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
 fn set_owner(path: &Path, uid: u32, gid: u32) -> Result<()> {
     #[cfg(unix)]
-    std::os::unix::fs::chown(path, Some(uid), Some(gid)).map_err(|e| Error::io(path, e))?;
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        // Владелец уже тот, что нужен, — менять нечего. Это не оптимизация: chown на
+        // самого себя под непривилегированным пользователем отказывает на части
+        // файловых систем, и демон под `hearth`, переписывающий свой же файл, получал
+        // бы EPERM на ровном месте.
+        if let Ok(meta) = std::fs::metadata(path) {
+            if (meta.uid(), meta.gid()) == (uid, gid) {
+                return Ok(());
+            }
+        }
+        std::os::unix::fs::chown(path, Some(uid), Some(gid)).map_err(|e| Error::io(path, e))?;
+    }
     #[cfg(not(unix))]
     let _ = (path, uid, gid);
     Ok(())
+}
+
+/// Владелец, которого ОБЯЗАН получить файл, — владелец его КАТАЛОГА.
+///
+/// Два отличия от [`inherited_owner`], и оба существенные.
+///
+/// Первое: владелец берётся у каталога, а НЕ у самого файла. Для файлов, которые
+/// правят и демон под `hearth`, и человек под `sudo` (файл режима, журналы алертов),
+/// нынешний владелец файла — это ровно то, что здесь чинится: на узле, пострадавшем от
+/// прежней записи без наследования, `node-mode.json` уже лежит как `root:root`, и
+/// наследование «от файла» увековечило бы поломку. Каталог состояния создаёт
+/// установщик, и его владелец — тот самый пользователь, под которым работает демон.
+///
+/// Второе: неопределимый владелец здесь — ошибка, а не «пишем как есть». Молча
+/// созданный `root:root` не ломает саму команду — он ломает СЛЕДУЮЩИЙ старт демона,
+/// то есть проявляется позже и совсем в другом месте.
+fn required_owner(path: &Path) -> Result<Option<(u32, u32)>> {
+    // Проверка одинакова на всех платформах, чтобы её можно было проверить тестом там,
+    // где эти тесты идут. Создавать каталог самим здесь нельзя: он достался бы тому,
+    // кто пишет, то есть root.
+    let anchor = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    if !anchor.is_dir() {
+        return Err(Error::Config(format!(
+            "не удалось определить владельца для {}: каталога {} нет. Создайте каталог \
+             состояния с нужным владельцем (hearthd/deploy/install.sh или \
+             deploy/fix-permissions.sh) и повторите: файл, созданный под root, hearthd \
+             под пользователем hearth читать не сможет",
+            path.display(),
+            anchor.display()
+        )));
+    }
+    Ok(owner_of(anchor))
+}
+
+/// Владелец каталога или файла. На не-unix владельцев в этом смысле нет.
+#[cfg(unix)]
+fn owner_of(path: &Path) -> Option<(u32, u32)> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(path).ok().map(|m| (m.uid(), m.gid()))
+}
+
+#[cfg(not(unix))]
+fn owner_of(_path: &Path) -> Option<(u32, u32)> {
+    None
+}
+
+/// Жалоба на каталог состояния, доставшийся `root`.
+///
+/// Наследование владельца берёт его у КАТАЛОГА ([`required_owner`]). Пока каталог
+/// принадлежит `hearth`, это и чинит владельческие тупики. Но если root-овым стал сам
+/// каталог, наследовать нечего: и файл режима, и журналы алертов создаются `root:root`,
+/// команда человека отчитывается успехом — а демон под `hearth` эти файлы не прочитает.
+/// Исходный дефект воспроизводится молча и всплывает позже, уже без видимой причины.
+///
+/// Поэтому не отказ, а названная вслух беда вместе с командой выхода: отказать здесь
+/// значило бы отнять у человека аварийное снятие режима ровно в тот вечер, ради
+/// которого оно написано.
+pub fn root_owned_dir_complaint(dir: impl AsRef<Path>) -> Option<String> {
+    let dir = dir.as_ref();
+    root_owned_dir_message(dir, owner_of(dir))
+}
+
+/// Текст жалобы отдельно от способа узнать владельца: владельцев в этом смысле нет на
+/// не-unix, а проверять формулировку надо там, где идут тесты.
+fn root_owned_dir_message(dir: &Path, owner: Option<(u32, u32)>) -> Option<String> {
+    let (uid, _gid) = owner?;
+    if uid != 0 {
+        return None;
+    }
+    Some(format!(
+        "каталог состояния {} принадлежит root: всё, что в нём создаётся с \
+         наследованием владельца, достаётся root:root, и hearthd под пользователем \
+         hearth это не прочитает. Выход: sudo hearthd/deploy/fix-permissions.sh \
+         (вернёт каталогу и его файлам hearth:hearth), затем systemctl restart hearthd",
+        dir.display()
+    ))
+}
+
+/// Как [`write_atomic_keep_owner`], но неопределимый владелец — ОТКАЗ.
+///
+/// Для файла режима и журналов алертов это единственно верное поведение: их пишет и
+/// демон под `hearth`, и человек под `sudo`, и файл, доставшийся `root`, оставляет
+/// узел без управляющего контура до ручного `chown`. Лучше внятный отказ команде
+/// человека, который стоит перед узлом, чем успех, ломающий демон через минуту.
+pub fn write_atomic_inheriting_owner(path: impl AsRef<Path>, body: &[u8], mode: u32) -> Result<()> {
+    let path = path.as_ref();
+    // Владелец определяется ДО `ensure_dir` внутри записи: иначе недостающий каталог
+    // создался бы от имени пишущего (root), и наследовать было бы уже нечего.
+    let owner = required_owner(path)?;
+    write_atomic_owned(path, body, mode, owner)
+}
+
+/// Как [`write_json_atomic`], но неопределимый владелец — отказ.
+/// См. [`write_atomic_inheriting_owner`].
+pub fn write_json_atomic_inheriting_owner<T: Serialize>(
+    path: impl AsRef<Path>,
+    value: &T,
+    mode: u32,
+) -> Result<()> {
+    let body = serde_json::to_vec_pretty(value)?;
+    write_atomic_inheriting_owner(path, &body, mode)
 }
 
 /// Create the temp file with its final permissions already in place.
@@ -278,23 +419,59 @@ fn tmp_path(path: &Path) -> PathBuf {
 
 /// Append one line to a journal file (JSONL), creating it if needed.
 pub fn append_line(path: impl AsRef<Path>, line: &str) -> Result<()> {
-    let path = path.as_ref();
+    append_line_owned(path.as_ref(), line, false)
+}
+
+/// Как [`append_line`], но НОВЫЙ файл получает владельца каталога, а неопределимый
+/// владелец — отказ.
+///
+/// Нужна там, где журнал может быть впервые создан из-под `sudo`: `alerts.jsonl` и
+/// `egress-incidents.jsonl` пишет и демон под `hearth`, и локальные команды на узле.
+/// Созданный под root, журнал закрывается для демона навсегда — узел остаётся без
+/// записи алертов, и заметить это можно только по их отсутствию.
+pub fn append_line_keep_owner(path: impl AsRef<Path>, line: &str) -> Result<()> {
+    append_line_owned(path.as_ref(), line, true)
+}
+
+fn append_line_owned(path: &Path, line: &str, inherit: bool) -> Result<()> {
+    let existed = path.exists();
+    // Владелец определяется ДО создания каталога: иначе каталог, созданный под root,
+    // сам стал бы источником неверного владельца.
+    let owner = if inherit { required_owner(path)? } else { None };
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             ensure_dir(parent)?;
         }
     }
-    let existed = path.exists();
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(|e| Error::io(path, e))?;
-    writeln!(file, "{line}").map_err(|e| Error::io(path, e))?;
-    file.sync_data().map_err(|e| Error::io(path, e))?;
     if !existed {
         set_mode(path, MODE_STATE)?;
+        if let Some((uid, gid)) = owner {
+            if let Err(e) = set_owner(path, uid, gid) {
+                // Строку ещё не писали: пустой файл с неверным владельцем убираем,
+                // чтобы следующая попытка снова начала с чистого места.
+                let _ = std::fs::remove_file(path);
+                return Err(e);
+            }
+        }
+    } else if let Some((uid, gid)) = owner {
+        // Журнал уже есть, но мог достаться не тому владельцу — например, от прежней
+        // записи из-под `sudo`. Чиним по возможности и НЕ отказываем: алерт, который
+        // не записан, хуже алерта, записанного под неудобным владельцем.
+        if let Err(e) = set_owner(path, uid, gid) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "владельца журнала исправить не удалось"
+            );
+        }
     }
+    writeln!(file, "{line}").map_err(|e| Error::io(path, e))?;
+    file.sync_data().map_err(|e| Error::io(path, e))?;
     Ok(())
 }
 
@@ -313,6 +490,59 @@ pub fn tail_lines(path: impl AsRef<Path>, limit: usize) -> Result<Vec<String>> {
         .collect();
     let start = lines.len().saturating_sub(limit);
     Ok(lines[start..].to_vec())
+}
+
+/// Как [`tail_lines`], но НЕЧИТАЕМЫЙ журнал — не повод остановиться.
+///
+/// Возвращает прочитанное и, если прочитать не удалось, жалобу человеческими словами.
+/// Нужна там, где журнал читают на пути старта: демон, не сумевший прочитать
+/// `alerts.jsonl`, обязан подняться и объяснить беду, а не исчезнуть с узла — иначе
+/// семья остаётся без надзора, целостности, бэкапа и admin API из-за прав на один
+/// файл. Уже записанное не теряется: дозапись идёт в тот же файл, в конец.
+pub fn tail_lines_best_effort(
+    path: impl AsRef<Path>,
+    limit: usize,
+) -> (Vec<String>, Option<String>) {
+    let path = path.as_ref();
+    match tail_lines(path, limit) {
+        Ok(lines) => (lines, None),
+        Err(e) => (
+            Vec::new(),
+            Some(format!(
+                "журнал {} не прочитан ({e}): нумерация алертов начнётся заново, уже \
+                 записанное останется в файле. Обычная причина — владелец или права: \
+                 sudo hearthd/deploy/fix-permissions.sh, затем systemctl restart hearthd",
+                path.display()
+            )),
+        ),
+    }
+}
+
+/// Привести владельца УЖЕ СУЩЕСТВУЮЩЕГО файла к владельцу его каталога — по возможности.
+///
+/// Нужна ровно там, где файл сначала ЧИТАЮТ, а потом дописывают.
+/// [`append_line_keep_owner`] чинит владельца сама, но делает это при записи: чтение,
+/// идущее раньше, успевает упереться в того же неверного владельца, и вызывающий
+/// выходит с ошибкой ДО починки — то есть починка не случается никогда.
+///
+/// Ничего не возвращает намеренно: отсутствующий файл, неопределимый владелец и отказ
+/// `chown` здесь не ошибки. Это попытка улучшить положение перед чтением, а не условие
+/// работы; настоящий отказ придёт от самой записи и будет назван там.
+pub fn adopt_dir_owner(path: impl AsRef<Path>) {
+    let path = path.as_ref();
+    if !path.exists() {
+        return;
+    }
+    let Ok(Some((uid, gid))) = required_owner(path) else {
+        return;
+    };
+    if let Err(e) = set_owner(path, uid, gid) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "владельца файла исправить не удалось"
+        );
+    }
 }
 
 /// Read a secret (relay password, TURN secret, Gotify token).
@@ -422,6 +652,69 @@ mod tests {
     }
 
     #[test]
+    fn an_overwrite_survives_the_directory_sync() {
+        // После переименования синхронизируется родительский каталог — иначе запрет,
+        // записанный на диск, мог бы не пережить пропадание питания. Проверить сам
+        // fsync юнит-тестом нельзя; проверяем то, что можно: перезапись существующего
+        // файла по-прежнему проходит целиком и не оставляет мусора.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("node-mode.json");
+        write_json_atomic(&path, &Doc { a: 1 }, MODE_STATE).expect("first write");
+        write_json_atomic(&path, &Doc { a: 2 }, MODE_STATE).expect("overwrite");
+        assert_eq!(read_json::<Doc>(&path).expect("read"), Some(Doc { a: 2 }));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+            assert_eq!(mode & 0o777, MODE_STATE);
+        }
+    }
+
+    #[test]
+    fn a_journal_created_from_sudo_keeps_the_directory_owner() {
+        // Дефект: `record_offline` под root создавал alerts.jsonl / egress-incidents.jsonl
+        // обычной `append_line`, которая владельца не наследует. На узле, где журналов
+        // ещё нет, локальное снятие режима закрывало демону запись в них навсегда.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("alerts.jsonl");
+        append_line_keep_owner(&path, "первая").expect("создание журнала");
+        append_line_keep_owner(&path, "вторая").expect("дозапись");
+        assert_eq!(
+            tail_lines(&path, 10).expect("tail"),
+            vec!["первая".to_string(), "вторая".to_string()]
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let file = std::fs::metadata(&path).expect("stat file");
+            let parent = std::fs::metadata(dir.path()).expect("stat dir");
+            assert_eq!(
+                (file.uid(), file.gid()),
+                (parent.uid(), parent.gid()),
+                "новый журнал обязан достаться владельцу каталога состояния"
+            );
+        }
+    }
+
+    #[test]
+    fn writing_without_an_owner_to_inherit_is_refused() {
+        // Молча созданный файл с чужим владельцем не ломает саму команду — он ломает
+        // СЛЕДУЮЩИЙ старт демона, то есть проявляется позже и в другом месте. Человеку,
+        // который стоит перед узлом, лучше внятный отказ.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("нет-каталога").join("node-mode.json");
+        let err = write_atomic_inheriting_owner(&path, b"{}", MODE_STATE)
+            .expect_err("отказ вместо файла с чужим владельцем");
+        assert!(err.to_string().contains("владельца"), "{err}");
+        assert!(!path.exists());
+
+        let journal = dir.path().join("нет-каталога").join("alerts.jsonl");
+        let err = append_line_keep_owner(&journal, "x").expect_err("тот же отказ");
+        assert!(err.to_string().contains("владельца"), "{err}");
+        assert!(!journal.exists());
+    }
+
+    #[test]
     fn journal_appends_and_tails() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("alerts.jsonl");
@@ -433,6 +726,104 @@ mod tests {
         assert_eq!(
             tail_lines(dir.path().join("nope"), 10).expect("missing"),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn an_unreadable_journal_is_a_complaint_and_not_a_dead_daemon() {
+        // Дефект: демон читал alerts.jsonl оператором вопроса на пути старта. Узел, у
+        // которого журнал стал root-овым или потерял права, не поднимался ВООБЩЕ —
+        // семья оставалась без надзора, целостности, бэкапа и admin API из-за прав на
+        // один файл. Читаемый журнал — не условие работы узла.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("alerts.jsonl");
+        append_line(&path, "первая").expect("append");
+
+        let (lines, complaint) = tail_lines_best_effort(&path, 10);
+        assert_eq!(lines, vec!["первая".to_string()]);
+        assert!(complaint.is_none(), "{complaint:?}");
+
+        // Нечитаемый журнал воспроизводится переносимо и правдоподобно: оборванная
+        // запись оставляет в файле байты, которые не складываются в UTF-8, и чтение
+        // отказывает ровно так же, как на чужом владельце, — но дозапись возможна.
+        // Чужого владельца в тесте не изобразить: он требует второго пользователя.
+        let broken = dir.path().join("битый.jsonl");
+        std::fs::write(&broken, [0xff, 0xfe, 0x0a]).expect("оборванная запись");
+        let (lines, complaint) = tail_lines_best_effort(&broken, 10);
+        assert!(lines.is_empty());
+        let complaint = complaint.expect("нечитаемый журнал обязан быть назван");
+        assert!(complaint.contains("битый.jsonl"), "{complaint}");
+        assert!(
+            complaint.contains("fix-permissions.sh"),
+            "жалоба обязана назвать команду выхода: {complaint}"
+        );
+
+        // Уже записанное не теряется: дозапись идёт в конец того же файла.
+        append_line(&path, "вторая").expect("append");
+        assert_eq!(tail_lines(&path, 10).expect("tail").len(), 2);
+    }
+
+    #[test]
+    fn a_root_owned_state_dir_is_named_together_with_the_way_out() {
+        // Root-овый КАТАЛОГ состояния воспроизводит владельческий тупик молча:
+        // наследовать владельца не у кого, файл создаётся root:root, команда человека
+        // отчитывается успехом, а демон при следующем старте снова его не прочитает.
+        // Владельцев в этом смысле нет на не-unix, поэтому проверяется сам текст.
+        let dir = std::path::Path::new("/var/lib/hearth");
+        assert!(
+            root_owned_dir_message(dir, None).is_none(),
+            "неизвестный владелец — не повод пугать человека"
+        );
+        assert!(
+            root_owned_dir_message(dir, Some((998, 998))).is_none(),
+            "каталог демона в порядке"
+        );
+        let complaint = root_owned_dir_message(dir, Some((0, 0)))
+            .expect("root-овый каталог обязан быть назван");
+        assert!(complaint.contains("/var/lib/hearth"), "{complaint}");
+        assert!(
+            complaint.contains("fix-permissions.sh"),
+            "беда без команды выхода — это просто беда: {complaint}"
+        );
+    }
+
+    #[test]
+    fn adopting_the_dir_owner_never_fails_the_caller() {
+        // Функция стоит ПЕРЕД чтением журнала и обязана быть безобидной: отсутствующий
+        // файл, неопределимый владелец и отказ chown не должны мешать записи алерта.
+        let dir = tempfile::tempdir().expect("tempdir");
+        adopt_dir_owner(dir.path().join("нет-такого.jsonl"));
+        adopt_dir_owner(dir.path().join("нет-каталога").join("alerts.jsonl"));
+
+        let path = dir.path().join("alerts.jsonl");
+        append_line(&path, "строка").expect("append");
+        adopt_dir_owner(&path);
+        assert_eq!(tail_lines(&path, 10).expect("tail").len(), 1);
+    }
+
+    #[test]
+    fn the_runbook_names_the_script_that_actually_fixes_the_owners() {
+        // Жалобы демона и hearthctl называют deploy/fix-permissions.sh. Скрипт, не
+        // названный в runbook, ночью не найдут; runbook, обещающий не то, что скрипт
+        // делает, — хуже отсутствующего. Проверяем обе стороны обещания.
+        let runbook = include_str!("../../docs/runbook-node-mode.md");
+        assert!(
+            runbook.contains("fix-permissions.sh"),
+            "runbook обязан назвать штатный выход из владельческих тупиков"
+        );
+
+        let script = include_str!("../deploy/fix-permissions.sh");
+        // Root-овый каталог состояния и журналы внутри него — один и тот же chown -R.
+        assert!(
+            script.contains("chown -R hearth:hearth"),
+            "скрипт обязан чинить владельца рекурсивно"
+        );
+        for dir in ["/var/lib/hearth", "/var/opt/hearth"] {
+            assert!(script.contains(dir), "скрипт обязан назвать {dir}");
+        }
+        assert!(
+            script.contains("alerts.jsonl"),
+            "журналы алертов — часть того же тупика, и это должно быть видно в скрипте"
         );
     }
 
@@ -477,7 +868,11 @@ mod tests {
             }
         });
 
-        let final_value: u32 = std::fs::read_to_string(&path).unwrap().trim().parse().unwrap();
+        let final_value: u32 = std::fs::read_to_string(&path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
         assert_eq!(*counter.lock().unwrap(), 8);
         assert_eq!(final_value, 8, "ни одно изменение не должно потеряться");
     }

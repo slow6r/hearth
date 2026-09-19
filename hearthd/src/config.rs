@@ -189,6 +189,11 @@ impl Paths {
     pub fn invites_file(&self) -> PathBuf {
         self.state_dir.join("invites.json")
     }
+    /// Аудиторские токены: срочный доступ к раздаче обновлений для проверяющего.
+    /// Тоже состояние, и тоже рядом — по тем же причинам, что и приглашения.
+    pub fn audit_tokens_file(&self) -> PathBuf {
+        self.state_dir.join("audit-tokens.json")
+    }
     /// Append-only alert journal.
     pub fn alerts_file(&self) -> PathBuf {
         self.state_dir.join("alerts.jsonl")
@@ -210,7 +215,9 @@ impl Paths {
     /// Режим узла: карантин, обслуживание, перенос. Переживает перезапуск — в этом
     /// весь смысл файла (см. `crate::model::mode`).
     pub fn node_mode_file(&self) -> PathBuf {
-        self.state_dir.join("node-mode.json")
+        // Имя файла — из `model::mode`: гейт собирает путь из той же константы, и
+        // разъехаться демону с гейтом негде.
+        self.state_dir.join(crate::model::mode::NODE_MODE_FILE_NAME)
     }
     /// Issued admin client certificates (fingerprint allowlist for the API).
     pub fn admins_file(&self) -> PathBuf {
@@ -410,12 +417,26 @@ pub struct Backup {
     pub retention_days: u64,
     /// Пути, без которых архив бессмысленен.
     ///
-    /// Если такой путь не прочитался, запуск считается ПРОВАЛЕННЫМ, а не «успешным с
-    /// замечанием»: восстановление из архива без состояния узла — это не
-    /// восстановление. Пустой список означает «любой архив сойдёт» и задаётся
-    /// осознанно.
+    /// Если такой путь не вошёл в архив целиком, запуск считается ПРОВАЛЕННЫМ, а не
+    /// «успешным с замечанием»: восстановление из архива без состояния узла — это не
+    /// восстановление. Пустой список означает «любой архив сойдёт»; на старте демон
+    /// говорит об этом вслух, чтобы «осознанно пусто» и «забыли» не выглядели
+    /// одинаково.
+    ///
+    /// Каждый элемент обязан присутствовать в `paths` — иначе требование невыполнимо
+    /// по построению; это проверяет [`Config::validate`].
     #[serde(default)]
     pub required_paths: Vec<PathBuf>,
+    /// Файлы внутри обязательных путей, недоступность которых — норма, а не дыра.
+    ///
+    /// Ровно один такой файл существует по замыслу: `/etc/hearth/pki/ca.key` держат
+    /// 0600 root:root, чтобы скомпрометированный демон не выписал себе админский
+    /// сертификат (deploy/fix-permissions.sh). Без этого списка выбор был бы между
+    /// «падать каждую ночь» и «не проверять вообще»; список делает исключение
+    /// поимённым, а всё остальное непрочитанное внутри обязательного пути —
+    /// провалом.
+    #[serde(default = "d_tolerated_unreadable")]
+    pub tolerated_unreadable: Vec<PathBuf>,
     #[serde(default)]
     pub remote: Option<BackupRemote>,
 }
@@ -430,6 +451,35 @@ pub struct BackupRemote {
     pub user: String,
     pub path: String,
     pub ssh_key: PathBuf,
+    /// Сверять ли sha256 доехавшего архива, спрашивая его у приёмника по ssh.
+    ///
+    /// Обычная практика на приёмнике — ограничить ключ в `authorized_keys` через
+    /// `command="rsync ..."`; тогда любая другая команда там невыполнима, и сверка
+    /// падала бы каждую ночь, давая вечный `Degraded` на исправном узле. Это
+    /// осознанный выход из положения: подтверждением остаётся код возврата rsync, что
+    /// слабее, и статус узла говорит об этом прямо (`remote_note`), а не молчит.
+    ///
+    /// Умолчание — сверять: код возврата rsync не отличает «копия доехала» от «копия
+    /// доехала испорченной».
+    #[serde(default = "d_true")]
+    pub verify_digest: bool,
+    /// Сколько просроченных архивов ЭТОГО узла разрешено удалить на приёмнике за один
+    /// прогон. `0` — не прореживать вовсе.
+    ///
+    /// Без прореживания `/srv/hearth-backup` растёт до отказа, и тогда перестаёт
+    /// приниматься свежий архив — отказ бэкапа, наступающий молча и в самый неудобный
+    /// момент. Зеркалирование (`rsync --delete`) решало бы это ценой худшего исхода:
+    /// пустой спул после переустановки узла унёс бы всю внешнюю историю за одну ночь.
+    ///
+    /// Поэтому удаление ограничено дважды: правилами фильтра (чужие файлы в том же
+    /// каталоге не трогаются НИКОГДА) и этим числом (больше него за ночь не исчезает
+    /// никогда, а попытка превысить — громкая жалоба rsync). Собственные архивы узла
+    /// маска, наоборот, накрывает — это и есть предмет прореживания, — так что от
+    /// сценария «пустой спул после переустановки» защищает только число, и только
+    /// по ночам: за несколько ночей подряд история всё равно уйдёт. На время
+    /// переустановки узла здесь ставят `0`.
+    #[serde(default = "d_max_delete")]
+    pub max_delete: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -576,11 +626,88 @@ impl Config {
         relays
     }
 
+    /// Юниты, которых касается режим узла: релеи и TURN.
+    ///
+    /// Отдельный список, а не `relays()`, потому что ADR 0013 обещает узел, который в
+    /// не-normal режиме НЕ обслуживает семью ничем. coturn в этот список не входил, и
+    /// обещание было неправдой сразу в двух местах: `migrate::export` останавливал
+    /// coturn, а надзор поднимал его обратно через `check_interval_secs`, уже в режиме
+    /// переноса. Смысла держать TURN в карантине нет и по существу: сигнализация
+    /// звонка идёт через smp-релей, который в этот момент остановлен, — то есть
+    /// работающий coturn не даёт семье ни одного звонка, зато оставляет на захваченном
+    /// узле открытый медиа-ретранслятор.
+    ///
+    /// Порядок устойчив (релеи, затем TURN): по нему идут остановки при удержании.
+    ///
+    /// Про `enabled` список не спрашивает — ни у релеев, ни у TURN: он отвечает на
+    /// вопрос «чей это юнит», а решение «трогать ли выключенную службу» принимает
+    /// вызывающий. Fail-closed: юнит, попавший в список ошибочно, лишь не будет поднят
+    /// в карантине; юнит, в список не попавший, обслуживает семью вопреки запрету.
+    pub fn mode_gated_units(&self) -> Vec<String> {
+        let mut units: Vec<String> = self
+            .relays()
+            .iter()
+            .map(|relay| relay.unit.clone())
+            .collect();
+        units.push(self.turn.unit.clone());
+        units
+    }
+
     /// Relay sections paired with the scheme each one must carry.
     fn relay_sections(&self) -> Vec<(&'static str, &Relay)> {
         let mut sections = vec![("smp", &self.smp), ("xftp", &self.xftp)];
         sections.extend(self.ntf.as_ref().map(|ntf| ("ntf", ntf)));
         sections
+    }
+
+    /// Обязательные пути, которых нет в списке архивируемых.
+    ///
+    /// Такое требование невыполнимо: путь никто не пытается архивировать, и ночной
+    /// прогон будет проваливаться на нём каждый раз (`required_paths_report` в
+    /// `backup`). Это ошибка администратора, а не улика подмены.
+    pub fn required_paths_outside_paths(&self) -> Vec<&Path> {
+        if !self.backup.enabled {
+            return Vec::new();
+        }
+        self.backup
+            .required_paths
+            .iter()
+            .filter(|required| !self.backup.paths.iter().any(|p| &p == required))
+            .map(PathBuf::as_path)
+            .collect()
+    }
+
+    /// Замечания к конфигурации, которые НЕ повод не стартовать.
+    ///
+    /// Демон, отказавшийся подняться из-за опечатки в списке путей, оставляет дом без
+    /// надзора, без проверки целостности, без бэкапа, без admin API и без алертов —
+    /// причём релеи при этом работают, так что снаружи ничего не заметно. Цена
+    /// опечатки становится несоразмерной ей самой, и хуже всего то, что счёт
+    /// предъявляется не в момент правки, а при следующей перезагрузке: конфигурация
+    /// читается только на старте, и между ошибкой и её последствием могут пройти
+    /// недели.
+    ///
+    /// Поэтому здесь громко, но не смертельно: каждая строка уходит в журнал и в
+    /// алерты при старте, а невыполнимое требование бэкапа вдобавок валит вердикт
+    /// бэкапа в `Down` при первом же ночном прогоне — молча это не пройдёт.
+    ///
+    /// Fail-closed остаётся там, где иначе теряется защита: чужой отпечаток в
+    /// пин-листе, адрес алертов вне домашней сети, порт admin API, занятый релеем, —
+    /// всё это по-прежнему отказ в `validate`.
+    pub fn warnings(&self) -> Vec<String> {
+        self.required_paths_outside_paths()
+            .into_iter()
+            .map(|required| {
+                format!(
+                    "backup.required_paths содержит {}, которого нет в backup.paths: \
+                     этот путь не архивируется, и требование невыполнимо. Узел работает, \
+                     но ночной прогон будет проваливаться каждую ночь, а вердикт бэкапа \
+                     останется Down. Поправьте один из двух списков в [backup] и \
+                     перезапустите hearthd (docs/runbook-deploy.md).",
+                    required.display()
+                )
+            })
+            .collect()
     }
 
     /// Enforce the invariants that can be checked statically.
@@ -781,6 +908,8 @@ impl Config {
             if self.backup.hour_utc > 23 {
                 return Err(Error::config("backup.hour_utc must be 0..=23"));
             }
+            // Обязательный путь, которого нет в paths, — не отказ старта: см.
+            // `warnings` и `required_paths_outside_paths`.
         }
 
         if let Some(gotify) = &self.alerts.gotify {
@@ -953,6 +1082,15 @@ fn d_backup_hour() -> u32 {
 fn d_retention() -> u64 {
     14
 }
+/// Ночной прогон удаляет на приёмнике не больше трёх архивов: при суточном цикле это
+/// запас на пару пропущенных ночей и предел, за которым что-то идёт не так.
+fn d_max_delete() -> u32 {
+    3
+}
+
+fn d_tolerated_unreadable() -> Vec<PathBuf> {
+    vec![PathBuf::from("/etc/hearth/pki/ca.key")]
+}
 fn d_ssh_port() -> u16 {
     22
 }
@@ -1033,6 +1171,124 @@ mod tests {
         let mut cfg = reference();
         cfg.smp.control = Some("192.168.1.10:5224".parse().expect("addr"));
         assert!(cfg.validate().is_err());
+    }
+
+    /// Механизм обязательных путей был мёртвым кодом: поле есть в модели, в
+    /// поставляемом конфиге его не было, `#[serde(default)]` давал пустой вектор, и
+    /// весь блок fail-closed не исполнялся ни при каком сценарии.
+    #[test]
+    fn the_shipped_config_declares_required_paths() {
+        let cfg = reference();
+        assert!(
+            !cfg.backup.required_paths.is_empty(),
+            "без required_paths успехом считается любой архив"
+        );
+        for must in [
+            "/etc/opt/simplex",
+            "/var/opt/simplex",
+            "/etc/hearth",
+            "/var/lib/hearth",
+        ] {
+            assert!(
+                cfg.backup
+                    .required_paths
+                    .iter()
+                    .any(|p| p == std::path::Path::new(must)),
+                "{must} обязателен: без него восстановление не является восстановлением"
+            );
+        }
+        assert!(cfg
+            .backup
+            .tolerated_unreadable
+            .iter()
+            .any(|p| p == std::path::Path::new("/etc/hearth/pki/ca.key")));
+    }
+
+    #[test]
+    fn an_unarchivable_required_path_is_a_warning_and_not_a_dead_daemon() {
+        // Замечание 10. Обязательный путь, который никто не архивирует, невыполним по
+        // построению — но отказ стартовать из-за опечатки в списке оставлял бы дом без
+        // надзора, бэкапа, целостности и алертов при работающих релеях. Громко — да,
+        // смертельно — нет.
+        let mut cfg = reference();
+        cfg.backup.required_paths.push("/var/opt/nowhere".into());
+        cfg.validate()
+            .expect("опечатка в списке путей не повод не стартовать");
+
+        let warnings = cfg.warnings();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(warnings[0].contains("/var/opt/nowhere"), "got {warnings:?}");
+        // Текст обязан называть действие, а не только беду.
+        assert!(warnings[0].contains("backup.paths"), "got {warnings:?}");
+        assert!(
+            warnings[0].contains("перезапустите hearthd"),
+            "got {warnings:?}"
+        );
+
+        // Исправленная конфигурация молчит — иначе предупреждение было бы фоном.
+        cfg.backup.paths.push("/var/opt/nowhere".into());
+        assert!(cfg.warnings().is_empty(), "{:?}", cfg.warnings());
+
+        // Выключенный бэкап не жалуется ни на что: списки в этом случае не читаются.
+        cfg.backup.paths.pop();
+        cfg.backup.enabled = false;
+        assert!(cfg.warnings().is_empty(), "{:?}", cfg.warnings());
+    }
+
+    #[test]
+    fn the_runbook_explains_the_warning_and_the_fix() {
+        // Предупреждение, которого нет в runbook, — это предупреждение, с которым
+        // человек ночью остаётся один на один.
+        let runbook = include_str!("../../docs/runbook-deploy.md");
+        assert!(
+            runbook.contains("backup.required_paths"),
+            "runbook обязан назвать поле, в котором опечатка"
+        );
+        assert!(
+            runbook.contains("hearthd check"),
+            "runbook обязан назвать команду, которая печатает предупреждения"
+        );
+    }
+
+    #[test]
+    fn the_node_runbook_calls_the_unarchivable_path_a_warning() {
+        // Дефект: §6 runbook-node-mode.md утверждал, что backup.required_paths вне
+        // backup.paths «не даёт hearthd стартовать». Это перестало быть правдой ещё
+        // тогда, когда отказ стал предупреждением. Документ, противоречащий коду, хуже
+        // отсутствующего: по нему ночью решают, что чинить.
+        let runbook = include_str!("../../docs/runbook-node-mode.md");
+        let start = runbook
+            .find("## 6.")
+            .expect("раздел о том, что мешает стартовать");
+        let section = &runbook[start..];
+        let section = section
+            .split_once("\n## ")
+            .map_or(section, |(head, _)| head);
+        assert!(
+            section.contains("backup.required_paths"),
+            "раздел обязан назвать поле: {section}"
+        );
+        assert!(
+            section.contains("предупреждение"),
+            "раздел обязан назвать это предупреждением: {section}"
+        );
+        assert!(
+            !section.contains("не стартует"),
+            "обещание мёртвого демона больше не соответствует коду: {section}"
+        );
+        // И обратная сторона того же факта: терминальные случаи названы отдельно.
+        assert!(section.contains("78"), "{section}");
+    }
+
+    #[test]
+    fn the_shipped_config_has_nothing_to_warn_about() {
+        // Поставочный hearthd.toml обязан быть безупречным: предупреждение «из
+        // коробки» — это предупреждение, на которое перестают смотреть.
+        assert!(
+            reference().warnings().is_empty(),
+            "{:?}",
+            reference().warnings()
+        );
     }
 
     #[test]

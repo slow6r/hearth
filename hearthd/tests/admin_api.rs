@@ -136,6 +136,52 @@ async fn a_revoked_certificate_stops_working_immediately() {
     );
 }
 
+/// Промах мимо реестра и потерянный отзыв — разные события.
+///
+/// Раньше `revoke_device` поднимал critical на ЛЮБУЮ ошибку: опечатка администратора
+/// в идентификаторе попадала в журнал алертов наравне с отказом диска, при котором
+/// телефон продолжит пускать после ближайшего перезапуска. Журнал, куда каждый день
+/// сыплется чужой шум, перестают читать — и настоящее сообщение теряется в нём.
+#[tokio::test]
+async fn revoking_a_device_that_is_not_there_raises_no_critical_alert() {
+    let harness = start().await;
+
+    let err = harness
+        .client
+        .post_json::<Device>("/devices/no-such-device/revoke", None)
+        .await
+        .expect_err("несуществующее устройство обязано давать 404");
+    assert!(
+        matches!(err, hearthd::error::Error::NotFound(_)),
+        "ожидали 404, получили {err:?}"
+    );
+    assert_eq!(
+        harness.state.alerts.critical_count().await,
+        0,
+        "промах по идентификатору — не critical"
+    );
+
+    // Обратная половина: настоящий отзыв по-прежнему виден в журнале, иначе проверка
+    // закрепляла бы молчание вместо разделения.
+    let device: Device = harness
+        .client
+        .post_json("/devices", Some(serde_json::json!({ "name": "телефон" })))
+        .await
+        .expect("устройство заведено");
+    let _: Device = harness
+        .client
+        .post_json(&format!("/devices/{}/revoke", device.id), None)
+        .await
+        .expect("отзыв существующего устройства");
+    let alerts = harness.state.alerts.query(None, None, 50).await;
+    assert!(
+        alerts.iter().any(|a| a.summary.contains(&device.id)),
+        "отзыв обязан быть записан: получили {alerts:?}"
+    );
+
+    let _ = harness.shutdown.send(true);
+}
+
 #[tokio::test]
 async fn health_is_served_over_mutual_tls() {
     let harness = start().await;
@@ -143,6 +189,169 @@ async fn health_is_served_over_mutual_tls() {
     assert_eq!(health.node, "hearth-node");
     assert_eq!(health.address, "relay.example.org");
     assert_eq!(health.version, VERSION);
+    let _ = harness.shutdown.send(true);
+}
+
+/// Демон обязан САМ назвать, из чего он собран и каким файлом запущен.
+///
+/// До этой правки `/health` отвечал одной лишь версией `0.1.0`, одинаковой для любой
+/// сборки любого коммита. Вопрос «этот ли код сейчас работает» упирался в доступ к
+/// файлу на узле, а у аудитора он закрыт: `/proc/<pid>/exe` требует ptrace, а ptrace
+/// — это заодно и чтение памяти релеев, то есть переписки (ТЗ §7.4).
+#[tokio::test]
+async fn health_carries_the_build_passport() {
+    let harness = start().await;
+    let health: HealthSnapshot = harness.client.get_json("/health").await.expect("health");
+
+    let build = hearthd::build_info();
+    assert_eq!(health.commit, build.commit, "коммит в снимке не тот");
+    assert_eq!(health.tree_sha256, build.tree_sha256);
+    assert_eq!(
+        health.self_sha256.len(),
+        64,
+        "sha256 работающего файла: `{}`",
+        health.self_sha256
+    );
+    assert!(health.self_sha256.chars().all(|c| c.is_ascii_hexdigit()));
+
+    let _ = harness.shutdown.send(true);
+}
+
+/// Снимок, записанный демоном прежней версии, обязан разбираться новым кодом.
+/// Иначе обновление узла ломает уже разложенные по рабочим станциям hearthctl.
+#[tokio::test]
+async fn an_old_health_document_still_deserialises() {
+    let raw = r#"{
+        "node": "hearth-node",
+        "address": "relay.example.org",
+        "checked": "2026-09-18T03:00:00Z",
+        "state": "ok",
+        "services": [],
+        "uptime_secs": 7,
+        "version": "0.1.0"
+    }"#;
+    let snapshot: HealthSnapshot = serde_json::from_str(raw).expect("старый снимок разбирается");
+    assert!(snapshot.commit.is_empty());
+    assert!(snapshot.self_sha256.is_empty());
+    // Поля backup в старом документе нет. Умолчание обязано читаться как «не
+    // сообщено», а не как «проверено и хорошо»: иначе обновление демона превратило бы
+    // молчание прежней версии в зелёный вердикт по резервной копии.
+    assert_eq!(
+        snapshot.backup,
+        hearthd::model::health::HealthState::Degraded
+    );
+}
+
+/// Аудиторский токен: выдача и немедленный отзыв через admin API.
+///
+/// Проверяется главное свойство — отзыв действует СРАЗУ, как и у сертификата
+/// администратора: реестр смотрится на каждом запросе, а не при открытии соединения.
+#[tokio::test]
+async fn an_audit_token_is_issued_and_revoked_through_the_api() {
+    use hearthd::model::audit_token::{AuditScope, AuditToken, AuditTokenPublic};
+
+    let harness = start().await;
+
+    let issued: AuditToken = harness
+        .client
+        .post_json(
+            "/audit-tokens",
+            Some(serde_json::json!({
+                "ttl_hours": 48,
+                "max_uses": 5,
+                "scope": "updates",
+                "note": "аудит 2026-09"
+            })),
+        )
+        .await
+        .expect("выдача токена");
+    assert_eq!(issued.max_uses, 5);
+    assert_eq!(issued.scope, AuditScope::updates());
+    assert!(issued.expires > issued.created, "срок обязателен");
+
+    // Список не несёт секрета: ровно этим он и уходит в выгрузку для аудита.
+    let listed: serde_json::Value = harness
+        .client
+        .get_json("/audit-tokens")
+        .await
+        .expect("список");
+    let text = listed.to_string();
+    assert!(
+        !text.contains(&issued.token),
+        "секрет попал в список: {text}"
+    );
+    assert!(text.contains(&issued.id));
+
+    // Слот устройства не израсходован и bundle не выпущен.
+    let devices: Vec<Device> = harness.client.get_json("/devices").await.expect("devices");
+    assert!(
+        devices.is_empty(),
+        "аудиторский токен не имеет права заводить устройство"
+    );
+
+    let revoked: AuditTokenPublic = harness
+        .client
+        .post_json(&format!("/audit-tokens/{}/revoke", issued.id), None)
+        .await
+        .expect("отзыв");
+    assert_eq!(revoked.state, "отозван");
+
+    // И узел действительно перестал его принимать — состояние на диске, а не в памяти.
+    let registry = hearthd::model::audit_token::AuditTokenRegistry::load(
+        harness.state.config.paths.audit_tokens_file(),
+    )
+    .expect("реестр");
+    assert!(!registry
+        .get(&issued.id)
+        .expect("запись на месте")
+        .is_usable_at(chrono::Utc::now()));
+
+    let _ = harness.shutdown.send(true);
+}
+
+/// Токен без срока или без счётчика выписать нельзя — это и есть отличие
+/// аудиторского доступа от токена устройства.
+#[tokio::test]
+async fn an_unbounded_audit_token_is_refused() {
+    let harness = start().await;
+    for body in [
+        serde_json::json!({ "ttl_hours": 0, "max_uses": 5 }),
+        serde_json::json!({ "ttl_hours": 48, "max_uses": 0 }),
+        serde_json::json!({ "ttl_hours": 48, "max_uses": 5, "scope": "turn-credentials" }),
+    ] {
+        let result: Result<serde_json::Value, _> = harness
+            .client
+            .post_json("/audit-tokens", Some(body.clone()))
+            .await;
+        assert!(result.is_err(), "принято то, что принимать нельзя: {body}");
+    }
+    let _ = harness.shutdown.send(true);
+}
+
+/// Обезличенная проекция устройства — то, что уходит в выгрузку для аудита.
+/// Наивный дамп реестра был бы утечкой ровно одним полем.
+#[tokio::test]
+async fn the_redacted_device_listing_carries_no_token() {
+    let harness = start().await;
+
+    let device: Device = harness
+        .client
+        .post_json(
+            "/devices",
+            Some(serde_json::json!({"name": "Папа — Pixel 9", "platform": "android"})),
+        )
+        .await
+        .expect("add device");
+    let secret = device.token.clone().expect("токен выдаётся при заведении");
+
+    let devices: Vec<Device> = harness.client.get_json("/devices").await.expect("list");
+    let public: Vec<hearthd::model::device::DevicePublic> =
+        devices.iter().map(Device::public).collect();
+    let text = serde_json::to_string(&public).expect("json");
+
+    assert!(!text.contains(&secret), "секрет в выгрузке: {text}");
+    assert!(text.contains("papa-pixel-9"), "полезное потеряно: {text}");
+
     let _ = harness.shutdown.send(true);
 }
 
@@ -324,6 +533,26 @@ async fn operations_are_reachable_and_report_honestly() {
         .expect("backup status");
     assert!(status.last_run.is_some());
 
+    // Статус обязан нести вердикт, а не только поля: «бэкап сделан?» и «бэкап чего?»
+    // — разные вопросы, и на оба должен быть ответ без age-ключа.
+    let raw: serde_json::Value = harness
+        .client
+        .get_json("/backup/status")
+        .await
+        .expect("backup status json");
+    assert!(raw.get("state").is_some(), "вердикта нет в ответе: {raw}");
+    if status.last_success.is_some() {
+        assert!(!status.members.is_empty(), "успех без описи вошедшего");
+    } else {
+        assert!(status.last_error.is_some(), "провал обязан себя назвать");
+        assert!(status.members.is_empty());
+        assert_eq!(
+            status.state,
+            hearthd::model::health::HealthState::Down,
+            "несостоявшийся бэкап не имеет права выглядеть зелёным"
+        );
+    }
+
     // Migration status is readable without performing a migration.
     let migrate: hearthd::model::health::MigrateStatus = harness
         .client
@@ -331,6 +560,40 @@ async fn operations_are_reachable_and_report_honestly() {
         .await
         .expect("migrate status");
     assert!(migrate.exported_at.is_none());
+
+    let _ = harness.shutdown.send(true);
+}
+
+#[tokio::test]
+async fn an_export_holds_the_node_even_when_it_fails() {
+    // Раньше режим переноса выставлялся ПОСЛЕ остановки релеев, шифрования архива и
+    // rsync — минуты и десятки минут на живом узле при тике надзора в 15 секунд. На
+    // пути ошибки он не выставлялся вовсе: релеи остановлены, режим `normal`, и узел
+    // молча возвращался в строй с наполовину сделанным переносом.
+    let harness = start().await;
+
+    let before: hearthd::model::mode::NodeState =
+        harness.client.get_json("/mode").await.expect("mode");
+    assert_eq!(before.mode, hearthd::model::mode::NodeMode::Normal);
+
+    // В поставляемой конфигурации получатель age — плейсхолдер, а архивируемых
+    // каталогов на машине разработчика нет, поэтому экспорт обрывается. Нам важно
+    // ровно это: он оборвался, а запрет уже стоит.
+    let result: Result<serde_json::Value, _> =
+        harness.client.post_json("/migrate/export", None).await;
+    assert!(
+        result.is_err(),
+        "фикстура обязана ронять экспорт, иначе тест не проверяет путь ошибки"
+    );
+
+    let after: hearthd::model::mode::NodeState =
+        harness.client.get_json("/mode").await.expect("mode");
+    assert_eq!(
+        after.mode,
+        hearthd::model::mode::NodeMode::Migration,
+        "узел обязан остаться удержанным: {}",
+        after.summary()
+    );
 
     let _ = harness.shutdown.send(true);
 }

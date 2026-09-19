@@ -31,6 +31,63 @@ if [[ $EUID -ne 0 && $DRY_RUN -eq 0 ]]; then
     exit 1
 fi
 
+# --- 0. Предполётная проверка гейта режима -----------------------------------
+#
+# ДО ЛЮБЫХ ИЗМЕНЕНИЙ НА УЗЛЕ. Раньше эта проверка стояла на шаге 6 — то есть после
+# замены бинарников, конфигов и юнитов и до `daemon-reload`. Обновление, при котором
+# собрали не всё, обрывалось ровно посередине и оставляло узел полусобранным. Проверка
+# ничего не меняет и не пишет: она только смотрит, чем будет исполняться гейт.
+#
+# ГЕЙТ БЕЗ ИСПОЛНИТЕЛЯ ХУЖЕ, ЧЕМ ОТСУТСТВИЕ ГЕЙТА: ExecCondition, который systemd не
+# может запустить, отдаёт код 203, юнит помечается пропущенным — и релеи МОЛЧА не
+# поднимаются ни сейчас, ни после перезагрузки.
+say "0. предполётная проверка (ничего не меняет)"
+GATE_BIN=""
+for candidate in "$HERE/../target/x86_64-unknown-linux-musl/release/hearthctl" \
+                 "$HERE/../target/release/hearthctl"; do
+    [[ -f "$candidate" ]] || continue
+    if [[ -n "$GATE_BIN" ]]; then
+        echo "   найдены ДВА кандидата на hearthctl:" >&2
+        echo "     $GATE_BIN" >&2
+        echo "     $candidate" >&2
+        echo "   Уберите лишний (rm) и повторите: ставить наугад нельзя." >&2
+        exit 1
+    fi
+    GATE_BIN="$candidate"
+done
+# Ничего не собрано — годится уже установленный: сценарий «повторный запуск скрипта
+# на живом узле» обязан работать.
+if [[ -z "$GATE_BIN" && -x /usr/local/bin/hearthctl ]]; then
+    GATE_BIN=/usr/local/bin/hearthctl
+fi
+if [[ -z "$GATE_BIN" ]]; then
+    # В --dry-run это разбор сценария на машине разработчика, а не установка: там
+    # собранного hearthctl может и не быть, и падать из-за этого незачем.
+    if [[ $DRY_RUN -eq 1 ]]; then
+        warn "hearthctl не найден — на живом узле это остановило бы установку здесь"
+    else
+        echo "   hearthctl не найден: ни собранного, ни установленного." >&2
+        echo "   Гейт режима исполняет именно он; без него релеи не стартуют." >&2
+        echo "   Соберите и повторите:" >&2
+        echo "     cargo build --release --target x86_64-unknown-linux-musl" >&2
+        exit 1
+    fi
+fi
+if [[ $DRY_RUN -eq 0 && -n "$GATE_BIN" ]]; then
+    # Мало того, что файл есть, — он должен РАБОТАТЬ на этой машине (не та архитектура,
+    # не тот libc — те же 203/126 в итоге). Спрашиваем гейт про заведомо отсутствующий
+    # файл: правильный ответ — 0, «режим не записан, стартовать можно».
+    if ! "$GATE_BIN" mode gate --file /nonexistent/hearth-gate-selftest.json \
+        >/dev/null 2>&1; then
+        echo "   $GATE_BIN не отвечает на гейт режима." >&2
+        echo "   Проверьте вручную:" >&2
+        echo "     $GATE_BIN mode gate --file /nonexistent/x.json ; echo \$?   # ждём 0" >&2
+        echo "   Пока это не исправлено, ставить нечего: релеи не стартуют." >&2
+        exit 1
+    fi
+    echo "   гейт режима исполним: $GATE_BIN"
+fi
+
 say "1. users"
 # System users, no shell, no home. The relays and hearthd never need to log in.
 id -u simplex >/dev/null 2>&1 || run useradd --system --no-create-home --shell /usr/sbin/nologin simplex
@@ -94,15 +151,67 @@ run install -d -m 0750 -o hearth -g hearth /srv/hearth/updates
 run install -d -m 0750 -o root -g hearth /srv/hearth/stickers
 
 say "3. binaries"
+# Журнал установки: что именно поставили и из чего это собрано.
+#
+# Раньше между «собрали» и «работает» не оставалось ни одной записи. В target/ за
+# время работы накапливаются сборки разных коммитов и разных таргетов, скрипт брал
+# первую попавшуюся, и вопрос «какой файл на узле» упирался в чужую память. Аудит это
+# и нашёл: четыре найденных release-бинаря не совпали с установленными.
+#
+# Секретов здесь нет по построению (коммит, хеши, дата), поэтому 0644 root:hearth.
+BUILD_LOG=/var/lib/hearth/installed.build-info
+
 for binary in hearthd hearthctl; do
-    if [[ -f "$HERE/../target/x86_64-unknown-linux-musl/release/$binary" ]]; then
-        run install -m 0755 "$HERE/../target/x86_64-unknown-linux-musl/release/$binary" "/usr/local/bin/$binary"
-    elif [[ -f "$HERE/../target/release/$binary" ]]; then
-        run install -m 0755 "$HERE/../target/release/$binary" "/usr/local/bin/$binary"
-    else
+    MUSL="$HERE/../target/x86_64-unknown-linux-musl/release/$binary"
+    NATIVE="$HERE/../target/release/$binary"
+    # Два кандидата — это не «возьмём тот, что новее», а неизвестность: какой из них
+    # собран из текущего дерева, скрипт знать не может. Молчаливый выбор первого и
+    # приводил к расхождению установленного с собранным.
+    if [[ -f "$MUSL" && -f "$NATIVE" ]]; then
+        echo "   найдены ДВА кандидата на $binary:" >&2
+        echo "     $MUSL" >&2
+        echo "     $NATIVE" >&2
+        echo "   Уберите лишний (rm) и повторите: ставить наугад нельзя." >&2
+        exit 1
+    fi
+    SRC=""
+    [[ -f "$MUSL"   ]] && SRC="$MUSL"
+    [[ -f "$NATIVE" ]] && SRC="$NATIVE"
+    if [[ -z "$SRC" ]]; then
         warn "$binary not built — run: cargo build --release --target x86_64-unknown-linux-musl"
+        continue
+    fi
+    run install -m 0755 "$SRC" "/usr/local/bin/$binary"
+
+    if [[ $DRY_RUN -eq 0 ]]; then
+        # Паспорт спрашиваем у УСТАНОВЛЕННОГО файла, а не у исходного: доказывать надо
+        # про то, что лежит на узле.
+        if INFO="$("/usr/local/bin/$binary" build-info 2>/dev/null)"; then
+            {
+                echo "[$binary]"
+                echo "installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                echo "installed_from=$SRC"
+                echo "sha256=$(sha256sum "/usr/local/bin/$binary" | cut -d' ' -f1)"
+                printf '%s\n' "$INFO"
+                echo
+            } >>"$BUILD_LOG"
+            # Сборка из изменённого дерева не сопоставима с исходниками. Не отказ:
+            # черновик на узле бывает нужен, а вот незамеченный черновик — нет.
+            if printf '%s\n' "$INFO" | grep -q '^dirty=true$'; then
+                warn "$binary собран из ИЗМЕНЁННОГО дерева (dirty=true)."
+                warn "  Такую сборку нельзя сопоставить с коммитом. Для узла семьи"
+                warn "  собирайте через deploy/build-reproducible.sh."
+            fi
+        else
+            warn "$binary не назвал свой паспорт сборки (старая сборка?) — происхождение не записано"
+        fi
     fi
 done
+if [[ $DRY_RUN -eq 0 && -f "$BUILD_LOG" ]]; then
+    chown root:hearth "$BUILD_LOG"
+    chmod 0644 "$BUILD_LOG"
+    echo "   журнал установки: $BUILD_LOG"
+fi
 for binary in smp-server xftp-server; do
     [[ -x "/usr/local/bin/$binary" ]] || warn "/usr/local/bin/$binary is missing (copy the verified upstream release, ТЗ §6.1)"
 done
@@ -148,6 +257,71 @@ run install -m 0644 "$HERE/systemd/ntf-db-dump.service" /etc/systemd/system/ntf-
 run install -m 0644 "$HERE/systemd/ntf-db-dump.timer" /etc/systemd/system/ntf-db-dump.timer
 run install -d -m 0755 /etc/systemd/system/coturn.service.d
 run install -m 0644 "$HERE/systemd/coturn.service.d-hearth.conf" /etc/systemd/system/coturn.service.d/hearth.conf
+# Гейт режима узла (ADR 0013). Релейные юниты стартуют по WantedBy=multi-user.target
+# при каждой загрузке — параллельно с hearthd и раньше, чем он прочитал node-mode.json.
+# Без этого drop-in'а карантин снимался первой же перезагрузкой, а домашний узел
+# перезагружается от любого сбоя питания.
+#
+# hearthctl не установлен — сюда мы уже не дойдём: проверка стоит на шаге 0, до любых
+# изменений на узле. Здесь остаётся последняя сверка с УСТАНОВЛЕННЫМ файлом: между
+# шагом 0 и этим местом его переписал шаг 3, и «install усёк цель, потому что кончилось
+# место» — это ровно тот случай, когда гейт есть, а исполнить его нечем.
+if [[ $DRY_RUN -eq 0 ]]; then
+    if ! /usr/local/bin/hearthctl mode gate --file /nonexistent/hearth-gate-selftest.json \
+        >/dev/null 2>&1; then
+        echo "   hearthctl не установлен или не отвечает на гейт режима." >&2
+        echo "   Проверьте вручную:" >&2
+        echo "     hearthctl mode gate --file /nonexistent/x.json ; echo \$?   # ждём 0" >&2
+        echo "   Пока это не исправлено, drop-in ставить нельзя: релеи не стартуют." >&2
+        exit 1
+    fi
+fi
+# Каталог состояния на отдельном разделе: drop-in обязан дождаться монтирования, иначе
+# гейт не найдёт файла режима и молча разрешит старт релея в карантине. Поставочный
+# путь в drop-in'е — /var/lib/hearth; если в hearthd.toml он другой, дописываем.
+# `|| true`: при set -euo pipefail отсутствующий конфиг уронил бы установку целиком.
+GATE_DROPIN="$HERE/systemd/relay.service.d-hearth-mode.conf"
+STATE_DIR="$(sed -n 's/^[[:space:]]*state_dir[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+    /etc/hearth/hearthd.toml 2>/dev/null | head -1 || true)"
+if [[ -n "$STATE_DIR" && "$STATE_DIR" != "/var/lib/hearth" ]]; then
+    GATE_DROPIN="$(mktemp)"
+    trap 'rm -f "$GATE_DROPIN"' EXIT
+    {
+        cat "$HERE/systemd/relay.service.d-hearth-mode.conf"
+        echo "# Дописано install.sh: paths.state_dir на этом узле нестандартный."
+        echo "[Unit]"
+        echo "RequiresMountsFor=$STATE_DIR"
+    } >"$GATE_DROPIN"
+    echo "   гейт ждёт монтирования $STATE_DIR"
+fi
+# Тот же drop-in — и самому демону. Поставочный hearthd.service ждёт /var/lib/hearth и
+# /var/opt/hearth (RequiresMountsFor); если state_dir на этом узле другой и лежит на
+# отдельном разделе, демон стартовал бы раньше монтирования и увидел пустой каталог:
+# режим узла «потерян», журнал алертов начат заново, бэкап пишет мимо раздела.
+if [[ -n "$STATE_DIR" && "$STATE_DIR" != "/var/lib/hearth" ]]; then
+    run install -d -m 0755 /etc/systemd/system/hearthd.service.d
+    if [[ $DRY_RUN -eq 1 ]]; then
+        echo "  would: write /etc/systemd/system/hearthd.service.d/state-dir.conf"
+    else
+        cat >/etc/systemd/system/hearthd.service.d/state-dir.conf <<EOF
+# Дописано install.sh: paths.state_dir на этом узле нестандартный.
+[Unit]
+RequiresMountsFor=$STATE_DIR
+EOF
+        chmod 0644 /etc/systemd/system/hearthd.service.d/state-dir.conf
+    fi
+    echo "   hearthd ждёт монтирования $STATE_DIR"
+fi
+# Ставится и на ntf (он такой же релей), и на coturn: ADR 0013 обещает узел, который в
+# карантине и переносе не обслуживает семью НИЧЕМ. Требуется systemd 243+
+# (ExecCondition); на Debian 12 это 252.
+for unit in smp-server xftp-server ntf-server; do
+    run install -d -m 0755 "/etc/systemd/system/$unit.service.d"
+    run install -m 0644 "$GATE_DROPIN" \
+        "/etc/systemd/system/$unit.service.d/hearth-mode.conf"
+done
+run install -m 0644 "$GATE_DROPIN" \
+    /etc/systemd/system/coturn.service.d/hearth-mode.conf
 # /run is tmpfs and the Debian package creates neither directory. Without them systemd
 # fails the unit at step NAMESPACE (status=226) before turnserver even runs, because
 # ReadWritePaths cannot bind a path that does not exist.
@@ -180,8 +354,57 @@ fi
 if command -v sshd >/dev/null 2>&1 && sshd -T 2>/dev/null | grep -qi '^passwordauthentication yes'; then
     warn 'ssh: PasswordAuthentication yes — закрыть (/etc/ssh/sshd_config.d/99-server.conf) и systemctl reload ssh'
 fi
+# Автовход на учётку с sudo. Проверка добавлена после аудита 18.09.2026: на fels
+# автологин GDM приземлился на пользователя с `NOPASSWD: ALL`, и ни одна проверка
+# этого не заметила — install.sh смотрел на resolved, unattended-upgrades и sshd, но
+# не на то, кто сидит за клавиатурой. Десять секунд у телевизора = ключ CA релея.
+if [[ -f /etc/gdm3/daemon.conf ]] \
+   && grep -qiE '^[[:space:]]*AutomaticLoginEnable[[:space:]]*=[[:space:]]*(true|1|yes)' /etc/gdm3/daemon.conf; then
+    # `|| true` обязателен: скрипт под `set -e -o pipefail`, а grep без совпадения
+    # роняет весь конвейер — то есть отсутствие строки AutomaticLogin прерывало бы
+    # установку на предупреждающей проверке.
+    AUTOLOGIN_USER="$(grep -E '^[[:space:]]*AutomaticLogin[[:space:]]*=' /etc/gdm3/daemon.conf \
+                      | head -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+    if [[ -n "$AUTOLOGIN_USER" ]] \
+       && id -nG "$AUTOLOGIN_USER" 2>/dev/null | tr ' ' '\n' | grep -qxE 'sudo|admin|wheel'; then
+        warn "автовход GDM на пользователя '$AUTOLOGIN_USER', который состоит в sudo —"
+        warn "  открытая сессия у телевизора равна root-шеллу. docs/runbook-host-hardening.md §1.2, §2.1"
+    fi
+fi
+# NOPASSWD у человека. Демону sudo не нужен вовсе: hearthd работает от `hearth` с
+# CAP_NET_ADMIN и правилом polkit выше, поэтому «список команд для демона» здесь не
+# при чём — правило NOPASSWD принадлежит человеку и отменяет пароль как барьер.
+if command -v sudo >/dev/null 2>&1 && [[ $(id -u) -eq 0 ]]; then
+    while read -r u; do
+        [[ -n "$u" ]] || continue
+        if sudo -n -l -U "$u" 2>/dev/null | grep -q 'NOPASSWD'; then
+            warn "у интерактивного пользователя '$u' есть правило NOPASSWD — sudo не спросит пароль"
+            warn "  ни у него, ни у того, кто подошёл к его сессии. docs/runbook-host-hardening.md §1.2"
+        fi
+    done < <(awk -F: '$3 >= 1000 && $3 < 65000 && $7 !~ /(nologin|false|sync)$/ {print $1}' /etc/passwd)
+fi
 # Sleep would silently stop message delivery.
 run systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+
+say "10. пин своих бинарников"
+# Раньше это была подсказка в финальном тексте, и пропущенный шаг оставлял в манифесте
+# нулевой плейсхолдер — то есть проверку целостности, которая валит узел в карантин
+# при первом же обходе. Пин своих файлов — не решение человека: измеряется ровно то,
+# что этот же скрипт только что положил, а происхождение hearthctl берёт у самого
+# файла (`build-info`). Решение человека — пин upstream-бинарей, и оно остаётся ниже.
+if [[ $DRY_RUN -eq 0 ]]; then
+    for binary in hearthd hearthctl; do
+        [[ -x "/usr/local/bin/$binary" ]] || continue
+        if ! grep -q "name = \"$binary\"" /etc/hearth/manifest.toml 2>/dev/null; then
+            echo "   в манифесте нет записи $binary — пропускаю"
+            continue
+        fi
+        hearthctl manifest pin --name "$binary" \
+            || warn "не удалось запинить $binary — сделайте это руками, иначе узел уйдёт в карантин"
+    done
+else
+    echo "  would run: hearthctl manifest pin --name hearthd"
+fi
 
 cat <<'NEXT'
 
@@ -194,10 +417,18 @@ cat <<'NEXT'
      `hearth` group; they also chown the relay directories. Run `fix-permissions.sh`
      afterwards if you ever init by hand instead.
 
-  2. Pin the binaries you verified (ТЗ §6.1):
+  2. Pin the UPSTREAM binaries you verified (ТЗ §6.1) — своих скрипт уже запинил:
        hearthctl manifest pin --name smp-server  --version <tag>
        hearthctl manifest pin --name xftp-server --version <tag>
-       hearthctl manifest pin --name hearthd     --version 0.1.0
+       hearthctl manifest pin --name turnserver  --version distro
+     turnserver НЕ забыть: запись о нём есть в поставочном манифесте, и пока в ней
+     нулевой плейсхолдер, узел не может подтвердить, что на нём работает, — надзор не
+     будет поднимать релеи сам и раз в час напомнит алертом. Проверить, что нулей не
+     осталось (закомментированный блок ntf-server в счёт не идёт):
+       grep -n 'sha256 = "0\{64\}"' /etc/hearth/manifest.toml   # ждём одну строку:
+     Проверить, что происхождение записано:
+       grep -A6 'name = "hearthd"' /etc/hearth/manifest.toml
+       cat /var/lib/hearth/installed.build-info
 
   3. Admin PKI (ТЗ §7.3), as root:
        hearthd ca init
@@ -212,6 +443,16 @@ cat <<'NEXT'
        nft -f /etc/hearth/nftables/hearth.nft
        systemctl enable --now smp-server xftp-server coturn hearthd
        hearthctl health
+
+     Если узел в карантине, переносе или обслуживании, `systemctl start` релея НИЧЕГО
+     не поднимет: гейт режима пометит юнит пропущенным (в журнале — condition failed,
+     причина рядом). Так и задумано. Посмотреть режим и снять его:
+       hearthctl mode gate ; echo $?          # путь берётся из hearthd.toml
+       hearthctl mode clear                   # через работающий hearthd, с сертификатом
+       sudo hearthctl mode clear --local      # НА УЗЛЕ: без hearthd и без сертификата
+
+     Второй вариант — аварийный выход, и он существует именно для случая «hearthd не
+     поднимается, а релеи заблокированы»: docs/runbook-node-mode.md.
 
   6. Run the acceptance tests: tests/acceptance/run-all.sh
      They now check ownership, not just file modes — the mismatch that used to break

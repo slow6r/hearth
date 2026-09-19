@@ -96,6 +96,21 @@ pub async fn stop(sys: &Sys, unit: &str) -> Result<()> {
     Ok(())
 }
 
+/// Считать ли юнит работающим, когда решается, останавливать ли его.
+///
+/// Fail-closed: недоступный systemd (`unknown`) и неудачный опрос — не подтверждение
+/// того, что служба стоит. Лишний `systemctl stop` по остановленной службе безвреден,
+/// а пропущенный по работающей означает, что запрета нет вовсе.
+pub async fn running(sys: &Sys, unit: &str) -> bool {
+    match show(sys, unit).await {
+        Ok(state) => state.is_active() || state.active_state == "unknown",
+        Err(e) => {
+            tracing::warn!(unit = %unit, error = %e, "состояние юнита не прочитано: считаем работающим");
+            true
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

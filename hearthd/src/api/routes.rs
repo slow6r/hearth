@@ -51,6 +51,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/devices/{id}/checklist.txt", get(bundle_checklist))
         .route("/invites", get(list_invites).post(create_invite))
         .route("/invites/{id}/revoke", post(revoke_invite))
+        .route(
+            "/audit-tokens",
+            get(list_audit_tokens).post(issue_audit_token),
+        )
+        .route("/audit-tokens/{id}/revoke", post(revoke_audit_token))
         .route("/rotate/turn-secret", post(rotate_turn_secret))
         .route("/backup/now", post(backup_now))
         .route("/backup/status", get(backup_status))
@@ -297,6 +302,92 @@ async fn revoke_invite(
     Ok(Json(invite))
 }
 
+/// Список аудиторских токенов — БЕЗ секретов.
+///
+/// В отличие от `/invites`, где токен нужен для сверки со сборкой, здесь секрет не
+/// нужен никому после выдачи: пользоваться им будет аудитор, а владельцу для отзыва
+/// хватает идентификатора. Список без секретов уходит в выгрузку для аудита как есть
+/// (`deploy/audit-dump.sh`), и это единственная причина, по которой он может уйти
+/// туда без фильтра.
+async fn list_audit_tokens(State(state): State<Arc<AppState>>) -> ApiResult<impl IntoResponse> {
+    let tokens = state.audit_tokens.read().await;
+    Ok(Json(tokens.public(Utc::now())))
+}
+
+/// Выписать аудиторский токен.
+///
+/// Ответ содержит секрет — единственный раз, когда он покидает узел: в списке его
+/// уже не будет. Потерянный токен не восстанавливают, а выписывают заново; отзыв
+/// прежнего при этом — отдельное решение владельца.
+async fn issue_audit_token(
+    State(state): State<Arc<AppState>>,
+    Extension(admin): Extension<Admin>,
+    Json(body): Json<NewAuditToken>,
+) -> ApiResult<impl IntoResponse> {
+    let scope = match body.scope.as_deref() {
+        Some(raw) => crate::model::audit_token::AuditScope::parse(raw)?,
+        None => crate::model::audit_token::AuditScope::updates(),
+    };
+    let token =
+        state
+            .audit_tokens
+            .write()
+            .await
+            .issue(body.ttl_hours, body.max_uses, scope, body.note)?;
+
+    // Выдача доступа наружу — событие того же веса, что и выписка приглашения:
+    // оно обязано быть видно в алертах, а не только в журнале.
+    tracing::warn!(
+        admin = %admin.name,
+        audit_token = %token.id,
+        max_uses = token.max_uses,
+        "audit token issued"
+    );
+    state
+        .alerts
+        .emit(crate::model::alert::Alert::warning(
+            "api",
+            format!(
+                "выписан аудиторский токен `{}`: до {} обращений, действует до {}, область: {}",
+                token.id,
+                token.max_uses,
+                token.expires.format("%Y-%m-%d %H:%M UTC"),
+                token
+                    .scope
+                    .iter()
+                    .map(|s| s.label())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ))
+        .await;
+    Ok((StatusCode::CREATED, Json(token)))
+}
+
+async fn revoke_audit_token(
+    State(state): State<Arc<AppState>>,
+    Extension(admin): Extension<Admin>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let token = state.audit_tokens.write().await.revoke(&id)?;
+    tracing::warn!(admin = %admin.name, audit_token = %token.id, "audit token revoked");
+    Ok(Json(token.public(Utc::now())))
+}
+
+/// Тело `POST /audit-tokens`.
+///
+/// `ttl_hours` и `max_uses` без умолчаний намеренно: забытый ограничитель здесь —
+/// это бессрочный доступ, а умолчание как раз и есть способ его забыть.
+#[derive(Debug, Deserialize)]
+struct NewAuditToken {
+    ttl_hours: i64,
+    max_uses: u32,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct NewDevice {
     name: String,
@@ -338,7 +429,33 @@ async fn revoke_device(
     Extension(admin): Extension<Admin>,
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
-    let device = state.devices.write().await.revoke(&id)?;
+    let revoked = state.devices.write().await.revoke(&id);
+    let device = match revoked {
+        Ok(device) => device,
+        Err(e @ Error::NotFound(_)) => {
+            // Опечатка в идентификаторе — не событие безопасности, а промах мимо
+            // реестра: ничего не изменилось и меняться не собиралось. Critical на неё
+            // приучает пролистывать журнал алертов ровно там, где в него обязаны
+            // смотреть, — рядом лежит настоящая потеря отзыва. То же разделение уже
+            // сделано при заведении устройства (deviceapi: NotFound против отказа
+            // записи).
+            tracing::warn!(admin = %admin.name, device = %id, "отзыв: такого устройства нет");
+            return Err(e.into());
+        }
+        Err(e) => {
+            // Потерянный отзыв — худший исход из возможных: админ видит ошибку и
+            // считает, что отзыв не прошёл, а телефон продолжит пускать после
+            // ближайшего перезапуска. Про такое обязаны узнать сразу.
+            state
+                .alerts
+                .emit(crate::model::alert::Alert::critical(
+                    "api",
+                    format!("не удалось отозвать устройство `{id}`: {e}"),
+                ))
+                .await;
+            return Err(e.into());
+        }
+    };
     tracing::warn!(admin = %admin.name, device = %device.id, "device revoked");
     state
         .alerts
@@ -485,7 +602,17 @@ async fn backup_now(
 }
 
 async fn backup_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(state.backup.read().await.clone())
+    // Вердикт пересчитывается в момент чтения, а не только при ночном запуске:
+    // иначе после успешного прогона статус оставался бы зелёным неделю — код,
+    // который его меняет, исполняется лишь когда бэкап запускается.
+    let mut status = state.backup.read().await.clone();
+    crate::model::health::apply_backup_verdict(
+        chrono::Utc::now(),
+        &mut status,
+        state.config.backup.enabled,
+        &state.config.backup.required_paths,
+    );
+    Json(status)
 }
 
 async fn migrate_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {

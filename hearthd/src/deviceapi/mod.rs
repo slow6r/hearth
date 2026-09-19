@@ -19,11 +19,38 @@
 //! устройство, из интернета, и умеет ровно две операции. Разные слушатели и разные
 //! модели доверия: ошибка в маршрутизации между ними стоила бы прав администратора.
 //!
+//! # Второй замок: аудиторский токен
+//!
+//! Три маршрута раздачи обновлений (`/updates/manifest.json`, `.sig`, `/updates/*.apk`)
+//! открываются ещё и аудиторским токеном — срочным, со счётчиком и с перечисленной
+//! областью (`crate::model::audit_token`). Он НЕ подключён к `/turn-credentials` и к
+//! стикерам, слот `max_devices` не расходует и bundle не выпускает. Нужен ради одного:
+//! проверяющий обязан скачать раздаваемую сборку сам и сверить байты, не получая при
+//! этом бессрочного токена члена семьи.
+//!
 //! # Доверие
 //!
 //! TLS с сертификатом, выписанным hearth CA на `node.host`. Приложение пинует этот CA
 //! в network security config. Публичный CA не нужен: не будет ни записи в
 //! CT-логах, ни certbot'а, который однажды молча не продлится.
+//!
+//! # Порядок блокировок
+//!
+//! Реестры берутся в ОДНОМ порядке: сначала `invites`, потом `devices`, никогда
+//! наоборот. Два порядка в одном обработчике не дают дедлок только до первой правки,
+//! которая дотянется до второго реестра из чужой критической секции.
+//!
+//! `audit_tokens` в этот порядок не встраивается, потому что берётся один и никогда
+//! вместе с другими: [`authorize_or_audit`] отпускает `devices` до того, как трогает
+//! его. Ветка, которой понадобятся оба сразу, обязана сначала переписать это правило.
+//!
+//! Ни один guard реестра не переживает `.await`. Отправка алерта ходит в файл и во
+//! внешнюю команду; write-lock, удержанный на это время, сериализует все заведения —
+//! а если из этой ветки однажды понадобится второй реестр, замкнётся и цикл.
+//!
+//! Практическое следствие: `state.X.write().await.метод(..)` пишется отдельным `let`,
+//! а не в scrutinee `match`. Временное значение в scrutinee живёт до конца ВСЕГО
+//! выражения, то есть блокировка держится заметно дольше, чем видно глазом.
 
 use std::sync::Arc;
 
@@ -40,6 +67,7 @@ use tokio::net::TcpListener;
 
 use crate::configgen::turn;
 use crate::error::{Error, Result};
+use crate::model::device::{Device, DeviceRegistry, EnrollError};
 use crate::state::AppState;
 use crate::store;
 
@@ -52,6 +80,11 @@ const TOKEN_HEADER: &str = "x-hearth-device-token";
 /// срок жизни и разный смысл, и путать их в одном заголовке — значит однажды
 /// принять просроченное приглашение за живое устройство.
 const INVITE_HEADER: &str = "x-hearth-invite-token";
+/// Заголовок аудиторского токена. Снова отдельный, и снова потому, что смысл разный:
+/// этот замок открывает ровно три маршрута раздачи обновлений и имеет срок. Общий
+/// заголовок означал бы, что сравнивать предъявленное придётся со всеми реестрами
+/// сразу, а разницу в области — вспоминать в каждом обработчике.
+const AUDIT_HEADER: &str = "x-hearth-audit-token";
 /// Больше этого манифест обновления быть не может — он маленький по определению.
 const MANIFEST_LIMIT: u64 = 64 * 1024;
 /// Адрес того, кто пришёл.
@@ -171,31 +204,44 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = std::result::Result<T, ApiError>;
 
-/// Кто пришёл. Возвращает id устройства, чтобы его можно было назвать в логах.
-async fn authorize(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
-    let token = headers
+/// Предъявленный секрет устройства, как он пришёл в заголовке.
+fn device_token(headers: &HeaderMap) -> String {
+    headers
         .get(TOKEN_HEADER)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .trim()
-        .to_string();
+        .to_string()
+}
 
+/// Найти устройство по предъявленному токену в УЖЕ захваченном реестре.
+///
+/// Чистая функция, а не метод, который берёт блокировку сам: `/enroll` обязан
+/// проверить приглашающего и завести устройство под ОДНИМ захватом, иначе отзыв,
+/// прошедший между проверкой и записью, остаётся без последствий.
+///
+/// Ищет среди тех, чей доступ действует ([`DeviceRegistry::is_usable`]), то есть и
+/// собственный отзыв, и отзыв любого предка закрывают дверь.
+fn resolve_token(devices: &DeviceRegistry, token: &str) -> Option<String> {
+    // Сравнение в постоянное время: токен — секрет, а разница во времени ответа
+    // на «первый символ не тот» и «все символы кроме последнего те» подбирается.
+    devices
+        .usable()
+        .find(|d| d.token.as_deref().map(|t| ct_eq(t, token)).unwrap_or(false))
+        .map(|d| d.id.clone())
+}
+
+/// Кто пришёл. Возвращает id устройства, чтобы его можно было назвать в логах.
+async fn authorize(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
+    let token = device_token(headers);
     if token.is_empty() {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "device token required"));
     }
 
-    let devices = state.devices.read().await;
-    // Сравнение в постоянное время: токен — секрет, а разница во времени ответа
-    // на «первый символ не тот» и «все символы кроме последнего те» подбирается.
-    let found = devices
-        .active()
-        .find(|d| {
-            d.token
-                .as_deref()
-                .map(|t| ct_eq(t, &token))
-                .unwrap_or(false)
-        })
-        .map(|d| d.id.clone());
+    let found = {
+        let devices = state.devices.read().await;
+        resolve_token(&devices, &token)
+    };
 
     match found {
         Some(id) => Ok(id),
@@ -205,6 +251,104 @@ async fn authorize(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
             tracing::warn!("device api: rejected an unknown or revoked token");
             Err(ApiError(StatusCode::UNAUTHORIZED, "unknown device"))
         }
+    }
+}
+
+/// Предъявленный аудиторский токен, как он пришёл в заголовке.
+fn audit_token(headers: &HeaderMap) -> String {
+    headers
+        .get(AUDIT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// Кто пришёл: устройство семьи ИЛИ аудитор.
+///
+/// # Порядок и неразличимость
+///
+/// Сначала обычный токен устройства, потом аудиторский. Оба замка на неудачу дают
+/// ОДИН и тот же ответ с тем же текстом: по ответу нельзя понять, какой из них
+/// проверялся и существовал ли предъявленный токен когда-нибудь. Просроченный
+/// аудиторский токен неотличим от выдуманного.
+///
+/// # Порядок блокировок
+///
+/// `devices` берётся и отпускается внутри [`authorize`] до того, как здесь берётся
+/// `audit_tokens`: два реестра одновременно не удерживаются никогда, поэтому новый
+/// замок не может замкнуть цикл с существующими.
+async fn authorize_or_audit(
+    state: &AppState,
+    headers: &HeaderMap,
+    scope: crate::model::audit_token::AuditScope,
+) -> ApiResult<String> {
+    if !device_token(headers).is_empty() {
+        return authorize(state, headers).await;
+    }
+    let presented = audit_token(headers);
+    if presented.is_empty() {
+        // Тот же текст, что и у пустого токена устройства: наличие второго замка не
+        // должно быть видно тому, кто не предъявил ничего.
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "device token required"));
+    }
+
+    let reserved = {
+        let mut tokens = state.audit_tokens.write().await;
+        tokens.reserve(&presented, scope, Utc::now())
+    };
+    match reserved {
+        Ok(token) => {
+            // Каждое обращение — событие для журнала: выгрузка для аудита должна
+            // показывать, что именно аудитор скачал и когда.
+            tracing::info!(
+                audit_token = %token.id,
+                scope = scope.label(),
+                uses = token.uses,
+                max_uses = token.max_uses,
+                "device api: аудиторский токен использован"
+            );
+            Ok(format!("audit:{}", token.id))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, scope = scope.label(), "device api: аудиторский токен отвергнут");
+            Err(ApiError(StatusCode::UNAUTHORIZED, "unknown device"))
+        }
+    }
+}
+
+/// Вернуть занятое использование приглашения: заведение не состоялось.
+///
+/// Неудача отката поднимает critical: списанное использование за заведение, которого
+/// не произошло, молча съедает одноразовый код — человек получит отказ и не поймёт,
+/// почему его бумажка не работает.
+async fn release_invite(state: &AppState, invite_id: &str) {
+    let released = state.invites.write().await.release(invite_id);
+    if let Err(e) = released {
+        state
+            .alerts
+            .emit(crate::model::alert::Alert::critical(
+                "deviceapi",
+                format!("не удалось вернуть использование приглашения `{invite_id}`: {e}"),
+            ))
+            .await;
+    }
+}
+
+/// Убрать запись, к которой так и не удалось выдать bundle.
+///
+/// Неудавшийся откат обязан быть слышен: невидимая запись-призрак навсегда занимает и
+/// имя, и слот в круге, а обнаруживается по симптому «телефон получает 409».
+async fn remove_ghost(state: &AppState, device_id: &str) {
+    let removed = state.devices.write().await.remove(device_id);
+    if let Err(e) = removed {
+        state
+            .alerts
+            .emit(crate::model::alert::Alert::critical(
+                "deviceapi",
+                format!("не удалось убрать запись-призрак `{device_id}`: {e}"),
+            ))
+            .await;
     }
 }
 
@@ -246,7 +390,9 @@ fn is_safe_sticker_file(file: &str) -> bool {
         return true;
     }
     // Ровно `NNN.webp` — так нумерует импорт.
-    file.len() == 8 && file.ends_with(".webp") && file.as_bytes()[..3].iter().all(u8::is_ascii_digit)
+    file.len() == 8
+        && file.ends_with(".webp")
+        && file.as_bytes()[..3].iter().all(u8::is_ascii_digit)
 }
 
 fn sticker_content_type(file: &str) -> &'static str {
@@ -257,7 +403,10 @@ fn sticker_content_type(file: &str) -> &'static str {
     }
 }
 
-async fn serve_small_file(path: std::path::PathBuf, content_type: &'static str) -> ApiResult<Response> {
+async fn serve_small_file(
+    path: std::path::PathBuf,
+    content_type: &'static str,
+) -> ApiResult<Response> {
     let meta = tokio::fs::metadata(&path)
         .await
         .map_err(|_| ApiError(StatusCode::NOT_FOUND, "no such file"))?;
@@ -317,7 +466,12 @@ async fn update_manifest(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let device = authorize(&state, &headers).await?;
+    let device = authorize_or_audit(
+        &state,
+        &headers,
+        crate::model::audit_token::AuditScope::UpdatesManifest,
+    )
+    .await?;
     let path = state.config.device_api.updates_dir.join("manifest.json");
 
     let meta = tokio::fs::metadata(&path).await.map_err(|_| {
@@ -333,6 +487,27 @@ async fn update_manifest(
         tracing::error!(path = %path.display(), error = %e, "cannot read update manifest");
         ApiError(StatusCode::INTERNAL_SERVER_ERROR, "bad manifest")
     })?;
+
+    // Свежесть манифеста проверяется В МОМЕНТ ВЫДАЧИ, но выдачу не отменяет.
+    //
+    // Переподписать манифест узел не может: ключ лежит на рабочей станции
+    // (docs/runbook-release.md). Значит, отказ в выдаче не приблизил бы починку ни на
+    // шаг, зато отнял бы у семьи уже выложенное обновление — в том числе у сборок,
+    // которые про `expires` ничего не знают и поставили бы его. Решение о доверии
+    // принимает клиент: у него есть подпись и назначенный оператором срок.
+    //
+    // Чего делать НЕЛЬЗЯ — отдавать просроченное молча. Здесь это строка в журнале с
+    // именем устройства, а в статус и алерты то же самое приносит надзор, который
+    // смотрит на этот файл каждые 15 секунд и потому скажет оператору раньше, чем
+    // кто-то в семье увидит отказ в телефоне.
+    let freshness = crate::model::update::updates_status(Utc::now(), Some(&body));
+    if freshness.state == crate::model::health::HealthState::Down {
+        tracing::error!(
+            %device,
+            note = %freshness.note,
+            "device api: манифест обновлений отдан просроченным"
+        );
+    }
 
     tracing::debug!(%device, "device api: manifest served");
     Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
@@ -352,8 +527,17 @@ async fn update_manifest_signature(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let device = authorize(&state, &headers).await?;
-    let path = state.config.device_api.updates_dir.join("manifest.json.sig");
+    let device = authorize_or_audit(
+        &state,
+        &headers,
+        crate::model::audit_token::AuditScope::ManifestSignature,
+    )
+    .await?;
+    let path = state
+        .config
+        .device_api
+        .updates_dir
+        .join("manifest.json.sig");
 
     let meta = tokio::fs::metadata(&path)
         .await
@@ -377,7 +561,12 @@ async fn update_file(
     headers: HeaderMap,
     AxumPath(file): AxumPath<String>,
 ) -> ApiResult<Response> {
-    let device = authorize(&state, &headers).await?;
+    let device = authorize_or_audit(
+        &state,
+        &headers,
+        crate::model::audit_token::AuditScope::UpdatesFile,
+    )
+    .await?;
 
     if !is_safe_apk_name(&file) {
         tracing::warn!(%device, %file, "device api: refused a suspicious file name");
@@ -534,16 +723,12 @@ async fn enroll(
     headers: HeaderMap,
     Json(req): Json<EnrollRequest>,
 ) -> ApiResult<Response> {
-    let inviter = authorize(&state, &headers).await?;
-
-    // Поверхность включается осознанно. Пока она открыта, ЛЮБОЙ действующий токен
-    // устройства плодит новые устройства, каждое из которых умеет то же самое, —
-    // то есть один потерянный телефон становится бессрочным станком.
-    if !state.config.devices.allow_device_enroll {
-        tracing::warn!(%inviter, "device api: enroll refused, disabled by configuration");
-        return Err(ApiError(StatusCode::FORBIDDEN, "enrolment is disabled"));
+    let token = device_token(&headers);
+    if token.is_empty() {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "device token required"));
     }
 
+    // Всё, что видно по самому запросу, проверяется до захвата реестра.
     let name = req.name.trim();
     if name.is_empty() || name.chars().count() > 64 {
         return Err(ApiError(StatusCode::BAD_REQUEST, "bad device name"));
@@ -552,62 +737,103 @@ async fn enroll(
         return Err(ApiError(StatusCode::BAD_REQUEST, "bad platform"));
     };
 
-    // Бюджет на сутки: даже включённая поверхность не должна давать одному токену
-    // исчерпать max_devices за минуту.
-    let since = Utc::now() - chrono::Duration::days(1);
-    let recent = state.devices.read().await.children_since(&inviter, since);
-    if recent >= state.config.devices.max_enrolls_per_day {
-        tracing::warn!(%inviter, recent, "device api: enroll budget exhausted");
-        state
-            .alerts
-            .emit(crate::model::alert::Alert::warning(
-                "deviceapi",
-                format!(
-                    "устройство `{inviter}` завело за сутки {recent} устройств — предел исчерпан"
-                ),
-            ))
-            .await;
-        return Err(ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too many devices enrolled today",
-        ));
-    }
+    // Критический участок целиком под ОДНИМ захватом: узнать приглашающего, списать
+    // суточный бюджет, создать запись вместе с родством. Раньше это были четыре
+    // независимых захвата, и отзыв приглашающего, успевший между ними, оставлял
+    // заведённое устройство с рабочим доступом — навсегда. Внутри нет ни одного
+    // `.await`: блокировка не переживает ожидание.
+    let (inviter, outcome) = {
+        let mut devices = state.devices.write().await;
+        let Some(inviter) = resolve_token(&devices, &token) else {
+            tracing::warn!("device api: enroll rejected an unknown or revoked token");
+            return Err(ApiError(StatusCode::UNAUTHORIZED, "unknown device"));
+        };
 
-    let device = state
-        .devices
-        .write()
-        .await
-        .add(
+        // Поверхность включается осознанно. Пока она открыта, ЛЮБОЙ действующий токен
+        // устройства плодит новые устройства, каждое из которых умеет то же самое, —
+        // то есть один потерянный телефон становится бессрочным станком.
+        if !state.config.devices.allow_device_enroll {
+            tracing::warn!(%inviter, "device api: enroll refused, disabled by configuration");
+            return Err(ApiError(StatusCode::FORBIDDEN, "enrolment is disabled"));
+        }
+
+        // Бюджет на сутки: даже включённая поверхность не должна давать одному токену
+        // исчерпать max_devices за минуту. Считается внутри той же транзакции.
+        let outcome = devices.add_child(
             name,
             platform,
             Some(format!("заведено с устройства {inviter}")),
             state.config.devices.max_devices,
-        )
-        .map_err(|e| {
+            &inviter,
+            state.config.devices.max_enrolls_per_day,
+        );
+        (inviter, outcome)
+    };
+
+    let device = match outcome {
+        Ok(device) => device,
+        Err(EnrollError::InviterRevoked) => {
+            // Отзыв выиграл гонку — и обязан выигрывать её всегда: заведение с
+            // отозванного устройства это тот же самый доступ, только под новым именем.
+            tracing::warn!(%inviter, "device api: enroll refused, the inviter is revoked");
+            return Err(ApiError(StatusCode::UNAUTHORIZED, "unknown device"));
+        }
+        Err(EnrollError::BudgetExhausted(recent)) => {
+            tracing::warn!(%inviter, recent, "device api: enroll budget exhausted");
+            state
+                .alerts
+                .emit(crate::model::alert::Alert::warning(
+                    "deviceapi",
+                    format!(
+                        "устройство `{inviter}` завело за сутки {recent} устройств — предел исчерпан"
+                    ),
+                ))
+                .await;
+            return Err(ApiError(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many devices enrolled today",
+            ));
+        }
+        Err(EnrollError::Refused(e)) => {
             tracing::warn!(%inviter, error = %e, "device api: enroll refused");
             // Лимит устройств и повтор имени — это не ошибка сервера, а ответ ему.
-            ApiError(StatusCode::CONFLICT, "cannot add the device")
-        })?;
+            return Err(ApiError(StatusCode::CONFLICT, "cannot add the device"));
+        }
+        Err(EnrollError::Storage(e)) => {
+            // Раньше отказ диска приходил человеку как 409 «имя занято или лимит», то
+            // есть как его собственная ошибка, и без единого алерта.
+            tracing::error!(%inviter, error = %e, "device api: cannot write the device registry");
+            state
+                .alerts
+                .emit(crate::model::alert::Alert::critical(
+                    "deviceapi",
+                    format!(
+                        "не удалось записать реестр устройств при заведении с `{inviter}`: {e}"
+                    ),
+                ))
+                .await;
+            return Err(ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot add the device",
+            ));
+        }
+    };
 
-    // Родство записываем сразу: по нему работает транзитивный отзыв.
-    if let Err(e) = state
-        .devices
-        .write()
-        .await
-        .note_enrolled_by(&device.id, &inviter)
-    {
-        tracing::error!(%inviter, error = %e, "device api: cannot record the parent");
-        let _ = state.devices.write().await.remove(&device.id);
-        return Err(ApiError(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "cannot record the device",
-        ));
-    }
-
-    let bundle = crate::configgen::build_bundle(&state.config, &device).map_err(|e| {
-        tracing::error!(%inviter, error = %e, "device api: cannot build a bundle");
-        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot build a bundle")
-    })?;
+    let bundle = match crate::configgen::build_bundle(&state.config, &device) {
+        Ok(bundle) => bundle,
+        Err(e) => {
+            tracing::error!(%inviter, error = %e, "device api: cannot build a bundle");
+            // Запись уже занимает и имя, и слот в круге, а bundle к ней выдать не
+            // вышло. Убираем — ровно как это делает `/claim`: раньше эти две ветки
+            // разошлись, и `/enroll` оставлял призрака при каждом недоступном
+            // TURN-секрете.
+            remove_ghost(&state, &device.id).await;
+            return Err(ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot build a bundle",
+            ));
+        }
+    };
 
     // Помечаем выдачу так же, как это делает admin API: счётчик bundle'ов — часть
     // того, по чему потом разбирают инцидент.
@@ -722,49 +948,53 @@ async fn claim(
         .map(str::trim)
         .filter(|s| !s.is_empty());
     if let Some(install_id) = install_id {
+        // Отозванную установку находим тоже: впустить её обратно по живому коду —
+        // значит отменить отзыв, поэтому ответ на неё обязан быть отказом, а не новым
+        // устройством под новым именем.
         let existing = state
             .devices
             .read()
             .await
-            .by_install_id(install_id)
+            .by_install_id_any(install_id)
             .cloned();
         if let Some(device) = existing {
-            let bundle = crate::configgen::build_bundle(&state.config, &device).map_err(|e| {
-                tracing::error!(device = %device.id, error = %e, "device api: cannot rebuild a bundle");
-                ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot build a bundle")
-            })?;
-            let _ = state.devices.write().await.note_bundle_issued(&device.id);
-            if let Some(ip) = peer_ip {
-                state.claim_throttle.note_success(ip, at);
-            }
-            tracing::info!(device = %device.id, "device api: claim repeated, bundle re-issued");
-            return Ok(Json(bundle).into_response());
+            return repeat_claim(&state, device, &token, now, peer_ip, at).await;
         }
     }
 
     // Списание неделимо: проверка и `uses += 1` происходят под одним `&mut`.
     // Раньше между ними было окно, и десять одновременных запросов с одним
     // одноразовым кодом заводили десять устройств.
-    let invite = match state.invites.write().await.reserve(&token, now) {
+    //
+    // Отдельный `let`, а не scrutinee `match`: временное значение в scrutinee живёт
+    // до конца всего выражения, и блокировка реестра приглашений держалась бы через
+    // `.await` отправки алерта.
+    let reserved = state.invites.write().await.reserve(&token, now);
+    let invite = match reserved {
         Ok(invite) => invite,
-        Err(_) => {
+        Err(Error::NotFound(_)) => {
             // Просроченное, исчерпанное и вовсе несуществующее приглашение
             // отвечают одинаково: по ответу нельзя узнать, было ли оно.
             tracing::warn!("device api: rejected an unusable invite token");
-            if let Some(ip) = peer_ip {
-                if state.claim_throttle.note_failure(ip, at) {
-                    state
-                        .alerts
-                        .emit(crate::model::alert::Alert::warning(
-                            "deviceapi",
-                            format!(
-                                "с адреса {ip} подбирали код доступа — вход с него закрыт на час"
-                            ),
-                        ))
-                        .await;
-                }
-            }
+            note_claim_failure(&state, peer_ip, at).await;
             return Err(ApiError(StatusCode::UNAUTHORIZED, "unknown invite"));
+        }
+        Err(e) => {
+            // Отказ записи — не подбор кода. Раньше он приходил сюда же и записывался
+            // в счётчик неудач по адресу: полный `/var` закрывал семье вход с их же
+            // адреса на час и объявлял это подбором в алерте.
+            tracing::error!(error = %e, "device api: cannot reserve the invite");
+            state
+                .alerts
+                .emit(crate::model::alert::Alert::critical(
+                    "deviceapi",
+                    format!("не удалось записать реестр приглашений при заведении: {e}"),
+                ))
+                .await;
+            return Err(ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot record the claim",
+            ));
         }
     };
     let invite_id = invite.id.clone();
@@ -775,39 +1005,64 @@ async fn claim(
         requested
     };
 
-    let device = {
+    // Второй реестр берётся ПОСЛЕ первого и без вложенности: возврат использования
+    // вынесен наружу, из-под этого guard'а.
+    let claimed = {
         let mut devices = state.devices.write().await;
-        // Имя приходит от приложения — это модель телефона, и два одинаковых телефона
-        // в семье не редкость. Совпадение имени не повод отказать человеку в заведении,
-        // поэтому подбираем свободное, а не возвращаем 409, как это делает `/enroll`,
-        // где имя набирает человек и повтор — почти всегда его опечатка.
-        let mut attempt = 0;
-        loop {
-            let name = if attempt == 0 {
-                requested.to_string()
-            } else {
-                format!("{requested} {}", attempt + 1)
-            };
-            match devices.add(
-                &name,
-                platform,
-                Some(format!("заведено по приглашению {invite_id}")),
-                state.config.devices.max_devices,
-            ) {
-                Ok(device) => break device,
-                Err(crate::error::Error::Conflict(_)) if attempt < 9 => {
-                    attempt += 1;
-                }
-                Err(e) => {
+        devices.claim_device(
+            install_id,
+            requested,
+            platform,
+            Some(format!("заведено по приглашению {invite_id}")),
+            state.config.devices.max_devices,
+        )
+    };
+    let (device, repeat) = match claimed {
+        Ok(claimed) => claimed,
+        Err(e) => {
+            // Заведение не состоялось — использование возвращаем, иначе честная
+            // попытка съедает код.
+            release_invite(&state, &invite_id).await;
+            return Err(match &e {
+                Error::Conflict(_) => {
                     tracing::warn!(%invite_id, error = %e, "device api: claim refused");
-                    // Заведение не состоялось — использование возвращаем, иначе
-                    // честная попытка съедает код.
-                    let _ = state.invites.write().await.release(&invite_id);
-                    return Err(ApiError(StatusCode::CONFLICT, "cannot add the device"));
+                    ApiError(StatusCode::CONFLICT, "cannot add the device")
                 }
-            }
+                Error::Unauthorized(_) => {
+                    tracing::warn!(%invite_id, error = %e, "device api: claim refused, the install is revoked");
+                    ApiError(StatusCode::UNAUTHORIZED, "unknown invite")
+                }
+                _ => {
+                    tracing::error!(%invite_id, error = %e, "device api: cannot write the device registry");
+                    state
+                        .alerts
+                        .emit(crate::model::alert::Alert::critical(
+                            "deviceapi",
+                            format!("не удалось записать реестр устройств по приглашению `{invite_id}`: {e}"),
+                        ))
+                        .await;
+                    ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot add the device")
+                }
+            });
         }
     };
+
+    if repeat {
+        // Гонку выиграл соседний запрос того же телефона: устройство уже заведено, и
+        // второго быть не должно. Использование возвращаем — нового устройства не
+        // появилось. Право на bundle этот запрос уже доказал: его код прошёл reserve.
+        release_invite(&state, &invite_id).await;
+        let bundle = crate::configgen::build_bundle(&state.config, &device).map_err(|e| {
+            tracing::error!(device = %device.id, error = %e, "device api: cannot rebuild a bundle");
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot build a bundle")
+        })?;
+        let _ = state.devices.write().await.note_bundle_issued(&device.id);
+        if let Some(ip) = peer_ip {
+            state.claim_throttle.note_success(ip, at);
+        }
+        tracing::info!(device = %device.id, "device api: a concurrent claim won, bundle re-issued");
+        return Ok(Json(bundle).into_response());
+    }
 
     // Дальше любая неудача обязана откатить И запись устройства, И использование:
     // иначе недоступный TURN-секрет превращает каждую попытку в запись-призрак,
@@ -816,8 +1071,8 @@ async fn claim(
         Ok(bundle) => bundle,
         Err(e) => {
             tracing::error!(%invite_id, error = %e, "device api: cannot build a bundle");
-            let _ = state.devices.write().await.remove(&device.id);
-            let _ = state.invites.write().await.release(&invite_id);
+            release_invite(&state, &invite_id).await;
+            remove_ghost(&state, &device.id).await;
             return Err(ApiError(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "cannot build a bundle",
@@ -829,15 +1084,15 @@ async fn claim(
     // удалась (диск полон, state_dir перемонтирован в ro), отдавать пароли релеев
     // нельзя: на диске не останется ни счётчика, ни следа, кого этот код впустил, и
     // после перезапуска одноразовый код снова окажется свежим.
-    if let Err(e) = state
+    let noted = state
         .invites
         .write()
         .await
-        .note_device(&invite_id, &device.id)
-    {
+        .note_device(&invite_id, &device.id);
+    if let Err(e) = noted {
         tracing::error!(%invite_id, error = %e, "device api: cannot record the claim");
-        let _ = state.devices.write().await.remove(&device.id);
-        let _ = state.invites.write().await.release(&invite_id);
+        release_invite(&state, &invite_id).await;
+        remove_ghost(&state, &device.id).await;
         state
             .alerts
             .emit(crate::model::alert::Alert::critical(
@@ -849,13 +1104,6 @@ async fn claim(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cannot record the claim",
         ));
-    }
-    if let Some(install_id) = install_id {
-        let _ = state
-            .devices
-            .write()
-            .await
-            .note_install_id(&device.id, install_id);
     }
     let _ = state.devices.write().await.note_bundle_issued(&device.id);
     // Счётчик неудач сбрасываем только здесь: неудавшийся claim не должен обнулять
@@ -880,6 +1128,71 @@ async fn claim(
         ))
         .await;
 
+    Ok(Json(bundle).into_response())
+}
+
+/// Записать неудачную попытку предъявить код и пошуметь, если терпение кончилось.
+async fn note_claim_failure(
+    state: &AppState,
+    peer_ip: Option<std::net::IpAddr>,
+    at: std::time::Instant,
+) {
+    let Some(ip) = peer_ip else {
+        return;
+    };
+    if state.claim_throttle.note_failure(ip, at) {
+        state
+            .alerts
+            .emit(crate::model::alert::Alert::warning(
+                "deviceapi",
+                format!("с адреса {ip} подбирали код доступа — вход с него закрыт на час"),
+            ))
+            .await;
+    }
+}
+
+/// Повтор: тот же телефон, тот же код, ответ на прошлую попытку не доехал.
+///
+/// Право на bundle здесь доказывает не `install_id` — он не секрет: лежит на телефоне
+/// в открытом виде и целиком отдаётся в `GET /devices`. Доказывает предъявленный код,
+/// и он обязан быть ТЕМ ЖЕ, по которому это устройство завелось. Раньше эта ветка не
+/// смотрела на код вовсе: любой непустой заголовок вместе с чужим `install_id` отдавал
+/// пароли релеев, да ещё и обнулял счётчик неудач по адресу.
+///
+/// Исчерпанный счётчик использований повтору не помеха — см.
+/// [`crate::model::invite::Invite::is_open_at`];
+/// отозванное и просроченное приглашение помеха: это решения «дверь закрыта».
+async fn repeat_claim(
+    state: &AppState,
+    device: Device,
+    token: &str,
+    now: chrono::DateTime<Utc>,
+    peer_ip: Option<std::net::IpAddr>,
+    at: std::time::Instant,
+) -> ApiResult<Response> {
+    // Порядок реестров тот же, что и везде в модуле: сначала invites, потом devices.
+    let presented = {
+        let invites = state.invites.read().await;
+        invites.find_repeat(token, &device.id, now).is_some()
+    };
+    let usable = state.devices.read().await.is_usable(&device.id);
+    if !presented || !usable {
+        // Ответ тот же, что и на неизвестный код: иначе по коду ответа было бы видно,
+        // известен ли узлу такой `install_id`, — то есть он стал бы оракулом.
+        tracing::warn!(device = %device.id, "device api: a repeat claim did not present its own invite");
+        note_claim_failure(state, peer_ip, at).await;
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "unknown invite"));
+    }
+
+    let bundle = crate::configgen::build_bundle(&state.config, &device).map_err(|e| {
+        tracing::error!(device = %device.id, error = %e, "device api: cannot rebuild a bundle");
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "cannot build a bundle")
+    })?;
+    let _ = state.devices.write().await.note_bundle_issued(&device.id);
+    if let Some(ip) = peer_ip {
+        state.claim_throttle.note_success(ip, at);
+    }
+    tracing::info!(device = %device.id, "device api: claim repeated, bundle re-issued");
     Ok(Json(bundle).into_response())
 }
 
@@ -1012,8 +1325,9 @@ mod tests {
         }
     }
 
-    /// Узел с секретами релеев на диске — ровно столько, сколько `/claim` нужно для bundle.
-    fn claim_node(dir: &std::path::Path) -> Arc<AppState> {
+    /// Конфигурация узла с секретами релеев на диске — ровно столько, сколько
+    /// `/claim` нужно для bundle.
+    fn claim_config(dir: &std::path::Path) -> crate::config::Config {
         let mut config = crate::state::tests::test_config(dir);
         config.smp.fingerprint_file = dir.join("smp-fingerprint");
         config.smp.password_file = Some(dir.join("smp-password"));
@@ -1029,6 +1343,26 @@ mod tests {
         ] {
             store::write_secret(dir.join(file), value).expect("seed");
         }
+        config
+    }
+
+    fn claim_node(dir: &std::path::Path) -> Arc<AppState> {
+        AppState::new(claim_config(dir), crate::sys::Sys::new(true)).expect("state")
+    }
+
+    /// Узел, на котором включено заведение с уже заведённого устройства.
+    fn enroll_node(dir: &std::path::Path) -> Arc<AppState> {
+        let mut config = claim_config(dir);
+        config.devices.allow_device_enroll = true;
+        AppState::new(config, crate::sys::Sys::new(true)).expect("state")
+    }
+
+    /// То же, но bundle собрать нельзя: TURN-секрета нет на месте. Так же выглядит
+    /// перемонтированный в ro `state_dir` — случай, ради которого нужен откат.
+    fn enroll_node_without_bundle(dir: &std::path::Path) -> Arc<AppState> {
+        let mut config = claim_config(dir);
+        config.devices.allow_device_enroll = true;
+        config.turn.secret_file = dir.join("no-such-turn-secret");
         AppState::new(config, crate::sys::Sys::new(true)).expect("state")
     }
 
@@ -1044,6 +1378,384 @@ mod tests {
             .await
             .expect("response")
             .status()
+    }
+
+    /// То же, но с адресом, как его кладёт настоящий `accept`: без него ограничитель
+    /// попыток не считает вовсе, а проверять надо именно его.
+    async fn post_claim_from(
+        state: &Arc<AppState>,
+        code: &str,
+        body: serde_json::Value,
+        ip: std::net::IpAddr,
+    ) -> StatusCode {
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/claim")
+            .header(INVITE_HEADER, code)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request");
+        request.extensions_mut().insert(PeerIp(ip));
+        tower::ServiceExt::oneshot(router(state.clone()), request)
+            .await
+            .expect("response")
+            .status()
+    }
+
+    async fn post_enroll(
+        state: &Arc<AppState>,
+        token: &str,
+        body: serde_json::Value,
+    ) -> StatusCode {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/enroll")
+            .header(TOKEN_HEADER, token)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request");
+        tower::ServiceExt::oneshot(router(state.clone()), request)
+            .await
+            .expect("response")
+            .status()
+    }
+
+    /// Устройство по имени — тестам нужен его токен и родство.
+    async fn device_named(state: &Arc<AppState>, name: &str) -> Device {
+        state
+            .devices
+            .read()
+            .await
+            .devices
+            .iter()
+            .find(|d| d.name == name)
+            .cloned()
+            .expect("устройство")
+    }
+
+    #[tokio::test]
+    async fn a_revoked_device_cannot_enrol_and_its_child_stops_working() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = enroll_node(dir.path());
+        let parent = state
+            .devices
+            .write()
+            .await
+            .add(
+                "Родитель",
+                crate::model::device::Platform::Android,
+                None,
+                10,
+            )
+            .expect("device");
+        let parent_token = parent.token.clone().expect("token");
+
+        assert_eq!(
+            post_enroll(
+                &state,
+                &parent_token,
+                serde_json::json!({ "name": "Ребёнок" })
+            )
+            .await,
+            StatusCode::OK
+        );
+        let child = device_named(&state, "Ребёнок").await;
+        assert_eq!(
+            child.enrolled_by.as_deref(),
+            Some(parent.id.as_str()),
+            "родство обязано быть записано тем же действием, что и сама запись"
+        );
+        let child_token = child.token.clone().expect("token");
+
+        state
+            .devices
+            .write()
+            .await
+            .revoke(&parent.id)
+            .expect("revoke");
+
+        assert_eq!(
+            post_enroll(
+                &state,
+                &parent_token,
+                serde_json::json!({ "name": "Ещё один" })
+            )
+            .await,
+            StatusCode::UNAUTHORIZED,
+            "отзыв обязан выигрывать у заведения"
+        );
+        assert_eq!(
+            state.devices.read().await.devices.len(),
+            2,
+            "реестр не вырос"
+        );
+
+        // А это исход гонки: ребёнок, которого обход потомков не застал, — его
+        // собственное поле revoked пустое. Токен всё равно не должен работать.
+        state
+            .devices
+            .write()
+            .await
+            .get_mut(&child.id)
+            .expect("child")
+            .revoked = None;
+        let (status, _) = get_signature(&state, &child_token).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "предок отозван — токен потомка не действует"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_bundle_leaves_no_ghost_after_enroll() {
+        // Раньше `/claim` откатывал такую неудачу, а `/enroll` — нет: запись навсегда
+        // занимала имя и слот, и повтор с тем же именем получал 409 «уже есть».
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = enroll_node_without_bundle(dir.path());
+        let parent = state
+            .devices
+            .write()
+            .await
+            .add(
+                "Родитель",
+                crate::model::device::Platform::Android,
+                None,
+                10,
+            )
+            .expect("device");
+        let token = parent.token.clone().expect("token");
+
+        assert_eq!(
+            post_enroll(&state, &token, serde_json::json!({ "name": "Ребёнок" })).await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            state.devices.read().await.devices.len(),
+            1,
+            "запись-призрак не должна остаться"
+        );
+        assert_eq!(
+            post_enroll(&state, &token, serde_json::json!({ "name": "Ребёнок" })).await,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "имя обязано освободиться: это снова отказ узла, а не 409 «уже есть»"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repeat_claim_must_present_its_own_invite() {
+        // Раньше эта ветка не смотрела на код вовсе: любой непустой заголовок вместе
+        // с чужим install_id отдавал пароли релеев.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = claim_node(dir.path());
+        let invite = state
+            .invites
+            .write()
+            .await
+            .create(0, 0, None)
+            .expect("invite");
+        let other = state
+            .invites
+            .write()
+            .await
+            .create(0, 0, None)
+            .expect("invite");
+        let body = serde_json::json!({ "name": "Pixel 8", "install_id": "inst-1" });
+
+        assert_eq!(
+            post_claim(&state, &invite.token, body.clone()).await,
+            StatusCode::OK
+        );
+
+        assert_eq!(
+            post_claim(&state, "MUSOR-NEKOD-XXXX", body.clone()).await,
+            StatusCode::UNAUTHORIZED,
+            "мусорный код не должен отдавать bundle по чужому install_id"
+        );
+        assert_eq!(
+            post_claim(&state, &other.token, body.clone()).await,
+            StatusCode::UNAUTHORIZED,
+            "повтор обязан предъявлять ТОТ ЖЕ код, по которому устройство завелось"
+        );
+        assert_eq!(
+            post_claim(&state, &invite.token, body.clone()).await,
+            StatusCode::OK,
+            "со своим кодом повтор проходит"
+        );
+
+        assert_eq!(
+            state.devices.read().await.devices.len(),
+            1,
+            "устройство одно"
+        );
+        assert_eq!(
+            state
+                .invites
+                .read()
+                .await
+                .get(&invite.id)
+                .expect("invite")
+                .uses,
+            1,
+            "повтор не тратит использование"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_single_use_code_still_answers_its_own_repeat() {
+        // Ровно тот случай, ради которого идемпотентность и заводилась: ответ на
+        // первый claim не доехал, телефон повторил, а код к этому моменту списан.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = claim_node(dir.path());
+        let invite = state
+            .invites
+            .write()
+            .await
+            .create(1, 0, None)
+            .expect("invite");
+        let body = serde_json::json!({ "name": "Pixel 8", "install_id": "inst-1" });
+
+        assert_eq!(
+            post_claim(&state, &invite.token, body.clone()).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post_claim(&state, &invite.token, body.clone()).await,
+            StatusCode::OK
+        );
+        assert_eq!(state.devices.read().await.devices.len(), 1);
+        assert_eq!(
+            state
+                .invites
+                .read()
+                .await
+                .get(&invite.id)
+                .expect("invite")
+                .uses,
+            1
+        );
+
+        // А отозванное приглашение повтор уже не принимает: это решение семьи.
+        state
+            .invites
+            .write()
+            .await
+            .revoke(&invite.id)
+            .expect("revoke");
+        assert_eq!(
+            post_claim(&state, &invite.token, body).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_claims_from_one_phone_enrol_one_device() {
+        // Проверка и создание записи были разными захватами: два ретрая одного
+        // телефона оба видели «такого нет» и оба заводили устройство.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = claim_node(dir.path());
+        let invite = state
+            .invites
+            .write()
+            .await
+            .create(0, 0, None)
+            .expect("invite");
+        let body = serde_json::json!({ "name": "Pixel 8", "install_id": "inst-1" });
+
+        let (first, second) = tokio::join!(
+            post_claim(&state, &invite.token, body.clone()),
+            post_claim(&state, &invite.token, body.clone())
+        );
+        assert_eq!(first, StatusCode::OK);
+        assert_eq!(second, StatusCode::OK);
+        assert_eq!(
+            state.devices.read().await.devices.len(),
+            1,
+            "два ретрая одного телефона — одно устройство"
+        );
+        assert_eq!(
+            state
+                .invites
+                .read()
+                .await
+                .get(&invite.id)
+                .expect("invite")
+                .uses,
+            1,
+            "и одно использование кода"
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_claims_with_different_codes_all_get_through() {
+        // Блокировка реестра приглашений держалась через `.await` отправки алерта.
+        // Прямой проверки дедлока нет; проверяем то, что можно: параллельные
+        // заведения по разным кодам все завершаются.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = claim_node(dir.path());
+        let mut codes = Vec::new();
+        for _ in 0..4 {
+            codes.push(
+                state
+                    .invites
+                    .write()
+                    .await
+                    .create(1, 0, None)
+                    .expect("invite")
+                    .token,
+            );
+        }
+
+        let (a, b, c, d) = tokio::join!(
+            post_claim(&state, &codes[0], serde_json::json!({ "name": "Один" })),
+            post_claim(&state, &codes[1], serde_json::json!({ "name": "Два" })),
+            post_claim(&state, &codes[2], serde_json::json!({ "name": "Три" })),
+            post_claim(&state, &codes[3], serde_json::json!({ "name": "Четыре" })),
+        );
+        assert_eq!([a, b, c, d], [StatusCode::OK; 4]);
+        assert_eq!(state.devices.read().await.devices.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_disk_failure_is_not_a_guessed_code() {
+        // Отказ записи приходил сюда как «неизвестный код» и писался в счётчик
+        // неудач по адресу: полный `/var` закрывал семье вход с их же адреса на час.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = claim_node(dir.path());
+        let invite = state
+            .invites
+            .write()
+            .await
+            .create(0, 0, None)
+            .expect("invite");
+
+        let path = state.config.paths.invites_file();
+        std::fs::remove_file(&path).expect("убрать файл");
+        std::fs::create_dir(&path).expect("занять имя каталогом");
+
+        let ip: std::net::IpAddr = "192.0.2.7".parse().expect("ip");
+        for _ in 0..6 {
+            assert_eq!(
+                post_claim_from(
+                    &state,
+                    &invite.token,
+                    serde_json::json!({ "name": "Pixel 8" }),
+                    ip
+                )
+                .await,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "отказ диска — ошибка узла, а не отказ в доступе"
+            );
+        }
+        assert_eq!(
+            state.claim_throttle.check(ip, std::time::Instant::now()),
+            throttle::Verdict::Allow,
+            "адрес семьи не должен закрываться из-за отказа диска"
+        );
+        assert!(
+            state.devices.read().await.devices.is_empty(),
+            "устройство не заводится, если использование не удалось записать"
+        );
     }
 
     #[test]
@@ -1097,7 +1809,12 @@ mod tests {
             .devices
             .write()
             .await
-            .add("sig-check", crate::model::device::Platform::Android, None, 10)
+            .add(
+                "sig-check",
+                crate::model::device::Platform::Android,
+                None,
+                10,
+            )
             .expect("device")
             .token
             .expect("token");
@@ -1106,12 +1823,21 @@ mod tests {
         let (status, _) = get_signature(&state, &token).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
 
-        std::fs::write(updates.join("manifest.json.sig"), b"c2lnbmF0dXJl
-").expect("seed sig");
+        std::fs::write(
+            updates.join("manifest.json.sig"),
+            b"c2lnbmF0dXJl
+",
+        )
+        .expect("seed sig");
         let (status, body) = get_signature(&state, &token).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, b"c2lnbmF0dXJl
-".to_vec(), "отдаётся ровно файл подписи");
+        assert_eq!(
+            body,
+            b"c2lnbmF0dXJl
+"
+            .to_vec(),
+            "отдаётся ровно файл подписи"
+        );
     }
 
     #[test]
@@ -1136,6 +1862,333 @@ mod tests {
             .status();
         // 401, а не 400: запрос дошёл до своего обработчика, а не до `/updates/{file}`.
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // ------------------------------------------------- аудиторский токен (GET-1)
+
+    use crate::model::audit_token::AuditScope;
+
+    /// Узел с выложенным обновлением: манифест, подпись и сам файл.
+    fn updates_node(dir: &std::path::Path) -> (Arc<AppState>, std::path::PathBuf) {
+        let mut config = crate::state::tests::test_config(dir);
+        let updates = dir.join("updates");
+        std::fs::create_dir_all(&updates).expect("updates dir");
+        std::fs::write(updates.join("manifest.json"), br#"{"versionCode":42}"#).expect("manifest");
+        std::fs::write(updates.join("manifest.json.sig"), b"c2ln\n").expect("sig");
+        std::fs::write(updates.join("hearth.apk"), b"APK-BYTES-0123456789").expect("apk");
+        config.device_api.updates_dir = updates.clone();
+        let state = AppState::new(config, crate::sys::Sys::new(true)).expect("state");
+        (state, updates)
+    }
+
+    /// Манифест того вида, который подписывает `hearthctl release sign`.
+    fn signed_manifest(issued: &str, expires: &str) -> String {
+        format!(
+            r#"{{"v":1,"versionName":"7.0.1-h16","versionCode":387,"sha256":"{}",
+                 "file":"hearth.apk","issued":"{issued}","expires":"{expires}"}}"#,
+            "a".repeat(64)
+        )
+    }
+
+    /// Просроченный манифест узел ОТДАЁТ, но не молчит об этом.
+    ///
+    /// Отказать в выдаче было бы легко и неверно: переподписать манифест узел не может
+    /// (ключ на рабочей станции), значит отказ не приблизил бы починку, а обновление у
+    /// семьи отобрал бы немедленно — в том числе у сборок, которые про срок не знают.
+    /// Поэтому проверка выражается вердиктом и алертом, а не кодом ответа.
+    ///
+    /// До появления поля `expires` этот тест не компилировался бы: узел о сроке
+    /// годности манифеста не знал ничего.
+    #[tokio::test]
+    async fn an_expired_manifest_is_served_and_the_node_says_it_is_expired() {
+        use crate::model::health::HealthState;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, updates) = updates_node(dir.path());
+        std::fs::write(
+            updates.join("manifest.json"),
+            signed_manifest("2026-01-01T00:00:00Z", "2026-01-10T23:59:59Z"),
+        )
+        .expect("manifest");
+
+        let token = state
+            .audit_tokens
+            .write()
+            .await
+            .issue(48, 10, AuditScope::updates(), Some("аудит".into()))
+            .expect("issue")
+            .token;
+        let (status, body) = get_with_audit(&state, "/updates/manifest.json", &token).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "выдачу отменять нельзя: узел не умеет переподписывать манифест"
+        );
+        assert!(String::from_utf8_lossy(&body).contains("expires"));
+
+        let verdict = state.updates_status(Utc::now()).await;
+        assert_eq!(verdict.state, HealthState::Down);
+        assert!(verdict.published);
+        assert!(
+            verdict.note.contains("release sign"),
+            "вердикт обязан называть команду: {}",
+            verdict.note
+        );
+    }
+
+    /// Свежий манифест не тревожит никого, а отсутствие манифеста — тем более.
+    #[tokio::test]
+    async fn a_live_manifest_is_green_and_an_empty_updates_dir_is_not_an_alarm() {
+        use crate::model::health::HealthState;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, updates) = updates_node(dir.path());
+        let now = Utc::now();
+        std::fs::write(
+            updates.join("manifest.json"),
+            signed_manifest(
+                &crate::model::fmt_ts(now),
+                &crate::model::fmt_ts(now + chrono::Duration::days(25)),
+            ),
+        )
+        .expect("manifest");
+        assert_eq!(state.updates_status(now).await.state, HealthState::Ok);
+
+        std::fs::remove_file(updates.join("manifest.json")).expect("rm");
+        let empty = state.updates_status(now).await;
+        assert_eq!(empty.state, HealthState::Ok);
+        assert!(!empty.published);
+    }
+
+    async fn get_with_audit(
+        state: &Arc<AppState>,
+        uri: &str,
+        token: &str,
+    ) -> (StatusCode, Vec<u8>) {
+        let request = axum::http::Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header(AUDIT_HEADER, token)
+            .body(Body::empty())
+            .expect("request");
+        let response = tower::ServiceExt::oneshot(router(state.clone()), request)
+            .await
+            .expect("response");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (status, body.to_vec())
+    }
+
+    /// Ровно то, ради чего заведён токен: аудитор своими руками качает раздаваемое
+    /// и НЕ получает ничего сверх. Раньше третьего варианта не было — либо токен
+    /// члена семьи со всеми маршрутами, либо устройство со слотом и bundle.
+    #[tokio::test]
+    async fn an_audit_token_opens_the_updates_and_nothing_else() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, _updates) = updates_node(dir.path());
+        let token = state
+            .audit_tokens
+            .write()
+            .await
+            .issue(48, 10, AuditScope::updates(), Some("аудит".into()))
+            .expect("issue")
+            .token;
+
+        for uri in [
+            "/updates/manifest.json",
+            "/updates/manifest.json.sig",
+            "/updates/hearth.apk",
+        ] {
+            let (status, _) = get_with_audit(&state, uri, &token).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+        }
+
+        // Замок, которого этот токен не открывает. Ни звонков, ни стикеров.
+        for uri in [
+            "/turn-credentials",
+            "/stickers/index.json",
+            "/stickers/animals/001.webp",
+        ] {
+            let (status, _) = get_with_audit(&state, uri, &token).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
+        }
+
+        // И ни одного заведённого устройства: слот семьи не израсходован.
+        assert_eq!(state.devices.read().await.devices.len(), 0);
+    }
+
+    /// По ответу нельзя понять, чем именно отвергнут запрос: просроченный токен,
+    /// отозванный и выдуманный обязаны выглядеть одинаково.
+    #[tokio::test]
+    async fn a_dead_audit_token_is_indistinguishable_from_an_invented_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, _updates) = updates_node(dir.path());
+
+        let short = state
+            .audit_tokens
+            .write()
+            .await
+            .issue(1, 10, AuditScope::updates(), None)
+            .expect("issue");
+        // Отматываем срок назад прямо в реестре: ждать час в тесте нечестно, а
+        // проверяется здесь именно ответ на просроченный токен.
+        {
+            let mut registry = state.audit_tokens.write().await;
+            if let Some(token) = registry.tokens.iter_mut().find(|t| t.id == short.id) {
+                token.expires = chrono::Utc::now() - chrono::Duration::seconds(1);
+            }
+            registry.save().expect("save");
+        }
+
+        let revoked = state
+            .audit_tokens
+            .write()
+            .await
+            .issue(48, 10, AuditScope::updates(), None)
+            .expect("issue");
+        state
+            .audit_tokens
+            .write()
+            .await
+            .revoke(&revoked.id)
+            .expect("revoke");
+
+        let expired = get_with_audit(&state, "/updates/manifest.json", &short.token).await;
+        let dead = get_with_audit(&state, "/updates/manifest.json", &revoked.token).await;
+        let invented = get_with_audit(&state, "/updates/manifest.json", &"f".repeat(64)).await;
+
+        assert_eq!(expired.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(expired, dead, "отозванный и просроченный обязаны совпасть");
+        assert_eq!(expired, invented, "и оба — с выдуманным");
+    }
+
+    /// Токен на манифест не открывает APK: область — замок, а не подпись.
+    #[tokio::test]
+    async fn an_audit_token_is_held_to_its_scope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, _updates) = updates_node(dir.path());
+        let token = state
+            .audit_tokens
+            .write()
+            .await
+            .issue(48, 10, vec![AuditScope::UpdatesManifest], None)
+            .expect("issue")
+            .token;
+
+        assert_eq!(
+            get_with_audit(&state, "/updates/manifest.json", &token)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            get_with_audit(&state, "/updates/hearth.apk", &token)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// Аудит обязан уметь качать APK по частям и сверять байты: без докачки
+    /// проверка сотен мегабайт на любой потере сети начинается заново.
+    #[tokio::test]
+    async fn an_audit_token_may_fetch_a_range_of_the_apk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, updates) = updates_node(dir.path());
+        let token = state
+            .audit_tokens
+            .write()
+            .await
+            .issue(48, 10, AuditScope::updates(), None)
+            .expect("issue")
+            .token;
+
+        let request = axum::http::Request::builder()
+            .method("GET")
+            .uri("/updates/hearth.apk")
+            .header(AUDIT_HEADER, &token)
+            .header(header::RANGE, "bytes=4-8")
+            .body(Body::empty())
+            .expect("request");
+        let response = tower::ServiceExt::oneshot(router(state.clone()), request)
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+
+        let whole = std::fs::read(updates.join("hearth.apk")).expect("apk");
+        assert_eq!(body.to_vec(), whole[4..=8].to_vec());
+    }
+
+    /// Счётчик обязан расходоваться, иначе «пять обращений» ничего не ограничивает.
+    #[tokio::test]
+    async fn every_audit_request_spends_one_use() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, _updates) = updates_node(dir.path());
+        let issued = state
+            .audit_tokens
+            .write()
+            .await
+            .issue(48, 2, AuditScope::updates(), None)
+            .expect("issue");
+
+        for _ in 0..2 {
+            assert_eq!(
+                get_with_audit(&state, "/updates/manifest.json", &issued.token)
+                    .await
+                    .0,
+                StatusCode::OK
+            );
+        }
+        assert_eq!(
+            get_with_audit(&state, "/updates/manifest.json", &issued.token)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED,
+            "исчерпанный токен обязан перестать работать"
+        );
+        assert_eq!(
+            state
+                .audit_tokens
+                .read()
+                .await
+                .get(&issued.id)
+                .unwrap()
+                .uses,
+            2
+        );
+    }
+
+    /// Токен устройства продолжает работать как работал: второй замок не должен
+    /// изменить поведение первого.
+    #[tokio::test]
+    async fn a_device_token_still_opens_the_updates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, _updates) = updates_node(dir.path());
+        let token = state
+            .devices
+            .write()
+            .await
+            .add("phone", crate::model::device::Platform::Android, None, 10)
+            .expect("device")
+            .token
+            .expect("token");
+
+        let request = axum::http::Request::builder()
+            .method("GET")
+            .uri("/updates/manifest.json")
+            .header(TOKEN_HEADER, &token)
+            .body(Body::empty())
+            .expect("request");
+        let status = tower::ServiceExt::oneshot(router(state.clone()), request)
+            .await
+            .expect("response")
+            .status();
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]

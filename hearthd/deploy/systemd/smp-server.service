@@ -4,6 +4,10 @@ Documentation=https://github.com/simplex-chat/simplexmq
 After=network-online.target nftables.service
 Wants=network-online.target
 Requires=nftables.service
+# Данные релея могут жить под bind-mount'ом (deploy/systemd/var-opt-*.mount). Без этой
+# строки при неудачном порядке загрузки store log пишется в каталог ПОД точкой
+# монтирования: релей работает, а перенос узла увезёт не те данные.
+RequiresMountsFor=/var/opt/simplex /etc/opt/simplex
 
 [Service]
 Type=simple

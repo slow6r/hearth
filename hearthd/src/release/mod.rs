@@ -201,6 +201,50 @@ mod tests {
         assert!(public.starts_with(P256_SPKI_HEADER));
     }
 
+    /// Срок годности входит В ПОДПИСЬ — иначе он не защищал бы ни от чего.
+    ///
+    /// Подписывается не разобранный JSON, а байты файла, поэтому порядок в
+    /// `hearthctl release sign` обязан быть «сначала проставить срок, потом подписать».
+    /// До появления поля `expires` этот тест не компилировался бы.
+    #[test]
+    fn the_expiry_is_covered_by_the_signature() {
+        use crate::model::update::{resolve_expiry, UpdateManifest};
+
+        let (key, public) = generate().expect("generate");
+        let now = chrono::Utc::now();
+        let raw = format!(
+            r#"{{"v":1,"versionName":"7.0.1-h16","versionCode":387,"sha256":"{}",
+                 "file":"hearth.apk","issued":"{}"}}"#,
+            "a".repeat(64),
+            crate::model::fmt_ts(now)
+        );
+        let manifest = UpdateManifest::parse(raw.as_bytes()).expect("разбирается");
+        manifest.validate().expect("валиден");
+
+        let expiry = resolve_expiry(now, Some("30d"), None).expect("срок");
+        let body = manifest
+            .clone()
+            .with_expiry(expiry)
+            .to_file_bytes()
+            .expect("байты файла");
+        let signature = sign(&key, &body).expect("sign");
+        verify(&public, &body, &signature).expect("verify");
+
+        // Записанное читается обратно и содержит ровно назначенный срок. Сравниваем
+        // отформатированные отметки: в файл срок уходит с точностью до секунды — так
+        // пишет отметки времени весь проект, и клиент разбирает именно их.
+        let back = UpdateManifest::parse(&body).expect("разбирается");
+        assert_eq!(back.expires.as_str(), crate::model::fmt_ts(expiry));
+
+        // А продлить срок, не имея ключа (то есть на самом узле), нельзя: это уже
+        // другой документ, и подпись к нему не подходит.
+        let extended = manifest
+            .with_expiry(expiry + chrono::Duration::days(60))
+            .to_file_bytes()
+            .expect("байты файла");
+        assert!(verify(&public, &extended, &signature).is_err());
+    }
+
     #[test]
     fn base64_round_trips() {
         for len in 0..40usize {

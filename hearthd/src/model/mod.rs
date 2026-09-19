@@ -4,6 +4,8 @@
 //! ignorant of relay content (ТЗ §7.4).
 
 pub mod alert;
+/// Узкий и срочный доступ для аудита — см. модуль.
+pub mod audit_token;
 pub mod bundle;
 pub mod code;
 pub mod device;
@@ -11,6 +13,8 @@ pub mod health;
 pub mod invite;
 pub mod manifest;
 pub mod mode;
+/// Манифест обновлений приложения и его срок годности.
+pub mod update;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 

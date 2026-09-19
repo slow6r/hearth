@@ -49,6 +49,77 @@ pub struct BinaryEntry {
     /// Where it was obtained from (release URL or `built-from-source`).
     #[serde(default)]
     pub source: Option<String>,
+    /// Коммит, из которого собран запиненный файл (для своих бинарников).
+    ///
+    /// # Почему это НЕ участвует в проверке целостности
+    ///
+    /// Проверка отвечает на вопрос «файл на диске тот же, что запинен», и ответ на
+    /// него даёт только sha256. Начни сверять ещё и коммит — и любой перепин версии
+    /// (то есть штатное обновление) ронял бы узел в карантин из-за расхождения
+    /// строки, которую никто не измеряет. Здесь это ЗАПИСЬ О ПРОИСХОЖДЕНИИ: она
+    /// отвечает на другой вопрос — «а запинен-то файл из какого кода», — и её
+    /// ценность в том, что её можно сверить с `hearthd build-info` и с журналом
+    /// установки, а не в том, что из-за неё что-то останавливается.
+    ///
+    /// `None` у upstream-бинарников: у них внешний якорь доверия — GPG-подпись
+    /// релиза (см. `[upstream]`), и коммита в нашем смысле у них нет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Хеш дерева исходников той же сборки (`hearthd build-info`, поле
+    /// `tree_sha256`). Тем же полем сборка сверяется с чистым клоном коммита.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_sha256: Option<String>,
+}
+
+/// Провенанс сборки, записываемый рядом с хешем.
+///
+/// Отдельный тип, а не два параметра: коммит без хеша дерева (и наоборот) —
+/// наполовину заполненная запись, по которой ничего не проверишь.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryProvenance {
+    pub commit: String,
+    pub tree_sha256: String,
+}
+
+impl EntryProvenance {
+    /// Разобрать вывод `<binary> build-info --json`.
+    ///
+    /// Поля `unknown` — не провенанс: сборка без git не может сказать, из чего она
+    /// сделана, и записывать это в манифест значит выдавать незнание за запись.
+    pub fn from_build_info_json(raw: &str) -> Result<Self> {
+        let doc: serde_json::Value =
+            serde_json::from_str(raw).map_err(|e| Error::Parse(e.to_string()))?;
+        let field = |name: &str| -> Result<String> {
+            doc.get(name)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| Error::invalid(format!("в паспорте сборки нет поля `{name}`")))
+        };
+        let provenance = Self {
+            commit: field("commit")?,
+            tree_sha256: field("tree_sha256")?,
+        };
+        provenance.validate()?;
+        Ok(provenance)
+    }
+
+    /// Обе величины — шестнадцатеричные и нужной длины.
+    pub fn validate(&self) -> Result<()> {
+        if self.commit.len() != 40 || !self.commit.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(Error::invalid(format!(
+                "`{}` не похоже на коммит (40 hex)",
+                self.commit
+            )));
+        }
+        if self.tree_sha256.len() != 64 || !self.tree_sha256.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return Err(Error::invalid(format!(
+                "`{}` не похоже на sha256 дерева (64 hex)",
+                self.tree_sha256
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Result of checking one binary against the manifest.
@@ -71,7 +142,21 @@ pub enum IntegrityStatus {
     Mismatch,
     /// File is missing or unreadable.
     Missing,
+    /// Хеш в манифесте — нулевой плейсхолдер: этот бинарь ещё никто не пинил.
+    ///
+    /// Отдельный статус, а не `Mismatch`, потому что это разные события. «Хеш не
+    /// совпал» означает подмену и стоит карантина. «Хеш не записан» означает
+    /// невыполненный шаг установки — поставочный manifest.toml приходит с нулями во
+    /// ВСЕХ записях, включая `turnserver`, о котором печатный список шагов раньше не
+    /// упоминал. Свежеустановленный узел через час объявлял себе подмену и уходил в
+    /// карантин, переживающий перезагрузку, — то есть семья теряла связь из-за
+    /// пропущенной строки в инструкции, а не из-за атаки.
+    Unpinned,
 }
+
+/// Нулевой плейсхолдер: 64 нуля вместо хеша.
+pub const UNPINNED_SHA256: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 
 impl Manifest {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
@@ -120,6 +205,18 @@ impl Manifest {
 }
 
 fn verify_one(entry: &BinaryEntry) -> IntegrityFinding {
+    // «Ещё не запинено» решается ДО чтения файла: сам файл при этом может быть каким
+    // угодно — сказать про него нечего, пока в манифесте стоит плейсхолдер.
+    if entry.sha256 == UNPINNED_SHA256 {
+        return IntegrityFinding {
+            name: entry.name.clone(),
+            path: entry.path.clone(),
+            expected: entry.sha256.clone(),
+            // Измеренный хеш кладём рядом: его же оператор и запинит.
+            actual: sha256_file(&entry.path).ok(),
+            status: IntegrityStatus::Unpinned,
+        };
+    }
     match sha256_file(&entry.path) {
         Ok(actual) => {
             let status = if actual == entry.sha256 {
@@ -149,49 +246,124 @@ fn verify_one(entry: &BinaryEntry) -> IntegrityFinding {
 ///
 /// Line based on purpose: re-serializing through `toml` would drop every comment, and
 /// this file's comments are the operating instructions for verifying a release.
-pub fn pin(raw: &str, name: &str, sha256: &str, version: Option<&str>) -> Result<String> {
+///
+/// # Провенанс
+///
+/// `provenance = Some(..)` записывает рядом `commit` и `tree_sha256`; `None` —
+/// УДАЛЯЕТ их, если они там были. Второе важнее первого: перепин меряет новый файл, и
+/// оставленная от прежнего файла запись о происхождении превратилась бы в ложное
+/// утверждение — причём выглядящее убедительнее, чем его отсутствие. Отсутствие
+/// записи честно читается как «происхождение не заявлено».
+pub fn pin(
+    raw: &str,
+    name: &str,
+    sha256: &str,
+    version: Option<&str>,
+    provenance: Option<&EntryProvenance>,
+) -> Result<String> {
     if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(Error::invalid(format!("`{sha256}` is not a sha256 digest")));
     }
     let sha256 = sha256.to_ascii_lowercase();
+    if let Some(provenance) = provenance {
+        provenance.validate()?;
+    }
 
-    let mut out = Vec::new();
-    let mut in_target = false;
-    let mut seen_target = false;
+    let lines: Vec<&str> = raw.lines().collect();
+    let Some(name_line) = lines
+        .iter()
+        .position(|line| is_name_line(line.trim(), name))
+    else {
+        return Err(Error::NotFound(format!("manifest entry `{name}`")));
+    };
+    // Таблица записи: от её заголовка `[[binary]]` до следующего заголовка. Ключи
+    // ищутся по всей таблице, а не только ниже строки `name`: порядок ключей в TOML
+    // произволен, и запись, где `name` стоит вторым, правилась бы наполовину.
+    let start = lines[..name_line]
+        .iter()
+        .rposition(|line| line.trim_start().starts_with('['))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let end = lines[name_line + 1..]
+        .iter()
+        .position(|line| line.trim_start().starts_with('['))
+        .map(|i| name_line + 1 + i)
+        .unwrap_or(lines.len());
+
+    let mut block: Vec<String> = Vec::new();
     let mut replaced_sha = false;
+    let mut replaced_commit = false;
+    let mut replaced_tree = false;
+    // Куда дописывать ключ, которого в записи ещё нет: сразу после последней строки
+    // «ключ = значение». Не в конец блока — там могут быть пустые строки и
+    // комментарий, относящийся к СЛЕДУЮЩЕЙ записи.
+    let mut last_key: Option<usize> = None;
 
-    for line in raw.lines() {
+    for line in &lines[start..end] {
         let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            // Any new table ends the block we might have been in.
-            in_target = false;
-        }
-        if is_name_line(trimmed, name) {
-            in_target = true;
-            seen_target = true;
-        }
-        if in_target && trimmed.starts_with("sha256") {
-            out.push(format!("sha256 = \"{sha256}\""));
+        if trimmed.starts_with("sha256") {
+            block.push(format!("sha256 = \"{sha256}\""));
             replaced_sha = true;
+            last_key = Some(block.len() - 1);
             continue;
         }
-        if in_target && trimmed.starts_with("version") {
+        if trimmed.starts_with("version") {
             if let Some(version) = version {
-                out.push(format!("version = \"{version}\""));
+                block.push(format!("version = \"{version}\""));
+                last_key = Some(block.len() - 1);
                 continue;
             }
         }
-        out.push(line.to_string());
+        // Обе ветки ниже устроены одинаково: строка либо переписывается новым
+        // значением, либо ИСЧЕЗАЕТ (`provenance == None`) — см. доктрину в шапке.
+        if trimmed.starts_with("commit") {
+            if let Some(provenance) = provenance {
+                block.push(format!("commit = \"{}\"", provenance.commit));
+                replaced_commit = true;
+                last_key = Some(block.len() - 1);
+            }
+            continue;
+        }
+        if trimmed.starts_with("tree_sha256") {
+            if let Some(provenance) = provenance {
+                block.push(format!("tree_sha256 = \"{}\"", provenance.tree_sha256));
+                replaced_tree = true;
+                last_key = Some(block.len() - 1);
+            }
+            continue;
+        }
+        block.push((*line).to_string());
+        if !trimmed.starts_with('#') && trimmed.contains('=') {
+            last_key = Some(block.len() - 1);
+        }
     }
 
-    if !seen_target {
-        return Err(Error::NotFound(format!("manifest entry `{name}`")));
-    }
     if !replaced_sha {
         return Err(Error::invalid(format!(
             "manifest entry `{name}` has no sha256 line to update"
         )));
     }
+
+    if let Some(provenance) = provenance {
+        let mut fresh: Vec<String> = Vec::new();
+        if !replaced_commit {
+            fresh.push(format!("commit = \"{}\"", provenance.commit));
+        }
+        if !replaced_tree {
+            fresh.push(format!("tree_sha256 = \"{}\"", provenance.tree_sha256));
+        }
+        if !fresh.is_empty() {
+            let at = last_key.map(|i| i + 1).unwrap_or(block.len());
+            for (offset, line) in fresh.into_iter().enumerate() {
+                block.insert(at + offset, line);
+            }
+        }
+    }
+
+    let mut out: Vec<String> = lines[..start].iter().map(|l| (*l).to_string()).collect();
+    out.extend(block);
+    out.extend(lines[end..].iter().map(|l| (*l).to_string()));
+
     let mut text = out.join("\n");
     if raw.ends_with('\n') {
         text.push('\n');
@@ -239,6 +411,88 @@ mod tests {
         manifest.validate().expect("manifest is valid");
         assert!(manifest.binary("smp-server").is_some());
         assert!(manifest.binary("xftp-server").is_some());
+    }
+
+    #[test]
+    fn a_zero_placeholder_is_not_a_substitution() {
+        // Дефект 19: поставочный manifest.toml приходит с нулевыми плейсхолдерами во
+        // ВСЕХ записях, включая turnserver, которого печатный список шагов не называл.
+        // Через час integrity объявлял это подменой, и свежеустановленный узел уходил
+        // в карантин, переживающий перезагрузку, — из-за невыполненной строки
+        // инструкции, а не из-за атаки.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("turnserver");
+        std::fs::write(&file, b"turn").expect("write");
+
+        let entry = BinaryEntry {
+            name: "turnserver".into(),
+            path: file.clone(),
+            version: "distro".into(),
+            sha256: UNPINNED_SHA256.to_string(),
+            source: None,
+            commit: None,
+            tree_sha256: None,
+        };
+        let finding = verify_one(&entry);
+        assert_eq!(finding.status, IntegrityStatus::Unpinned);
+        // Измеренный хеш кладётся рядом: его же оператор и запинит.
+        assert_eq!(finding.actual, Some(sha256_file(&file).expect("hash")));
+
+        // Отсутствующий файл при нулевом плейсхолдере — тоже «ещё не запинено»:
+        // сказать про него нечего, пока в манифесте стоят нули.
+        let absent = BinaryEntry {
+            path: dir.path().join("нет-такого"),
+            ..entry.clone()
+        };
+        assert_eq!(verify_one(&absent).status, IntegrityStatus::Unpinned);
+
+        // А настоящее расхождение остаётся расхождением.
+        let tampered = BinaryEntry {
+            sha256: "a".repeat(64),
+            ..entry
+        };
+        assert_eq!(verify_one(&tampered).status, IntegrityStatus::Mismatch);
+    }
+
+    #[test]
+    fn the_shipped_manifest_ships_unpinned_not_tampered() {
+        // Поставочный манифест обязан читаться как «ещё не запинено» целиком: иначе
+        // первый же обход целостности на свежем узле объявит подмену.
+        let raw = include_str!("../../manifest.toml");
+        let manifest: Manifest = toml::from_str(raw).expect("manifest parses");
+        for entry in &manifest.binaries {
+            assert_eq!(
+                entry.sha256, UNPINNED_SHA256,
+                "поставочный `{}` обязан быть плейсхолдером, а не чужим хешем",
+                entry.name
+            );
+        }
+        // И turnserver в нём есть — именно о нём забывал печатный список шагов.
+        assert!(manifest.binary("turnserver").is_some());
+    }
+
+    #[test]
+    fn the_installer_names_every_binary_the_operator_has_to_pin() {
+        // Замечание 16. Печатный список шагов называл smp-server и xftp-server, а
+        // запись turnserver в манифесте есть и проверяется integrity наравне с
+        // остальными: оператор, выполнивший ровно напечатанное, через час получал
+        // карантин. Проверяется по списку записей, а не по трём именам, — иначе
+        // следующая добавленная запись повторит ту же историю.
+        let install = include_str!("../../deploy/install.sh");
+        let raw = include_str!("../../manifest.toml");
+        let manifest: Manifest = toml::from_str(raw).expect("manifest parses");
+        for entry in &manifest.binaries {
+            // hearthd и hearthctl установщик пинует сам: это не решение человека, а
+            // измерение того, что он же только что положил.
+            if entry.name == "hearthd" || entry.name == "hearthctl" {
+                continue;
+            }
+            assert!(
+                install.contains(&format!("manifest pin --name {}", entry.name)),
+                "install.sh обязан назвать `{}` в списке оставшихся шагов",
+                entry.name
+            );
+        }
     }
 
     #[test]
@@ -303,6 +557,8 @@ mod tests {
                     version: "v1".into(),
                     sha256: digest.clone(),
                     source: None,
+                    commit: None,
+                    tree_sha256: None,
                 },
                 BinaryEntry {
                     name: "tampered".into(),
@@ -310,6 +566,8 @@ mod tests {
                     version: "v1".into(),
                     sha256: "a".repeat(64),
                     source: None,
+                    commit: None,
+                    tree_sha256: None,
                 },
                 BinaryEntry {
                     name: "absent".into(),
@@ -317,6 +575,8 @@ mod tests {
                     version: "v1".into(),
                     sha256: "b".repeat(64),
                     source: None,
+                    commit: None,
+                    tree_sha256: None,
                 },
             ],
         };
@@ -331,7 +591,7 @@ mod tests {
     fn pins_a_hash_without_losing_comments() {
         let raw = include_str!("../../manifest.toml");
         let digest = "b".repeat(64);
-        let updated = pin(raw, "xftp-server", &digest, Some("v6.4.2")).expect("pin");
+        let updated = pin(raw, "xftp-server", &digest, Some("v6.4.2"), None).expect("pin");
 
         assert!(
             updated.contains("# hearth — pinned upstream artefacts"),
@@ -351,8 +611,114 @@ mod tests {
     #[test]
     fn pin_rejects_bad_input() {
         let raw = include_str!("../../manifest.toml");
-        assert!(pin(raw, "smp-server", "not-a-hash", None).is_err());
-        assert!(pin(raw, "does-not-exist", &"a".repeat(64), None).is_err());
+        assert!(pin(raw, "smp-server", "not-a-hash", None, None).is_err());
+        assert!(pin(raw, "does-not-exist", &"a".repeat(64), None, None).is_err());
+        // Наполовину заполненный провенанс — не провенанс.
+        let broken = EntryProvenance {
+            commit: "нет".into(),
+            tree_sha256: "c".repeat(64),
+        };
+        assert!(pin(raw, "hearthd", &"a".repeat(64), None, Some(&broken)).is_err());
+    }
+
+    /// Главное, ради чего затевался провенанс: запись `hearthd` должна называть
+    /// коммит. До правки полей `commit`/`tree_sha256` в схеме не было вовсе — тест
+    /// не компилировался бы.
+    #[test]
+    fn pinning_writes_the_provenance_and_leaves_the_neighbours_alone() {
+        let raw = include_str!("../../manifest.toml");
+        let digest = "b".repeat(64);
+        let provenance = EntryProvenance {
+            commit: "a".repeat(40),
+            tree_sha256: "c".repeat(64),
+        };
+        let updated = pin(raw, "hearthd", &digest, Some("0.1.0"), Some(&provenance)).expect("pin");
+
+        let manifest: Manifest = toml::from_str(&updated).expect("всё ещё разбирается");
+        let entry = manifest.binary("hearthd").expect("запись hearthd");
+        assert_eq!(entry.sha256, digest);
+        assert_eq!(entry.commit.as_deref(), Some(provenance.commit.as_str()));
+        assert_eq!(
+            entry.tree_sha256.as_deref(),
+            Some(provenance.tree_sha256.as_str())
+        );
+        assert_eq!(entry.source.as_deref(), Some("built-from-source"));
+
+        // Соседние записи не тронуты — ни хешем, ни новыми полями.
+        let smp = manifest.binary("smp-server").expect("запись smp-server");
+        assert_eq!(smp.sha256, "0".repeat(64));
+        assert!(smp.commit.is_none());
+        assert!(
+            updated.contains("# hearth — pinned upstream artefacts"),
+            "комментарии сохранены"
+        );
+
+        // И повторный пин того же не плодит дубликаты ключа.
+        let twice = pin(&updated, "hearthd", &digest, None, Some(&provenance)).expect("pin");
+        assert_eq!(twice.matches("commit = ").count(), 1);
+    }
+
+    /// Перепин без провенанса обязан УБРАТЬ прежнюю запись о происхождении: коммит
+    /// от старого файла рядом со свежим хешем — ложное утверждение, и выглядит оно
+    /// убедительнее, чем его отсутствие.
+    #[test]
+    fn re_pinning_without_provenance_drops_the_stale_one() {
+        let raw = include_str!("../../manifest.toml");
+        let provenance = EntryProvenance {
+            commit: "a".repeat(40),
+            tree_sha256: "c".repeat(64),
+        };
+        let with = pin(raw, "hearthd", &"b".repeat(64), None, Some(&provenance)).expect("pin");
+        assert!(with.contains("commit = "));
+
+        let without = pin(&with, "hearthd", &"d".repeat(64), None, None).expect("pin");
+        let manifest: Manifest = toml::from_str(&without).expect("разбирается");
+        let entry = manifest.binary("hearthd").expect("запись");
+        assert_eq!(entry.sha256, "d".repeat(64));
+        assert!(
+            entry.commit.is_none() && entry.tree_sha256.is_none(),
+            "устаревший провенанс обязан исчезнуть, а не пережить перепин"
+        );
+    }
+
+    /// Ключи в TOML идут в произвольном порядке, и запись, где `name` стоит не
+    /// первым, обязана правиться целиком. Прежний построчный проход смотрел только
+    /// НИЖЕ строки `name` и такую запись правил наполовину.
+    #[test]
+    fn a_name_key_below_the_hash_is_still_found() {
+        let raw = r#"[upstream]
+simplexmq_tag = "v6.4.2"
+simplex_chat_tag = "v6.4.2"
+gpg_identity = "chat@simplex.chat"
+reviewed = "2026-09-06"
+
+[[binary]]
+path = "/usr/local/bin/hearthd"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+name = "hearthd"
+version = "0.1.0"
+"#;
+        let updated = pin(raw, "hearthd", &"e".repeat(64), None, None).expect("pin");
+        let manifest: Manifest = toml::from_str(&updated).expect("разбирается");
+        assert_eq!(
+            manifest.binary("hearthd").expect("запись").sha256,
+            "e".repeat(64)
+        );
+    }
+
+    /// Паспорт, у которого поля `unknown`, — не провенанс: незнание не записывается
+    /// в манифест как знание.
+    #[test]
+    fn an_unknown_build_info_is_not_a_provenance() {
+        let good = r#"{"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                       "tree_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}"#;
+        assert!(EntryProvenance::from_build_info_json(good).is_ok());
+
+        let unknown = r#"{"commit":"unknown","tree_sha256":"unknown"}"#;
+        assert!(EntryProvenance::from_build_info_json(unknown).is_err());
+
+        assert!(EntryProvenance::from_build_info_json("не json").is_err());
+        assert!(EntryProvenance::from_build_info_json(r#"{"commit":"aaaa"}"#).is_err());
     }
 
     #[test]

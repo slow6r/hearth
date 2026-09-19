@@ -72,7 +72,11 @@ impl AdminRegistry {
         Ok(registry)
     }
 
-    pub fn save(&self) -> Result<()> {
+    /// Записать реестр. Видна только крейту намеренно: снаружи `admins.json`
+    /// меняется через [`update`](Self::update), то есть под блокировкой. Пока запись
+    /// была публичной, инвариант держался на договорённости в док-комментарии — и
+    /// `issue_admin` его нарушал, затирая отметку об отзыве.
+    pub(crate) fn save(&self) -> Result<()> {
         store::write_json_atomic_keep_owner(&self.path, self, store::MODE_STATE)
     }
 
@@ -214,6 +218,8 @@ pub fn init_ca(pki_dir: &Path, node_name: &str, address: IpAddr, force: bool) ->
     store::write_secret_keep_owner(pki_dir.join(SERVER_KEY), server_key.serialize_pem().trim())?;
 
     // Create an empty registry so the API has something to read.
+    // Единственная запись мимо `update`, и она обоснована: `ca init` выполняется до
+    // того, как существует хоть один админ, то есть конкурентов у неё нет по смыслу.
     let registry = AdminRegistry::load(pki_dir)?;
     registry.save()?;
 
@@ -260,24 +266,33 @@ pub fn issue_admin(pki_dir: &Path, name: &str, days: i64) -> Result<IssuedAdmin>
     let now = Utc::now();
     let expires = now + chrono::Duration::days(days);
 
-    let mut registry = AdminRegistry::load(pki_dir)?;
-    if registry
-        .admins
-        .iter()
-        .any(|a| a.name == name && a.revoked.is_none())
-    {
-        return Err(Error::Conflict(format!(
-            "an active admin certificate named `{name}` already exists; revoke it first"
-        )));
-    }
-    registry.admins.push(AdminCert {
-        name: name.to_string(),
-        fingerprint: fingerprint.clone(),
-        issued: now,
-        expires,
-        revoked: None,
-    });
-    registry.save()?;
+    // Реестр правится ТОЛЬКО под блокировкой, и загрузка обязана быть внутри неё.
+    // Без этого `ca revoke`, прошедший между чтением и записью, теряется: запись
+    // возвращает файл к снимку без отметки об отзыве, отозванный сертификат снова
+    // пускает в admin API, и обе команды рапортуют успех. Проверка дубликата имени
+    // тоже внутри: снаружи она проверяла бы устаревший снимок.
+    //
+    // Генерация ключа и подписание остались СНАРУЖИ: они занимают заметное время, а
+    // под блокировкой это удлиняло бы всем остальным окно «занят другой операцией».
+    AdminRegistry::update(pki_dir, |registry| {
+        if registry
+            .admins
+            .iter()
+            .any(|a| a.name == name && a.revoked.is_none())
+        {
+            return Err(Error::Conflict(format!(
+                "an active admin certificate named `{name}` already exists; revoke it first"
+            )));
+        }
+        registry.admins.push(AdminCert {
+            name: name.to_string(),
+            fingerprint: fingerprint.clone(),
+            issued: now,
+            expires,
+            revoked: None,
+        });
+        registry.save()
+    })?;
 
     Ok(IssuedAdmin {
         name: name.to_string(),
@@ -567,6 +582,67 @@ mod tests {
             .revoke("owner")
             .expect("revoke");
         issue_admin(dir.path(), "owner", 30).expect("re-issue after revocation");
+    }
+
+    #[test]
+    fn issuing_gives_up_on_a_busy_registry_instead_of_writing_past_the_lock() {
+        // Прямая проверка, что блокировка вообще берётся: пока `admins.lock` занят,
+        // `ca issue` обязан отказать, а не переписать файл поверх чужого изменения.
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_ca(dir.path(), "hearth-node", node(), false).expect("init");
+        let lock = dir.path().join(ADMINS).with_extension("lock");
+        std::fs::write(&lock, b"").expect("занять блокировку");
+
+        let outcome = issue_admin(dir.path(), "owner", 30);
+        assert!(
+            matches!(outcome, Err(Error::Conflict(_))),
+            "получено {outcome:?}"
+        );
+        let registry = AdminRegistry::load(dir.path()).expect("load");
+        assert!(
+            registry.admins.is_empty(),
+            "мимо занятой блокировки писать нельзя"
+        );
+    }
+
+    #[test]
+    fn issuing_does_not_lose_a_concurrent_revocation() {
+        // `hearthd` и `hearthctl` человек запускает из разных сессий, поэтому это
+        // межпроцессная гонка, и RwLock процесса от неё не спасает. Без файловой
+        // блокировки `ca issue` пишет снимок, загруженный ДО `ca revoke`, — отметка
+        // об отзыве пропадает, и отозванный сертификат снова пускает в admin API.
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_ca(dir.path(), "hearth-node", node(), false).expect("init");
+        let victim = issue_admin(dir.path(), "victim", 30).expect("victim");
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for i in 0..4 {
+                    issue_admin(dir.path(), &format!("admin{i}"), 30).expect("issue");
+                }
+            });
+            scope.spawn(|| {
+                AdminRegistry::update(dir.path(), |registry| registry.revoke("victim").map(|_| ()))
+                    .expect("revoke");
+            });
+        });
+
+        let registry = AdminRegistry::load(dir.path()).expect("reload");
+        assert!(
+            registry
+                .authorize(&victim.fingerprint, Utc::now())
+                .is_none(),
+            "отзыв не должен потеряться под выпуском другой личности"
+        );
+        assert_eq!(
+            registry
+                .admins
+                .iter()
+                .filter(|a| a.revoked.is_none())
+                .count(),
+            4,
+            "и ни один выпуск не должен затереть соседний"
+        );
     }
 
     #[test]

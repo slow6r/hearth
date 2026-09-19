@@ -4,12 +4,36 @@ Documentation=file:///opt/hearth/docs/architecture.md
 After=network-online.target nftables.service
 Wants=network-online.target
 Requires=nftables.service
+# Свои каталоги демон обязан ДОЖДАТЬСЯ. На боевом узле /var/opt/hearth — отдельная
+# точка монтирования (deploy/systemd/var-opt-hearth.mount: /var всего 12 GiB, данные
+# лежат на /srv), а /var/lib/hearth бывает вынесен так же. Без этой строки systemd
+# вправе запустить демон раньше монтирования, и он увидит пустой каталог состояния:
+# режим узла «потерян» (карантин снимается сам собой), журнал алертов начинается
+# заново, бэкап пишет мимо раздела — и всё это молча, поверх смонтированных позже
+# настоящих файлов. Гейтовый drop-in ждёт монтирования по той же причине
+# (relay.service.d-hearth-mode.conf); демон ждать был не обязан — это и был перекос.
+# Пути поставочные; install.sh дописывает сюда реальный paths.state_dir, если он на
+# узле другой.
+RequiresMountsFor=/var/lib/hearth /var/opt/hearth
 
 [Service]
 Type=exec
 ExecStart=/usr/local/bin/hearthd --config /etc/hearth/hearthd.toml run
 Restart=on-failure
 RestartSec=5s
+# Состояния, из которых узел сам не выйдет, НЕ перезапускаются.
+#
+# Провал preflight (нет /etc/hearth/pki/ca.pem, нет /etc/hearth/manifest.toml) не
+# лечится повторным запуском: файла не появится оттого, что процесс стартовал ещё раз.
+# С Restart=on-failure и RestartSec=5s это давало вечный цикл — каждые пять секунд
+# демон заново записывал карантин, заново останавливал релеи и заново слал алерт, а
+# `hearthctl mode clear --local` не выводил: следующий запуск возвращал запрет. При
+# интервале в 5 с StartLimitBurst (5 стартов за 10 с) не срабатывает никогда.
+#
+# 78 — EX_CONFIG из sysexits(3), «ошибка в конфигурации узла»; hearthd отдаёт его
+# ровно в этом случае (EXIT_TERMINAL в src/bin/hearthd.rs). Юнит останавливается один
+# раз, с причиной и инструкцией в журнале.
+RestartPreventExitStatus=78
 
 User=hearth
 Group=hearth

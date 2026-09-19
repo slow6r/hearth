@@ -71,11 +71,21 @@ pub struct Invite {
 }
 
 impl Invite {
-    /// Можно ли им ещё воспользоваться.
+    /// Можно ли им ещё воспользоваться — завести НОВОЕ устройство.
     pub fn is_usable_at(&self, now: DateTime<Utc>) -> bool {
-        self.revoked.is_none()
-            && self.expires.is_none_or(|expires| now < expires)
-            && (self.max_uses == 0 || self.uses < self.max_uses)
+        self.is_open_at(now) && (self.max_uses == 0 || self.uses < self.max_uses)
+    }
+
+    /// Открыта ли дверь — без учёта счётчика использований.
+    ///
+    /// Отзыв и срок ставит человек: это решения «закрыто», и обходить их нечем.
+    /// Счётчик — другое: он ограничивает, сколько НОВЫХ устройств войдёт, и к повтору
+    /// после потерянного ответа отношения не имеет — повтор ничего не заводит и
+    /// ничего не тратит. Если бы повтор требовал `is_usable_at`, идемпотентность не
+    /// работала бы ровно там, ради чего заводилась: у одноразового кода использование
+    /// к моменту повтора уже списано.
+    pub fn is_open_at(&self, now: DateTime<Utc>) -> bool {
+        self.revoked.is_none() && self.expires.is_none_or(|expires| now < expires)
     }
 
     /// Человекочитаемая причина отказа — для `invite list`, не для ответа клиенту.
@@ -147,7 +157,12 @@ impl InviteRegistry {
             claimed: Vec::new(),
         };
         self.invites.push(invite.clone());
-        self.save()?;
+        if let Err(e) = self.save() {
+            // Приглашение, которое есть в памяти и которого нет на диске, — это код,
+            // работающий до ближайшего перезапуска. Человеку его уже назвали.
+            self.invites.pop();
+            return Err(e);
+        }
         Ok(invite)
     }
 
@@ -168,6 +183,31 @@ impl InviteRegistry {
             let matches = crate::deviceapi::ct_eq(&invite.token, typed)
                 | crate::deviceapi::ct_eq(&invite.token, &canonical);
             if matches && invite.is_usable_at(now) {
+                found = Some(invite);
+            }
+        }
+        found
+    }
+
+    /// Найти приглашение, по которому это устройство уже завелось.
+    ///
+    /// Этим повтор доказывает своё право на bundle. Раньше повтор не смотрел на код
+    /// вовсе: любой непустой заголовок вместе с чужим `install_id` отдавал пароли
+    /// релеев. `install_id` секретом не задумывался — он лежит в открытом виде на
+    /// телефоне и целиком отдаётся в `GET /devices`, — поэтому предъявлять надо ТОТ
+    /// ЖЕ код, по которому устройство завелось.
+    ///
+    /// Сравнение в постоянное время и по всем записям — та же причина, что и в
+    /// [`find_usable`](Self::find_usable). Счётчик использований не смотрим, см.
+    /// [`Invite::is_open_at`].
+    pub fn find_repeat(&self, token: &str, device_id: &str, now: DateTime<Utc>) -> Option<&Invite> {
+        let typed = token.trim();
+        let canonical = crate::model::code::normalize(typed);
+        let mut found: Option<&Invite> = None;
+        for invite in &self.invites {
+            let matches = crate::deviceapi::ct_eq(&invite.token, typed)
+                | crate::deviceapi::ct_eq(&invite.token, &canonical);
+            if matches && invite.is_open_at(now) && invite.claimed.iter().any(|d| d == device_id) {
                 found = Some(invite);
             }
         }
@@ -200,15 +240,27 @@ impl InviteRegistry {
         }
         let index = found.ok_or_else(|| Error::NotFound("invite".to_string()))?;
         self.invites[index].uses += 1;
-        self.save()?;
+        if let Err(e) = self.save() {
+            // Отказ диска не должен съедать использование: снаружи он отличается от
+            // «неизвестный код» только типом ошибки, а для человека с одноразовым
+            // кодом разница между ними — войдёт он в контур или нет.
+            self.invites[index].uses -= 1;
+            return Err(e);
+        }
         Ok(self.invites[index].clone())
     }
 
     /// Вернуть занятое использование: заведение не состоялось.
     pub fn release(&mut self, id: &str) -> Result<()> {
         if let Some(invite) = self.invites.iter_mut().find(|i| i.id == id) {
+            let previous = invite.uses;
             invite.uses = invite.uses.saturating_sub(1);
-            self.save()?;
+            if let Err(e) = self.save() {
+                if let Some(invite) = self.invites.iter_mut().find(|i| i.id == id) {
+                    invite.uses = previous;
+                }
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -224,7 +276,13 @@ impl InviteRegistry {
             .find(|i| i.id == id)
             .ok_or_else(|| Error::NotFound(format!("invite `{id}`")))?;
         invite.claimed.push(device_id.to_string());
-        self.save()
+        if let Err(e) = self.save() {
+            if let Some(invite) = self.invites.iter_mut().find(|i| i.id == id) {
+                invite.claimed.pop();
+            }
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Отметить использование. Возвращает обновлённое приглашение.
@@ -237,7 +295,13 @@ impl InviteRegistry {
         invite.uses += 1;
         invite.claimed.push(device_id.to_string());
         let invite = invite.clone();
-        self.save()?;
+        if let Err(e) = self.save() {
+            if let Some(invite) = self.invites.iter_mut().find(|i| i.id == id) {
+                invite.uses -= 1;
+                invite.claimed.pop();
+            }
+            return Err(e);
+        }
         Ok(invite)
     }
 
@@ -248,11 +312,19 @@ impl InviteRegistry {
             .iter_mut()
             .find(|i| i.id == id)
             .ok_or_else(|| Error::NotFound(format!("invite `{id}`")))?;
+        let previous = invite.revoked;
         if invite.revoked.is_none() {
             invite.revoked = Some(Utc::now());
         }
         let invite = invite.clone();
-        self.save()?;
+        if let Err(e) = self.save() {
+            // Погашенный только в памяти код после перезапуска снова свежий, а
+            // человек уже услышал «отозвано».
+            if let Some(invite) = self.invites.iter_mut().find(|i| i.id == id) {
+                invite.revoked = previous;
+            }
+            return Err(e);
+        }
         Ok(invite)
     }
 }
@@ -454,6 +526,60 @@ mod tests {
         reg.note_claim(&invite.id, "mama-pixel").unwrap();
         let revoked = reg.revoke(&invite.id).unwrap();
         assert_eq!(revoked.claimed, vec!["mama-pixel"]);
+    }
+
+    #[test]
+    fn a_failed_write_does_not_spend_a_use() {
+        // Отказ диска снаружи отличается от «неизвестный код» только типом ошибки, а
+        // для человека с одноразовым кодом разница — войдёт он в контур или нет.
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = registry(&dir);
+        let invite = reg.create(1, 0, None).unwrap();
+        let path = dir.path().join("invites.json");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(reg.reserve(&invite.token, Utc::now()).is_err());
+        assert_eq!(
+            reg.get(&invite.id).unwrap().uses,
+            0,
+            "использование не должно списаться в память, минуя диск"
+        );
+    }
+
+    #[test]
+    fn a_repeat_may_present_a_spent_code_but_not_a_closed_one() {
+        // Повтор ничего не заводит и ничего не тратит, поэтому исчерпанный счётчик
+        // ему не помеха: у одноразового кода использование к этому моменту уже
+        // списано, и требовать «код ещё годен» — значит отменить идемпотентность
+        // ровно там, ради чего она есть. Отзыв и срок — другое дело.
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = registry(&dir);
+        let invite = reg.create(1, 1, None).unwrap();
+        let now = Utc::now();
+        reg.reserve(&invite.token, now).unwrap();
+        reg.note_device(&invite.id, "pixel-8").unwrap();
+
+        assert!(
+            reg.find_usable(&invite.token, now).is_none(),
+            "на НОВОЕ устройство код больше не годится"
+        );
+        assert!(reg.find_repeat(&invite.token, "pixel-8", now).is_some());
+        assert!(
+            reg.find_repeat(&invite.token, "iphone", now).is_none(),
+            "повтор обязан предъявлять код, по которому завелось именно это устройство"
+        );
+
+        let later = now + Duration::days(2);
+        assert!(
+            reg.find_repeat(&invite.token, "pixel-8", later).is_none(),
+            "просроченное приглашение повтор не принимает"
+        );
+        reg.revoke(&invite.id).unwrap();
+        assert!(
+            reg.find_repeat(&invite.token, "pixel-8", now).is_none(),
+            "отозванное приглашение повтор не принимает"
+        );
     }
 
     #[test]

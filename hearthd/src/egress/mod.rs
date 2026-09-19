@@ -140,14 +140,18 @@ impl EgressWatchdog {
                 .await;
         }
 
-        let egress = counters
-            .get(&cfg.egress_counter)
-            .copied()
-            .unwrap_or_default();
-        let input = counters
-            .get(&cfg.input_counter)
-            .copied()
-            .unwrap_or_default();
+        let reading = match read_counters(&counters, &cfg) {
+            Ok(reading) => reading,
+            Err(e) => {
+                // Ранний выход обязателен и по второй причине: иначе подставленный
+                // нуль уехал бы в базовую линию на диск, и при возвращении счётчика
+                // вся его накопленная величина стала бы «ростом» — фантомный
+                // critical-инцидент, который не гаснет без человека.
+                self.mark_blind(&e).await;
+                return;
+            }
+        };
+        let egress = reading.egress;
         let delta = nft::delta(self.baseline.egress, egress);
 
         let mut incidents = Vec::new();
@@ -197,8 +201,7 @@ impl EgressWatchdog {
                 .await;
         }
 
-        self.baseline.egress = egress;
-        self.baseline.input = input;
+        apply_reading(&mut self.baseline, &reading);
         self.persist_baseline();
 
         let mut snapshot = self.state.egress.write().await;
@@ -206,14 +209,14 @@ impl EgressWatchdog {
         snapshot.counters_readable = true;
         snapshot.egress_drop_packets = egress.packets;
         snapshot.egress_drop_bytes = egress.bytes;
-        snapshot.input_drop_packets = input.packets;
-        snapshot.input_drop_bytes = input.bytes;
+        if let Some(input) = reading.input {
+            // Прежние показания лучше выдуманных нулей: они хотя бы были измерены.
+            snapshot.input_drop_packets = input.packets;
+            snapshot.input_drop_bytes = input.bytes;
+        }
         snapshot.egress_drop_delta = snapshot.egress_drop_delta.saturating_add(delta.packets);
-        snapshot.informational = cfg
-            .informational_counters
-            .iter()
-            .filter_map(|name| counters.get(name).map(|c| (name.clone(), c.packets)))
-            .collect();
+        snapshot.informational = reading.informational.clone();
+        snapshot.missing_counters = reading.missing.clone();
         snapshot.incidents_total = self.baseline.incidents_total;
         if !incidents.is_empty() {
             snapshot.last_incident = incidents.last().map(|i| i.ts);
@@ -230,6 +233,7 @@ impl EgressWatchdog {
             snapshot.counters_readable,
             snapshot.scanner_ok,
             self.baseline.unresolved_since.is_some(),
+            !snapshot.missing_counters.is_empty(),
         );
     }
 
@@ -254,6 +258,7 @@ impl EgressWatchdog {
                         snapshot.counters_readable,
                         false,
                         self.baseline.unresolved_since.is_some(),
+                        !snapshot.missing_counters.is_empty(),
                     );
                 }
                 if !self.scan_alerted {
@@ -340,6 +345,7 @@ impl EgressWatchdog {
             snapshot.counters_readable,
             snapshot.scanner_ok,
             self.baseline.unresolved_since.is_some(),
+            !snapshot.missing_counters.is_empty(),
         );
     }
 
@@ -511,6 +517,73 @@ pub fn acknowledge_incident(
     Ok(was)
 }
 
+/// Показания одного опроса счётчиков.
+///
+/// `input` — `Option` не для удобства: отсутствующий счётчик не имеет значения, и
+/// подставить сюда нуль значило бы записать в базовую линию величину, которой никто
+/// не измерял.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CounterReading {
+    egress: nft::Counter,
+    input: Option<nft::Counter>,
+    informational: BTreeMap<String, u64>,
+    /// Имена из конфигурации, которых в выводе nft нет.
+    missing: Vec<String>,
+}
+
+/// Разложить вывод `nft list counters` по ожидаемым именам.
+///
+/// Вынесено из [`EgressWatchdog::poll_counters`] отдельной чистой функцией потому,
+/// что `Sys::run` всегда запускает настоящий процесс: подменить вывод `nft` в тесте
+/// нечем, а решение «ослеп / не ослеп» проверять надо.
+///
+/// `Err` — только для основного счётчика: без `egress_drop` сторож слеп, и это тот же
+/// случай, что и недоступная команда `nft`. Отсутствие остальных имён наблюдение не
+/// отменяет, но обязано быть видно.
+fn read_counters(
+    counters: &BTreeMap<String, nft::Counter>,
+    cfg: &crate::config::Egress,
+) -> std::result::Result<CounterReading, String> {
+    let egress = nft::require(
+        counters,
+        &cfg.egress_counter,
+        &cfg.nft_family,
+        &cfg.nft_table,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let mut missing = Vec::new();
+    let input = counters.get(&cfg.input_counter).copied();
+    if input.is_none() {
+        missing.push(cfg.input_counter.clone());
+    }
+    let mut informational = BTreeMap::new();
+    for name in &cfg.informational_counters {
+        match counters.get(name) {
+            Some(counter) => {
+                informational.insert(name.clone(), counter.packets);
+            }
+            // Раньше имя просто исчезало из вывода: строка «permitted:» становилась
+            // короче, и это был весь сигнал.
+            None => missing.push(name.clone()),
+        }
+    }
+    Ok(CounterReading {
+        egress,
+        input,
+        informational,
+        missing,
+    })
+}
+
+/// Перенести в базовую линию ТОЛЬКО измеренное.
+fn apply_reading(baseline: &mut Baseline, reading: &CounterReading) {
+    baseline.egress = reading.egress;
+    if let Some(input) = reading.input {
+        baseline.input = input;
+    }
+}
+
 /// Any drop or any foreign socket is critical; ТЗ §5.4 allows no grey zone.
 ///
 /// Отдельно — случай «проверить не удалось». Раньше он давал `Ok`: недоступный nft
@@ -518,16 +591,23 @@ pub fn acknowledge_incident(
 /// отдавал state:"ok" и `hearthctl egress` завершался нулём. Внешний контроль видел
 /// зелёное там, где не было никакой проверки. Неизвестность — это Degraded, и она
 /// обязана отличаться и от «всё чисто», и от «есть утечка».
+///
+/// `missing_counters` — то же самое одной ступенькой ниже: ruleset объявляет не все
+/// имена, которые перечислены в конфигурации. Отдельной ветки `Down` для пропавшего
+/// `egress_drop` здесь нет намеренно: до этой функции такой опрос не доходит, он
+/// уходит в `mark_blind`, и «сторож ослеп = Degraded» остаётся одним правилом, а не
+/// набором частных случаев.
 fn verdict(
     egress_delta: u64,
     foreign: usize,
     counters_readable: bool,
     scanner_ok: bool,
     unresolved_incident: bool,
+    missing_counters: bool,
 ) -> HealthState {
     if egress_delta > 0 || foreign > 0 || unresolved_incident {
         HealthState::Down
-    } else if !counters_readable || !scanner_ok {
+    } else if !counters_readable || !scanner_ok || missing_counters {
         HealthState::Degraded
     } else {
         HealthState::Ok
@@ -706,7 +786,7 @@ ESTAB  0 0 203.0.113.10:38000 142.250.185.78:443 users:((\"smp-server\",pid=812,
             "неподтверждённый инцидент обязан пережить перезапуск"
         );
         assert_eq!(
-            verdict(0, 0, true, true, restored.unresolved_since.is_some()),
+            verdict(0, 0, true, true, restored.unresolved_since.is_some(), false),
             HealthState::Down,
             "пока инцидент не подтверждён, статус остаётся красным"
         );
@@ -741,17 +821,113 @@ ESTAB  0 0 203.0.113.10:38000 142.250.185.78:443 users:((\"smp-server\",pid=812,
 
     #[test]
     fn verdict_is_binary() {
-        assert_eq!(verdict(0, 0, true, true, false), HealthState::Ok);
-        assert_eq!(verdict(1, 0, true, true, false), HealthState::Down);
-        assert_eq!(verdict(0, 1, true, true, false), HealthState::Down);
+        assert_eq!(verdict(0, 0, true, true, false, false), HealthState::Ok);
+        assert_eq!(verdict(1, 0, true, true, false, false), HealthState::Down);
+        assert_eq!(verdict(0, 1, true, true, false, false), HealthState::Down);
         // Ослепший сторож не имеет права отвечать «всё хорошо».
-        assert_eq!(verdict(0, 0, false, true, false), HealthState::Degraded);
-        assert_eq!(verdict(0, 0, true, false, false), HealthState::Degraded);
+        assert_eq!(
+            verdict(0, 0, false, true, false, false),
+            HealthState::Degraded
+        );
+        assert_eq!(
+            verdict(0, 0, true, false, false, false),
+            HealthState::Degraded
+        );
+        // Пропавшее из ruleset имя счётчика — та же слепота, только частичная.
+        assert_eq!(
+            verdict(0, 0, true, true, false, true),
+            HealthState::Degraded
+        );
         // Но настоящая утечка важнее неизвестности.
-        assert_eq!(verdict(1, 0, false, false, false), HealthState::Down);
+        assert_eq!(verdict(1, 0, false, false, false, false), HealthState::Down);
         // Неподтверждённый инцидент держит красное, даже когда сейчас всё чисто:
         // иначе перезапуск демона стирал бы след утечки.
-        assert_eq!(verdict(0, 0, true, true, true), HealthState::Down);
+        assert_eq!(verdict(0, 0, true, true, true, false), HealthState::Down);
+    }
+
+    fn counters(pairs: &[(&str, u64)]) -> BTreeMap<String, nft::Counter> {
+        pairs
+            .iter()
+            .map(|(name, packets)| {
+                (
+                    (*name).to_string(),
+                    nft::Counter {
+                        packets: *packets,
+                        bytes: *packets * 60,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_missing_egress_counter_blinds_the_watchdog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = crate::state::tests::test_config(dir.path()).egress;
+
+        let full = counters(&[
+            (&cfg.egress_counter, 0),
+            (&cfg.input_counter, 41),
+            ("app_egress", 7),
+            ("turn_egress", 9),
+            ("ntf_egress", 0),
+        ]);
+        let reading = read_counters(&full, &cfg).expect("полный набор");
+        assert!(reading.missing.is_empty());
+        assert_eq!(reading.informational.len(), 3);
+
+        // Без основного счётчика опрос обязан отказать, а не подставить нуль.
+        let mut without_egress = full.clone();
+        without_egress.remove(&cfg.egress_counter);
+        let err = read_counters(&without_egress, &cfg).expect_err("сторож ослеп");
+        assert!(err.contains(&cfg.egress_counter), "got {err}");
+
+        // Остальные имена наблюдение не отменяют, но обязаны быть видны.
+        let mut without_input = full.clone();
+        without_input.remove(&cfg.input_counter);
+        let reading = read_counters(&without_input, &cfg).expect("основной счётчик на месте");
+        assert_eq!(reading.missing, vec![cfg.input_counter.clone()]);
+        assert!(reading.input.is_none());
+
+        let mut without_app = full;
+        without_app.remove("app_egress");
+        let reading = read_counters(&without_app, &cfg).expect("основной счётчик на месте");
+        assert_eq!(reading.missing, vec!["app_egress".to_string()]);
+        assert_eq!(reading.informational.len(), 2);
+        assert!(
+            !reading.informational.contains_key("app_egress"),
+            "пропавшее имя не должно выглядеть как нуль"
+        );
+    }
+
+    #[test]
+    fn an_unmeasured_counter_does_not_move_the_baseline() {
+        // Половина дефекта NFT-3: базовая линия обязана хранить последнее ИЗМЕРЕННОЕ
+        // значение. Записанный туда нуль при возвращении счётчика даёт фантомный рост.
+        let measured = nft::Counter {
+            packets: 100,
+            bytes: 6000,
+        };
+        let mut baseline = Baseline {
+            egress: nft::Counter::default(),
+            input: measured,
+            ..Baseline::default()
+        };
+        let reading = CounterReading {
+            egress: nft::Counter {
+                packets: 5,
+                bytes: 300,
+            },
+            input: None,
+            informational: BTreeMap::new(),
+            missing: vec!["input_drop".into()],
+        };
+        apply_reading(&mut baseline, &reading);
+        assert_eq!(baseline.egress, reading.egress);
+        assert_eq!(
+            baseline.input, measured,
+            "неизмеренный счётчик не имеет права обнулить базовую линию"
+        );
     }
 
     #[tokio::test]
@@ -775,6 +951,39 @@ ESTAB  0 0 203.0.113.10:38000 142.250.185.78:443 users:((\"smp-server\",pid=812,
             .filter(|a| a.summary.contains("leak detector is blind"))
             .collect();
         assert_eq!(blind.len(), 1, "the blind-watchdog alert must not spam");
+    }
+
+    #[tokio::test]
+    async fn a_blind_poll_does_not_move_the_baseline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = crate::state::tests::test_config(dir.path());
+        let path = config.paths.egress_state_file();
+        std::fs::create_dir_all(&config.paths.state_dir).expect("mkdir");
+        let measured = Baseline {
+            egress: nft::Counter {
+                packets: 12,
+                bytes: 720,
+            },
+            input: nft::Counter {
+                packets: 41,
+                bytes: 2460,
+            },
+            incidents_total: 0,
+            unresolved_since: None,
+        };
+        crate::store::write_json_atomic(&path, &measured, crate::store::MODE_STATE).expect("write");
+
+        // `nft` на тестовой машине нет — сторож слеп, и записывать ему нечего.
+        let state = AppState::new(config, Sys::new(false)).expect("state");
+        let mut watchdog = EgressWatchdog::new(state.clone());
+        watchdog.poll_counters().await;
+
+        let after: Baseline = crate::store::read_json(&path).expect("read").expect("some");
+        assert_eq!(after.egress, measured.egress);
+        assert_eq!(
+            after.input, measured.input,
+            "слепой опрос не имеет права обнулить базовую линию"
+        );
     }
 
     #[test]

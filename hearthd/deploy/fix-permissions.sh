@@ -155,11 +155,18 @@ else
 fi
 
 echo
-echo "== состояние hearthd"
+echo "== состояние hearthd: каталоги и всё внутри — hearth:hearth"
+# Штатный выход из владельческих тупиков (docs/runbook-node-mode.md §7). Чинится
+# рекурсивно и именно с каталога: наследование владельца в hearthd берётся у КАТАЛОГА,
+# поэтому root-овый /var/lib/hearth молча раздаёт root:root всему, что в нём создаётся
+# (node-mode.json, alerts.jsonl, egress-incidents.jsonl) — локальные команды под sudo
+# отчитываются успехом, а демон под `hearth` эти файлы не читает. Режим на самом
+# каталоге ставится без -R: файлы внутри имеют каждый свой (0640 для состояния).
 for dir in /var/lib/hearth /var/opt/hearth; do
     if [[ -d "$dir" ]]; then
         run chown -R hearth:hearth "$dir"
-        note "$dir"
+        run chmod 0750 "$dir"
+        note "$dir (0750 hearth:hearth, рекурсивно по владельцу)"
     else
         skip "$dir отсутствует"
     fi

@@ -76,6 +76,29 @@ pub fn parse_counters(json: &str) -> Result<BTreeMap<String, Counter>> {
     Ok(counters)
 }
 
+/// Взять счётчик по имени, отказав, если его в выводе нет.
+///
+/// Раньше имя читалось через `unwrap_or_default()`, а `Counter::default()` — это
+/// `{0, 0}`. Для `egress_drop` нуль означает «всё чисто», то есть отсутствующее
+/// наблюдение подменялось благополучным. Проверка на пустой список счётчиков ловила
+/// только ПОЛНОСТЬЮ пустой вывод: устаревший ruleset, ручная правка или частичная
+/// загрузка дают непустой список без нужного имени.
+pub fn require(
+    counters: &BTreeMap<String, Counter>,
+    name: &str,
+    family: &str,
+    table: &str,
+) -> Result<Counter> {
+    counters.get(name).copied().ok_or_else(|| {
+        // Имя в тексте ошибки обязательно: оператору нужно знать, какой счётчик
+        // потерялся, а не только то, что «что-то не так».
+        Error::Parse(format!(
+            "в таблице {family} {table} не объявлен счётчик `{name}`; \
+             загруженный ruleset разошёлся с конфигурацией"
+        ))
+    })
+}
+
 /// Growth of a counter between two observations.
 ///
 /// Counters reset to zero when the ruleset is reloaded; a decrease is treated as a
@@ -121,6 +144,33 @@ mod tests {
             }
         );
         assert_eq!(counters.len(), 3);
+    }
+
+    /// Непустой вывод без нужного имени — это не нуль пакетов.
+    #[test]
+    fn a_listing_without_the_primary_counter_is_not_zero() {
+        // Ruleset, где egress_drop переименован или не загрузился, а остальное на месте.
+        const WITHOUT: &str = r#"{
+          "nftables": [
+            {"metainfo": {"version": "1.0.6", "json_schema_version": 1}},
+            {"counter": {"family": "inet", "name": "input_drop", "table": "hearth", "handle": 2,
+                         "packets": 41, "bytes": 2460}},
+            {"counter": {"family": "inet", "name": "smp_in", "table": "hearth", "handle": 3,
+                         "packets": 91011, "bytes": 12345678}}
+          ]
+        }"#;
+
+        let counters = parse_counters(WITHOUT).expect("список не пуст, разбор проходит");
+        assert!(!counters.contains_key("egress_drop"));
+        assert_eq!(
+            counters.get("egress_drop").copied().unwrap_or_default(),
+            Counter::default(),
+            "именно так отсутствие и выглядело как чистый нуль"
+        );
+
+        let err = require(&counters, "egress_drop", "inet", "hearth").unwrap_err();
+        assert!(err.to_string().contains("egress_drop"), "got {err}");
+        assert!(require(&counters, "input_drop", "inet", "hearth").is_ok());
     }
 
     #[test]
