@@ -64,6 +64,26 @@ actual fun HearthNodeSettingsView() {
     }
     SectionDividerSpaced()
 
+    // --- звонки ---------------------------------------------------------------------
+    //
+    // Ключи для TURN обновляются в фоне на старте, и сказать там некому. А ломается от
+    // сбитой даты именно звонок: сообщения идут, звонки «иногда не проходят», и причину
+    // ищут где угодно, только не в настройках даты. Поэтому строка живёт здесь — на том
+    // единственном экране, куда человека посылают, когда что-то не так.
+    val callNotice = remember { HearthPrefs.callNotice }
+    // Отдельно — то, что нашлось в самом списке серверов для звонков: чужие записи,
+    // откат к списку из bundle, неподтверждённый список. Раньше эти случаи кончались
+    // молчаливым отказом звонка, то есть человек узнавал о них только по тишине в
+    // трубке. См. HearthIcePolicy.kt.
+    val iceNotice = remember { HearthPrefs.iceNotice }
+    if (callNotice != null || iceNotice != null) {
+      SectionView("ЗВОНКИ") {
+        if (iceNotice != null) SectionTextFooter(iceNotice)
+        if (callNotice != null) SectionTextFooter(callNotice)
+      }
+      SectionDividerSpaced()
+    }
+
     // --- обновление ---------------------------------------------------------------
     SectionView("ОБНОВЛЕНИЕ") {
       SectionItemView(click = {
@@ -77,24 +97,28 @@ actual fun HearthNodeSettingsView() {
             busy.value = false
             return@launch
           }
-          val installed = installedVersionCode(context)
-          val checker = HearthUpdateChecker(
-            transport = transport,
-            installedVersionCode = installed,
-            pinnedKey = HearthReleaseKey.pinned(context),
-            verify = HearthReleaseKey::verify,
-            lastSeenIssued = ChatController.appPrefs.hearthLastManifestIssued.get()?.ifBlank { null },
-            rememberIssued = { ChatController.appPrefs.hearthLastManifestIssued.set(it) },
-          )
-          when (val r = checker.check()) {
-            is HearthUpdateCheck.UpToDate ->
-              status.value = "установлена последняя версия ($installed)"
+          val installed = HearthUpdates.installedVersionCode(context)
+          // Сборка проверяющего живёт в HearthUpdates: тот же набор нужен фоновому
+          // заходу, а два разных набора однажды разъедутся — и разъедутся молча.
+          val checker = HearthUpdates.checker(context, transport, installed)
+          val r = checker.check()
+          // Исход помним в одном месте на оба входа: нажатие кнопки — такая же попытка
+          // связаться с узлом, как и фоновый заход, и молчание узла считается по ним
+          // обоим. Раньше здесь стояли свои присваивания, и счёт попыток мимо них прошёл.
+          HearthUpdates.remember(r)
+          when (r) {
+            is HearthUpdateCheck.UpToDate -> {
+              status.value = listOfNotNull("установлена последняя версия ($installed)", r.notice)
+                .joinToString("\n\n")
+            }
             is HearthUpdateCheck.Failed ->
               status.value = "не вышло: ${r.reason}"
             is HearthUpdateCheck.Available -> {
-              status.value =
+              status.value = listOfNotNull(
                 "есть версия ${r.manifest.versionName}. Загрузка идёт в фоне — " +
-                  "приложение можно свернуть, прогресс виден в шторке."
+                  "приложение можно свернуть, прогресс виден в шторке.",
+                r.notice,
+              ).joinToString("\n\n")
               HearthUpdateService.start(context, r.manifest)
             }
           }
@@ -104,6 +128,16 @@ actual fun HearthNodeSettingsView() {
         Text("Проверить обновление", color = MaterialTheme.colors.primary)
       }
     }
+    // Молчание узла — тоже событие, и человек должен о нём узнать. Захваченный или
+    // просто сломанный узел не может подсунуть своё обновление, но может перестать
+    // отдавать любое, и телефон будет выглядеть нормально месяцами.
+    val silence = remember { HearthUpdates.silenceNotice() }
+    if (silence != null) SectionTextFooter(silence)
+    // Второй род молчания: узел ОТВЕЧАЕТ, но давно не публиковал нового. Это не отказ —
+    // обновления продолжают ставиться, — но именно так выглядит узел, переставший
+    // раздавать security-релизы, и человек должен это видеть.
+    val quiet = remember { HearthPrefs.updateNotice }
+    if (quiet != null) SectionTextFooter(quiet)
     SectionTextFooter(
       "Обновление приходит с вашего узла, не из магазина приложений. Скачивание идёт " +
         "в фоне и переживает сворачивание; установку Android всегда показывает своим " +
@@ -143,18 +177,5 @@ actual fun HearthNodeSettingsView() {
   }
 }
 
-/**
- * versionCode установленной сборки.
- *
- * Именно code, а не versionName: строку человек пишет руками и может ошибиться, а
- * code монотонен по требованию Android — на нём и строится сравнение «новее ли».
- */
-private fun installedVersionCode(context: android.content.Context): Int = runCatching {
-  val info = context.packageManager.getPackageInfo(context.packageName, 0)
-  if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-    info.longVersionCode.toInt()
-  } else {
-    @Suppress("DEPRECATION")
-    info.versionCode
-  }
-}.getOrDefault(0)
+// versionCode установленной сборки переехал в HearthUpdates: он нужен и фоновому
+// заходу, а второй такой же — это два места, где однажды поправят одно.

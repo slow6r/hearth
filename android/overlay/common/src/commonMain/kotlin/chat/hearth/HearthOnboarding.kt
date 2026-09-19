@@ -46,6 +46,22 @@ interface HearthBundleApplier {
    * сломаются при следующей ротации TURN-секрета (см. ADR 0010).
    */
   suspend fun rememberNode(node: HearthNodeApi?)
+
+  /**
+   * Запомнить хост, на который указывает САМ bundle.
+   *
+   * Это объявленный источник истины для вопроса «наш ли это узел». Он нужен отдельно от
+   * [rememberNode], потому что device API в bundle может не быть (`node = null`), а хост
+   * есть всегда — он разбирается из первого SMP-адреса, который человек отсканировал или
+   * получил по коду доступа лично.
+   *
+   * Раньше при пустом `hearthUpdateHost` «свой хост» выводился из базы — из первого не
+   * операторского SMP-сервера. Это самоподтверждение: база приезжает с архивом
+   * восстановления, в том числе чужим, и тогда чужой узел объявлял себя своим.
+   *
+   * `null` — хоста в bundle не нашлось. Пишем и его: устаревшее значение хуже пустого.
+   */
+  suspend fun rememberBundleHost(host: String?)
 }
 
 /**
@@ -67,6 +83,10 @@ class HearthOnboardingImporter(private val applier: HearthBundleApplier) {
       applier.applyNetworkDefaults(bundle.net)
       applier.rememberDevice(bundle.device, bundle.issued)
       applier.rememberNode(bundle.node)
+      // Хост объявляем явно и до того, как им начнут пользоваться. Иначе устройство с
+      // bundle без device API остаётся без «своего хоста», и его начинают добывать из
+      // базы — то есть из того, что могло приехать чужим архивом.
+      applier.rememberBundleHost(bundle.host())
       HearthImportResult.Applied(servers, bundle.device) as HearthImportResult
     }.getOrElse { error ->
       HearthImportResult.Rejected(error.message ?: "could not apply the bundle")
@@ -144,7 +164,10 @@ object HearthOnboardingText {
  * [hearthApplyPendingBundle] в первый момент, когда профиль появился.
  */
 suspend fun hearthAcceptBundle(payload: String): HearthImportResult {
-  val bundle = HearthBundle.parse(payload).getOrElse { error ->
+  // Возраст QR проверяется именно здесь — в момент, когда человек стоит перед кодом и
+  // может попросить новый. Дальше по пути (применение отложенного bundle) судить
+  // возрастом уже нельзя: телефон мог пролежать в ящике, а заведён он честно.
+  val bundle = HearthBundle.parse(payload, hearthNowEpochSeconds()).getOrElse { error ->
     return HearthImportResult.Rejected(error.message ?: "bundle is not valid")
   }
   return runCatching {

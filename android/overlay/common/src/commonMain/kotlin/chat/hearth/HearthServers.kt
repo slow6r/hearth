@@ -32,6 +32,13 @@ import chat.simplex.common.platform.chatModel
  * Уже созданное это не переносит само: адрес и неиспользованные приглашения, выданные
  * до исправления, остаются на тех серверах, где были созданы. Их заменяет
  * [hearthCleanUpForeignLinks].
+ *
+ * # Откуда берётся «заведено»
+ *
+ * Раньше — только из префа `hearthDeviceId`. Преф лежит в настройках устройства, а
+ * серверы — в базе, и восстановление архива переносит вторые без первого. Теперь
+ * решение принимает [hearthBringUpPlan] по трём признакам сразу, и «в базе есть свои
+ * серверы» — полноправный из них.
  */
 
 /** Выключить всех операторов. `true`, если какой-то был включён и выключился. */
@@ -51,17 +58,24 @@ suspend fun hearthDisableOperators(): Boolean {
 }
 
 /**
- * То же, но только для устройства, заведённого на узле.
+ * Выключить операторов там, где это уместно.
  *
- * Незаведённое не трогаем: без bundle у него нет своих серверов, и выключение
- * операторов оставило бы его вовсе без серверов — с ошибкой вместо экрана настройки.
+ * Уместность решает [hearthBringUpPlan], а не один преф. Ключевая оговорка прежняя и
+ * теперь записана кодом: на ЧИСТОЙ установке выключать операторов нельзя — своих
+ * серверов ещё нет, и телефон остался бы вовсе без серверов, с ошибкой вместо экрана
+ * настройки. А вот восстановленная из архива база свои серверы уже содержит, и там
+ * ждать заведения на узле незачем.
  */
-suspend fun hearthEnforceOwnServers(): Boolean {
-  if (!hearthEnrolled()) return false
-  return runCatching { hearthDisableOperators() }.getOrElse { e ->
-    Log.e("hearth", "не удалось проверить операторов: ${e.message}")
-    false
+suspend fun hearthEnforceOwnServers(): HearthStepOutcome = runCatching {
+  val plan = hearthCurrentBringUpPlan()
+  if (HearthBringUpStep.DisableOperators !in plan) {
+    return@runCatching HearthStepOutcome.NotApplicable
   }
+  hearthDisableOperators()
+  HearthStepOutcome.Done
+}.getOrElse { e ->
+  Log.e("hearth", "не удалось проверить операторов: ${e.message}")
+  HearthStepOutcome.Failed
 }
 
 /**
@@ -71,11 +85,13 @@ suspend fun hearthEnforceOwnServers(): Boolean {
  * телефону в сети, которая режет 5223, достаточно поставить обновление файлом:
  * до узла он ещё не достаёт, а достать должен как раз после этого шага.
  */
-suspend fun hearthMigrateRelayToWebPort(): Boolean {
-  if (!hearthEnrolled()) return false
-  val host = hearthRelayHost() ?: return false
+suspend fun hearthMigrateRelayToWebPort(): HearthStepOutcome {
+  if (HearthBringUpStep.MigrateRelayPort !in hearthCurrentBringUpPlan()) {
+    return HearthStepOutcome.NotApplicable
+  }
+  val host = hearthRelayHost() ?: return HearthStepOutcome.NotApplicable
   val rh = chatModel.remoteHostId()
-  val current = ChatController.getUserServers(rh) ?: return false
+  val current = ChatController.getUserServers(rh) ?: return HearthStepOutcome.Failed
   var changed = false
   val updated = current.map { entry ->
     if (entry.operator != null) entry
@@ -88,17 +104,18 @@ suspend fun hearthMigrateRelayToWebPort(): Boolean {
       }
     })
   }
-  if (!changed) return false
+  // Переводить нечего — это сделанная работа, а не осечка: повторять её незачем.
+  if (!changed) return HearthStepOutcome.Done
   val errors = ChatController.validateServers(rh, updated)?.first.orEmpty()
   if (errors.isNotEmpty()) {
     Log.e("hearth", "перевод на 443 отвергнут ядром: ${errors.joinToString()}")
-    return false
+    return HearthStepOutcome.Failed
   }
-  if (!ChatController.setUserServers(rh, updated)) return false
+  if (!ChatController.setUserServers(rh, updated)) return HearthStepOutcome.Failed
   // Пересобрать серверы агента сразу, не дожидаясь перезапуска.
   hearthDisableOperators()
   Log.w("hearth", "свой релей переведён на порт $HEARTH_RELAY_WEB_PORT")
-  return true
+  return HearthStepOutcome.Done
 }
 
 /**
@@ -108,7 +125,7 @@ suspend fun hearthMigrateRelayToWebPort(): Boolean {
  * фоне и не мешает старту. Неудача не страшна: следующий запуск попробует снова.
  */
 suspend fun hearthCleanUpForeignLinks() {
-  if (!hearthEnrolled()) return
+  if (HearthBringUpStep.CleanUpForeignLinks !in hearthCurrentBringUpPlan()) return
   val host = hearthRelayHost() ?: return
   runCatching { replaceForeignAddress(host) }
     .onFailure { Log.e("hearth", "адрес не заменён: ${it.message}") }
@@ -153,11 +170,81 @@ private suspend fun dropForeignInvitations(host: String) {
   if (foreign.isNotEmpty()) Log.w("hearth", "удалено приглашений на чужих серверах: ${foreign.size}")
 }
 
-/** Лежит ли ссылка на своём узле. Хост есть и в короткой ссылке, и внутри полной. */
+/**
+ * Лежит ли ссылка на своём узле.
+ *
+ * Разбор — общий ([hearthLinksAreOn]), а не «содержит подстроку», как было. Подстрока
+ * ошибалась в опасную сторону: `smp://…@myhearth.example.com.evil.net` считался своим.
+ */
 private fun CreatedConnLink.isOn(host: String): Boolean =
-  listOfNotNull(connShortLink, connFullLink).any { it.contains(host, ignoreCase = true) }
+  hearthLinksAreOn(listOfNotNull(connShortLink, connFullLink), host)
+
+/**
+ * Нужен ли этому устройству экран узла, прежде чем им можно пользоваться.
+ *
+ * Отдельная функция, а не проверка префа в ветке запуска: восстановленная из архива
+ * база приносит профиль и серверы, но НЕ приносит `hearthDeviceId`. Ветка запуска
+ * решала по одному признаку «профиля нет», поэтому такое устройство проходило мимо
+ * экрана узла — с чужими серверами и без учёта на узле. Решение принимает
+ * [hearthBringUpPlan], то же самое, что и у остальных шагов приведения: иначе они
+ * снова разойдутся во мнении, как уже расходились.
+ *
+ * Стоит денег ровно один локальный запрос списка серверов у ядра — в сеть здесь никто
+ * не ходит.
+ */
+suspend fun hearthNeedsNodeOnboarding(): Boolean =
+  HearthBringUpStep.Onboarding in hearthCurrentBringUpPlan()
+
+/**
+ * Что делать с этим устройством прямо сейчас.
+ *
+ * Все три признака берутся в одном месте, чтобы шаги не расходились во мнении: один
+ * решал по префу, другой по базе — так и появилась дыра с восстановлением архива.
+ */
+internal suspend fun hearthCurrentBringUpPlan(): Set<HearthBringUpStep> = hearthBringUpPlan(
+  enrolled = hearthEnrolled(),
+  dbHasUser = chatModel.currentUser.value != null,
+  dbHasOwnServers = hearthOwnServersInDb().isNotEmpty(),
+)
 
 private fun hearthEnrolled(): Boolean = !ChatController.appPrefs.hearthDeviceId.get().isNullOrBlank()
 
-/** Хост своего релея — тот же, что у device API узла, пришёл с bundle. */
-private fun hearthRelayHost(): String? = ChatController.appPrefs.hearthUpdateHost.get()?.ifBlank { null }
+/**
+ * Хост своего релея.
+ *
+ * # Почему только из объявленного, и никогда из базы
+ *
+ * Раньше при пустом `hearthUpdateHost` хост выводился из базы — брался первый НЕ
+ * операторский SMP-сервер. Довод был про восстановление архива: серверы приезжают с
+ * архивом, а преф нет. Но из этого же и следует дыра: «свой узел» определялся тем, что
+ * лежит в базе, а база могла приехать ЧУЖИМ архивом. Тогда чужой релей объявлял себя
+ * своим — и [hearthCleanUpForeignLinks], чья работа как раз в том, чтобы отличать своё
+ * от чужого, послушно удаляла НАШИ ссылки и оставляла чужие. Проверка подтверждала
+ * сама себя.
+ *
+ * Теперь источник истины ровно один и он объявлен: хост релея из применённого bundle
+ * ([HearthPrefs.bundleHost]) — то, что человек лично отсканировал или ввёл кодом.
+ * Адрес device API (`hearthUpdateHost`) остаётся лишь запасным, для устройств,
+ * заведённых сборкой, где bundleHost ещё не писался. Ни один из них из базы не
+ * выводится. Правило общее на весь клиент и живёт в [hearthOwnNodeHost].
+ *
+ * # Чем это платит семья
+ *
+ * `null` означает «своего узла не знаем», и шаги, которые на него опираются, молча не
+ * выполняются. Связь при этом не ломается: без хоста не делаются только перевод релея
+ * на 443 и чистка чужих ссылок, а сообщения и звонки идут по тому, что уже записано в
+ * ядре. Устройство в этом состоянии и так не заведено (`hearthDeviceId` пуст — оба
+ * префа пишутся одним и тем же применением bundle), поэтому [hearthBringUpPlan] уже
+ * ведёт его на экран узла: там оно получит и хост, и учёт.
+ */
+private fun hearthRelayHost(): String? =
+  hearthOwnNodeHost(HearthPrefs.bundleHost, ChatController.appPrefs.hearthUpdateHost.get())
+
+/** Адреса не операторских SMP-серверов из базы. Пусто — своих серверов нет. */
+private suspend fun hearthOwnServersInDb(): List<String> {
+  val rh = chatModel.remoteHostId()
+  val servers = runCatching { ChatController.getUserServers(rh) }.getOrNull() ?: return emptyList()
+  return servers
+    .filter { it.operator == null }
+    .flatMap { entry -> entry.smpServers.filter { !it.deleted }.map { it.server } }
+}

@@ -52,7 +52,10 @@ data class HearthTurnCredentials(
      * третьей стороне. Шифрование содержимого это не ломает — ломает ровно то
      * свойство, ради которого свой TURN и поднимали.
      */
-    fun parse(payload: String, expectedHost: String? = null): Result<HearthTurnCredentials> =
+    fun parse(
+      payload: String,
+      expectedHost: String? = null,
+    ): Result<HearthTurnCredentials> =
       runCatching {
         val creds = json.decodeFromString(serializer(), payload)
         require(creds.ice.isNotEmpty()) { "узел вернул пустой список ICE" }
@@ -62,9 +65,123 @@ data class HearthTurnCredentials(
         if (expectedHost != null) {
           creds.ice.forEach { requireIceEntry(it, expectedHost) }
         }
+        // Непустой, но НЕРАЗОБРАННЫЙ срок — отказ: это не «поля нет», а «поле есть, и
+        // оно не то». Часов для такого вывода не нужно, поэтому их здесь больше и нет.
+        require(creds.expires.isBlank() || hearthEpochSecondsOf(creds.expires) != null) {
+          "узел вернул непонятный срок годности кредов TURN: ${creds.expires}"
+        }
+        // А вот САМ срок отсюда ушёл: он больше не повод отвергнуть ответ узла. Что
+        // делать с просроченным сроком, решает [freshness] — и почему, написано там.
         creds
       }
+
+    /** За сколько до истечения считаем, что пора за новыми. Сутки. */
+    const val RENEW_AHEAD_SECONDS: Long = 24 * 60 * 60
+
+    /**
+     * Самый долгий срок, на который узел ВООБЩЕ выдаёт креды.
+     *
+     * На узле `turn.credential_ttl_secs` = 30 суток; берём сутки сверху на дорогу и на
+     * расхождение часов узла. Число служит не потолком, а линейкой: всё, что выходит за
+     * это окно в любую сторону, узел выдать не мог — значит расходятся часы, а не сроки.
+     */
+    const val MAX_CREDENTIAL_TTL_SECONDS: Long = 31L * 24 * 60 * 60
   }
+
+  /**
+   * Что не так со сроком годности — и чья это вина.
+   *
+   * # Почему просроченный срок больше не отказ
+   *
+   * Раньше здесь стоял жёсткий отказ при `at <= now`, и это тихо убивало звонки у
+   * человека с убежавшими часами. Узел выдаёт креды на 30 суток, то есть свежий ответ
+   * всегда имеет срок «сейчас по часам УЗЛА плюс месяц». Если он выглядит просроченным,
+   * значит часы ТЕЛЕФОНА ушли вперёд больше чем на месяц — и телефон, отвергая
+   * совершенно живые креды, оставлял семью без звонков без единого объяснения.
+   *
+   * Отказ здесь к тому же ничего не охраняет. Креды TURN — это пропуск на НАШ же
+   * ретранслятор, а не секрет; кому уходит медиа, решает не срок, а список ICE, и его
+   * проверяет [requireIceEntry] по хосту своего узла. Мёртвые креды coturn отвергнет
+   * сам, и хуже от их записи не станет: старые, лежащие в настройках, выданы РАНЬШЕ,
+   * то есть протухли ещё вернее. Поэтому свежий ответ узла записывается всегда, а
+   * разница между случаями идёт человеку словами.
+   *
+   * # Как отличить просрочку от сбитых часов
+   *
+   * По окну, в которое узел физически укладывается ([MAX_CREDENTIAL_TTL_SECONDS]):
+   *
+   *  - срок дальше в будущее, чем узел вообще выдаёт → часы телефона ОТСТАЛИ;
+   *  - срок в прошлом дальше, чем на весь срок жизни кредов → часы телефона УБЕЖАЛИ
+   *    вперёд (узел не хранит креды месяцами, он их каждый раз считает заново);
+   *  - срок в прошлом, но в пределах окна → похоже на правду: креды действительно
+   *    просрочены, а часы, скорее всего, в порядке.
+   *
+   * Пустой `expires` — не событие: узлы прежних версий его не присылают.
+   */
+  fun freshness(nowEpochSeconds: Long): HearthTurnFreshness {
+    if (expires.isBlank()) return HearthTurnFreshness.Fresh
+    // Неразобранный срок до сюда не доходит: его отвергает parse. Если позвали в обход
+    // разбора — считаем, что судить не по чему, и звонки не трогаем.
+    val at = hearthEpochSecondsOf(expires) ?: return HearthTurnFreshness.Fresh
+    if (at - nowEpochSeconds > MAX_CREDENTIAL_TTL_SECONDS) {
+      return HearthTurnFreshness.ClockDisagrees(
+        "Узел выдал ключи для звонков на срок до $expires — дальше, чем он вообще выдаёт. " +
+          "Похоже, дата на телефоне отстала: проверьте дату, время и часовой пояс. " +
+          "Звонки при этом работают."
+      )
+    }
+    if (at > nowEpochSeconds) return HearthTurnFreshness.Fresh
+    if (nowEpochSeconds - at > MAX_CREDENTIAL_TTL_SECONDS) {
+      return HearthTurnFreshness.ClockDisagrees(
+        "Ключи для звонков выглядят просроченными (срок до $expires), хотя узел выдал их " +
+          "только что. Похоже, дата на телефоне убежала вперёд: проверьте дату, время и " +
+          "часовой пояс. Звонки при этом работают."
+      )
+    }
+    return HearthTurnFreshness.Expired(
+      "Узел выдал просроченные ключи для звонков (срок до $expires). Звонки через " +
+        "ретранслятор могут не проходить — скажите об этом владельцу узла. " +
+        "Если дата на телефоне неверна, поправьте сначала её."
+    )
+  }
+
+  /**
+   * Пора ли за свежими.
+   *
+   * Смысл — идти за кредами ДО поломки звонков, а не после. Пустой или непонятный срок
+   * означает «не знаем, когда протухнет», и это тоже повод обновить.
+   */
+  fun expiresSoon(
+    nowEpochSeconds: Long,
+    aheadSeconds: Long = RENEW_AHEAD_SECONDS,
+  ): Boolean {
+    val at = hearthEpochSecondsOf(expires) ?: return true
+    return at - nowEpochSeconds <= aheadSeconds
+  }
+}
+
+/**
+ * Что со сроком годности кредов.
+ *
+ * Три исхода, а не два, и это главное: «креды просрочены» и «часы телефона расходятся с
+ * узлом» — разные беды с разными действиями. Первую чинит владелец узла, вторую человек
+ * сам за десять секунд в настройках даты. Раньше оба случая выглядели одинаково —
+ * никак: звонки просто переставали проходить.
+ */
+sealed interface HearthTurnFreshness {
+  /** Срок в порядке или его нет. */
+  data object Fresh : HearthTurnFreshness
+
+  /**
+   * Срок вне окна, в которое узел укладывается: разошлись часы.
+   *
+   * Звонки не блокируем — блокировать тут нечего, см. [HearthTurnCredentials.freshness].
+   * [message] написан человеку и прямо просит проверить дату.
+   */
+  data class ClockDisagrees(val message: String) : HearthTurnFreshness
+
+  /** Срок прошёл, и часы похожи на правду: это к владельцу узла. */
+  data class Expired(val message: String) : HearthTurnFreshness
 }
 
 /** Транспорт до узла за свежими кредами. Предъявляет токен УЖЕ заведённого устройства. */
@@ -77,9 +194,16 @@ interface HearthIceSink {
   suspend fun setIceServers(ice: List<String>)
 }
 
-/** Чем закончилось обновление — для лога, не для экрана. */
+/** Чем закончилось обновление. */
 sealed interface HearthTurnRefresh {
-  data class Updated(val count: Int) : HearthTurnRefresh
+  /**
+   * Список записан.
+   *
+   * @param notice то, что надо сказать ЧЕЛОВЕКУ, или `null`. Непустым он бывает, когда
+   *   со сроком годности что-то не так: раньше такой ответ просто отбрасывался, и
+   *   звонки молча переставали работать. Молча — и есть худшая часть.
+   */
+  data class Updated(val count: Int, val notice: String? = null) : HearthTurnRefresh
   /** Узел не настроен: устройство ещё не заведено, обновлять нечего. */
   data object NotConfigured : HearthTurnRefresh
   data class Failed(val reason: String) : HearthTurnRefresh
@@ -88,9 +212,16 @@ sealed interface HearthTurnRefresh {
 /**
  * Обновить ICE-серверы.
  *
- * Тихая операция: человеку она не показывается ни успехом, ни неудачей. Неудача не
- * повод для тревоги — узел мог быть недоступен ровно в момент запуска, а старые креды
- * ещё живы. Настройки при неудаче не трогаем.
+ * Почти тихая операция. Неудача человеку не показывается и показываться не должна —
+ * узел мог быть недоступен ровно в момент запуска, а старые креды ещё живы; настройки
+ * при неудаче не трогаем вовсе.
+ *
+ * Человеку говорят о двух вещах, и обе приходят в `notice` у [HearthTurnRefresh.Updated].
+ * Первая — срок годности кредов: подсказка, куда смотреть, если звонки перестанут
+ * проходить, чаще всего туда, где стоит дата. Вторая — что сверить полученные серверы
+ * было не с чем ([UNPINNED_NOTICE]): устройство без объявленного хоста узла звонки
+ * сохраняет, но прячет адрес хуже, и знать об этом человек должен заранее, а не по
+ * факту.
  */
 class HearthTurnRefresher(
   private val transport: HearthTurnTransport?,
@@ -101,21 +232,69 @@ class HearthTurnRefresher(
    * Берётся из уже применённого bundle — то есть из того, что человек сканировал или
    * получил по коду доступа, — а не из ответа, который мы сейчас проверяем. Иначе
    * проверка была бы самоподтверждающейся.
+   *
+   * `null` означает «своего узла это устройство не знает», и тогда ответ узла пишется
+   * в настройки без проверки хоста. Случай настоящий (bundle без device API), но
+   * умолчания у параметра НЕТ намеренно: раньше оно было, и получить обновление ICE
+   * без пина можно было, просто не дописав аргумент — молча и в любом новом месте
+   * вызова. Продуктовый путь хост передаёт (HearthTurn.android.kt), и отсутствие пина
+   * теперь надо написать буквой, а не забыть.
    */
-  private val expectedHost: String? = null,
+  private val expectedHost: String?,
+  /**
+   * Часы устройства.
+   *
+   * Функцией, а не значением: обновление зовётся на старте, а объект мог быть собран
+   * заметно раньше. Тесты подставляют своё.
+   */
+  private val nowEpochSeconds: () -> Long = ::hearthNowEpochSeconds,
 ) {
   suspend fun refresh(): HearthTurnRefresh {
     val transport = transport ?: return HearthTurnRefresh.NotConfigured
     val payload = transport.turnCredentials().getOrElse { e ->
       return HearthTurnRefresh.Failed(e.message ?: "узел недоступен")
     }
-    val creds = HearthTurnCredentials.parse(payload, expectedHost).getOrElse { e ->
-      return HearthTurnRefresh.Failed(e.message ?: "ответ узла не разобран")
+    val now = nowEpochSeconds()
+    // Отказ здесь — это ответ, который НЕЛЬЗЯ использовать: чужой хост в ICE, пустой
+    // список, мусор вместо JSON. Срок годности в этот список больше не входит.
+    val creds = HearthTurnCredentials.parse(payload, expectedHost)
+      .getOrElse { e ->
+        return HearthTurnRefresh.Failed(e.message ?: "ответ узла не разобран")
+      }
+    // Срок разбираем ОТДЕЛЬНО и не превращаем в отказ. Отвергнуть свежий ответ узла
+    // из-за сбитых часов телефона — значит отнять у семьи звонки ради проверки, которая
+    // ничего не охраняет: маршрут медиа держит пин по хосту, а мёртвый пропуск coturn
+    // отвергнет и сам. Лежащие в настройках старые креды выданы раньше этих, то есть
+    // протухли вернее. Поэтому пишем, а разницу говорим словами.
+    val expiry = when (val state = creds.freshness(now)) {
+      is HearthTurnFreshness.Fresh -> null
+      is HearthTurnFreshness.ClockDisagrees -> state.message
+      is HearthTurnFreshness.Expired -> state.message
     }
+    // Хоста нет — значит записанный список никто не сверял. Отказываться нельзя (это
+    // обычное устройство с bundle без device API, и звонки ему нужны), но и молчать
+    // нельзя: ровно на этом списке потом не включится relay-only, и человек должен
+    // понимать, почему собеседник видит адрес его телефона.
+    val unpinned = if (expectedHost == null) UNPINNED_NOTICE else null
+    val notice = listOfNotNull(expiry, unpinned).joinToString("\n\n").ifEmpty { null }
     return runCatching {
       sink.setIceServers(creds.ice)
-      HearthTurnRefresh.Updated(creds.ice.size) as HearthTurnRefresh
+      HearthTurnRefresh.Updated(creds.ice.size, notice) as HearthTurnRefresh
     }.getOrElse { e -> HearthTurnRefresh.Failed(e.message ?: "не удалось записать настройки") }
+  }
+
+  companion object {
+    /**
+     * Что говорят человеку, когда сверять серверы звонков не с чем.
+     *
+     * Текст называет следствие, а не внутреннее устройство: для человека важно, что
+     * звонки работают, что разговор зашифрован и что адрес телефона при этом видно.
+     */
+    const val UNPINNED_NOTICE =
+      "Этот телефон не знает адреса домашнего узла, поэтому серверы для звонков, " +
+        "которые он получил, проверить нечем. Звонки работают и разговор зашифрован, " +
+        "но идут они напрямую, и собеседник может увидеть адрес вашего устройства. " +
+        "Подключите телефон к узлу заново на экране «Узел»."
   }
 }
 

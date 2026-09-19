@@ -9,6 +9,7 @@ import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.OutlinedTextField
 import androidx.compose.material.Text
+import androidx.compose.material.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -17,6 +18,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import chat.simplex.common.model.ChatController
+import chat.simplex.common.platform.chatModel
 import chat.simplex.common.ui.theme.DEFAULT_PADDING
 import chat.simplex.common.views.onboarding.OnboardingStage
 import kotlinx.coroutines.launch
@@ -47,6 +49,11 @@ fun HearthImportView() {
   val busy = remember { mutableStateOf(false) }
   val code = remember { mutableStateOf("") }
   val scope = rememberCoroutineScope()
+  // Профиль уже есть — значит это не первый запуск, а восстановление из архива или
+  // очистка настроек приложения системой. Человек в этом случае старый, переписка у
+  // него на месте, и экран обязан выглядеть иначе: тот же «Код доступа» посреди
+  // рабочего дня читается как «приложение забыло всё». См. HearthNodeSetup.
+  val restored = remember { chatModel.currentUser.value != null }
 
   Column(
     Modifier
@@ -57,7 +64,7 @@ fun HearthImportView() {
   ) {
     Spacer(Modifier.height(DEFAULT_PADDING * 2))
     Text(
-      HearthOnboardingText.CODE_TITLE,
+      if (restored) HearthNodeText.RESTORED_TITLE else HearthOnboardingText.CODE_TITLE,
       style = MaterialTheme.typography.h1,
       textAlign = TextAlign.Center,
     )
@@ -65,7 +72,7 @@ fun HearthImportView() {
 
     if (node != null) {
       Text(
-        HearthOnboardingText.CODE_BODY,
+        if (restored) HearthNodeText.RESTORED_BODY else HearthOnboardingText.CODE_BODY,
         style = MaterialTheme.typography.body1,
         textAlign = TextAlign.Center,
       )
@@ -120,8 +127,25 @@ fun HearthImportView() {
             scope.launch {
               when (val result = hearthClaimWithCode(code.value)) {
                 is HearthClaimResult.Applied -> {
-                  // Дальше — обычный онбординг upstream, без единой правки.
-                  ChatController.appPrefs.onboardingStage.set(OnboardingStage.Step1_SimpleXInfo)
+                  // Цепочка приведения могла в этом процессе уже отработать и
+                  // пометиться выполненной — тогда принятый сейчас bundle применить
+                  // было бы некому до перезапуска приложения.
+                  HearthStartup.reset()
+                  if (chatModel.currentUser.value != null) {
+                    // Профиль уже есть: это восстановленная из архива база, которую
+                    // человек привёл сюда с плашки над списком чатов (UPD-9).
+                    // Вести её в стоковый онбординг нельзя — там создают ПЕРВЫЙ
+                    // профиль, а он уже создан. Ядро здесь тоже уже запущено, второй
+                    // раз startChat никто не позовёт, поэтому приведение запускаем сами.
+                    hearthAfterChatStarted()
+                    // Устройство заведено — плашке больше не о чем напоминать.
+                    HearthNodeSetup.done()
+                    ChatController.appPrefs.onboardingStage.set(OnboardingStage.OnboardingComplete)
+                  } else {
+                    // Чистая установка: дальше — обычный онбординг upstream, без
+                    // единой правки.
+                    ChatController.appPrefs.onboardingStage.set(OnboardingStage.Step1_SimpleXInfo)
+                  }
                 }
                 // Адрес узла был, иначе мы бы сюда не попали; на всякий случай
                 // ведём себя как при отказе, а не падаем.
@@ -163,6 +187,22 @@ fun HearthImportView() {
         style = MaterialTheme.typography.body2,
         textAlign = TextAlign.Center,
       )
+    }
+
+    // Выход. Только для устройства с уже существующей перепиской: на чистой установке
+    // выходить некуда — там за этим экраном нет ни профиля, ни чатов.
+    //
+    // Без этой кнопки экран был ловушкой: код доступа требует и владельца узла, и
+    // доступного узла, а «узел недоступен неделю» — обычное дело. Человек с рабочей
+    // базой не видел при этом ни одного чата. Ровно тот случай, когда строгость
+    // отнимает связь и не защищает ничего: переписка уже лежит на устройстве.
+    if (restored && !busy.value) {
+      Spacer(Modifier.height(DEFAULT_PADDING))
+      TextButton(onClick = {
+        ChatController.appPrefs.onboardingStage.set(OnboardingStage.OnboardingComplete)
+      }) {
+        Text(HearthNodeText.RESTORED_LATER, color = MaterialTheme.colors.secondary)
+      }
     }
 
     Spacer(Modifier.height(DEFAULT_PADDING))

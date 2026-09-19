@@ -131,12 +131,114 @@ class HearthBundleTest {
     assertEquals(null, applier.node)
   }
 
+  @Test
+  fun theOwnHostIsDeclaredAtImportAndNotGuessedLater() = kotlinx.coroutines.runBlocking {
+    // UPD-9. Раньше «свой хост» при пустом адресе device API выводился из базы — из
+    // первого не операторского SMP-сервера. База приезжает с архивом восстановления,
+    // в том числе чужим, и тогда чужой узел объявлял себя своим. Теперь хост объявляет
+    // применение bundle — того самого, который человек получил лично.
+    val applier = RecordingApplier()
+    assertTrue(HearthOnboardingImporter(applier).import(valid) is HearthImportResult.Applied)
+    assertEquals(1, applier.bundleHostCalls, "хост обязан объявляться при каждом применении")
+    assertEquals(host, applier.bundleHost)
+  }
+
+  @Test
+  fun aBundleThatDeclaresNoHostDeclaresNothing() = kotlinx.coroutines.runBlocking {
+    // Хост берётся из первого SMP-адреса. Bundle без разбираемого адреса до применения
+    // не доходит (validate его отвергает) — и это правильный порядок: пустой хост лучше
+    // угаданного, но ещё лучше не пускать такой bundle дальше разбора вовсе.
+    val applier = RecordingApplier()
+    val payload = valid.replace("smp://fp1:pass1@relay.example.org:5223", "не-адрес")
+    assertTrue(HearthOnboardingImporter(applier).import(payload) is HearthImportResult.Rejected)
+    assertEquals(0, applier.bundleHostCalls)
+  }
+
+  // --- срок годности QR (UPD-6) ------------------------------------------------------
+
+  // 2026-09-08, то есть через двое суток после issued в фикстуре.
+  private val soonAfterIssue = hearthEpochSecondsOf("2026-09-08T12:00:00Z")!!
+
+  @Test
+  fun aFreshQrIsAccepted() {
+    assertTrue(HearthBundle.parse(valid, soonAfterIssue).isSuccess)
+  }
+
+  @Test
+  fun aQrOlderThanTheLimitIsRefused() {
+    // Сфотографированный год назад QR оставался рабочим, хотя в нём пароли релеев.
+    val old = soonAfterIssue + (HearthBundle.MAX_AGE_DAYS + 1) * HEARTH_SECONDS_PER_DAY
+    val result = HearthBundle.parse(valid, old)
+    assertTrue(result.isFailure)
+    // Текст обязан быть действием, а не диагнозом: человек стоит перед кодом.
+    assertEquals(
+      HearthBundle.staleMessage("2026-09-06T12:00:00Z"),
+      result.exceptionOrNull()?.message,
+      "отказ по возрасту обязан идти человеку тем самым текстом",
+    )
+  }
+
+  @Test
+  fun theStaleQrRefusalReadsLikeAnExplanationAndNotLikeACrash() {
+    // Строгости к возрасту QR в HEAD не было, и первое, что она дала, — человек на
+    // первом экране нового телефона видел строку, похожую на внутреннюю ошибку, и
+    // решал, что приложение сломано. Проверяем не «есть слово», а всё, без чего текст
+    // не работает: что случилось, что приложение цело, что делать и куда смотреть,
+    // если дата на телефоне врёт.
+    val message = HearthBundle.staleMessage("2026-09-06T12:00:00Z")
+    assertTrue(message.contains("2026-09-06"), message)
+    assertTrue(message.contains("устарел"), message)
+    assertTrue(message.contains("в порядке"), message)
+    assertTrue(message.contains("новый"), message)
+    assertTrue(message.contains("дата на телефоне"), message)
+    // И ни следа разбора: ни времени с часовым поясом, ни слова «bundle».
+    assertFalse(message.contains("T12:00:00Z"), message)
+    assertFalse(message.lowercase().contains("bundle"), message)
+  }
+
+  @Test
+  fun aQrRightOnTheLimitIsStillAccepted() {
+    val edge = soonAfterIssue + HearthBundle.MAX_AGE_DAYS * HEARTH_SECONDS_PER_DAY - 2 * HEARTH_SECONDS_PER_DAY
+    assertTrue(HearthBundle.parse(valid, edge).isSuccess)
+  }
+
+  @Test
+  fun aQrFromTheFutureIsRefusedButBlamesTheClock() {
+    // Доверенных часов нет: свежий телефон вполне может стоять с неверной датой, и
+    // человек должен знать, куда смотреть, а не пересканировать годный QR по кругу.
+    val behind = soonAfterIssue - 10 * HEARTH_SECONDS_PER_DAY
+    val result = HearthBundle.parse(valid, behind)
+    assertTrue(result.isFailure)
+    val message = result.exceptionOrNull()?.message.orEmpty()
+    assertTrue(message.contains("сбита дата"), message)
+    assertTrue(message.contains("часовой пояс"), message)
+  }
+
+  @Test
+  fun aQrWithAnUnreadableIssueDateIsRefused() {
+    val payload = valid.replace("2026-09-06T12:00:00Z", "давно")
+    assertTrue(HearthBundle.parse(payload, soonAfterIssue).isFailure)
+    // Без часов возраст не судим — тогда и непонятная дата не повод отказывать.
+    assertTrue(HearthBundle.parse(payload).isSuccess)
+  }
+
+  @Test
+  fun withoutAClockTheAgeIsNotJudged() {
+    // Применение УЖЕ принятого bundle возрастом не судит: телефон мог пролежать в
+    // ящике, а заведён он честно. Проверяет возраст тот, кто принимает QR от человека.
+    val old = soonAfterIssue + 365 * HEARTH_SECONDS_PER_DAY
+    assertTrue(HearthBundle.parse(valid).isSuccess)
+    assertTrue(HearthBundle.parse(valid, old).isFailure)
+  }
+
   private class RecordingApplier : HearthBundleApplier {
     var serversCalls = 0
     var defaultsCalls = 0
     var deviceId: String? = null
     var node: HearthNodeApi? = null
     var nodeCalls = 0
+    var bundleHost: String? = null
+    var bundleHostCalls = 0
 
     override suspend fun setServers(servers: HearthServers) {
       serversCalls++
@@ -153,6 +255,11 @@ class HearthBundleTest {
     override suspend fun rememberNode(node: HearthNodeApi?) {
       this.node = node
       nodeCalls++
+    }
+
+    override suspend fun rememberBundleHost(host: String?) {
+      this.bundleHost = host
+      bundleHostCalls++
     }
   }
 }

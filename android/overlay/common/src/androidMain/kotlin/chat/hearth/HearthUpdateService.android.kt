@@ -97,7 +97,16 @@ class HearthUpdateService : Service() {
           // Здесь же отбрасываются случаи, которые система пропустила бы молча:
           // другой пакет, версия не та, что обещал узел, откат на старую.
           val apk = java.io.File(result.path)
-          when (val verdict = HearthApkGuard.inspect(applicationContext, apk, versionCode)) {
+          // runCatching вокруг осмотра: он лезет в PackageManager, а тот на разных
+          // версиях Android умеет бросать то, чего мы не предусмотрели. Раньше бросок
+          // уходил из scope.launch без перехвата и ронял приложение ровно тогда, когда
+          // APK уже скачан. Несовместимость обязана быть громким отказом, а не падением.
+          val verdict = runCatching {
+            HearthApkGuard.inspect(applicationContext, apk, versionCode)
+          }.getOrElse { e ->
+            HearthApkRules.Verdict.Refuse("проверить файл не удалось: ${e.message ?: e::class.simpleName}")
+          }
+          when (verdict) {
             is HearthApkRules.Verdict.Allow ->
               notify(doneNotification(readyText(version), result.path))
 

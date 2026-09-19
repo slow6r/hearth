@@ -1,6 +1,7 @@
 package chat.hearth
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -98,15 +99,26 @@ private fun HearthStickerPickerView(onPicked: (URI, String) -> Unit) {
           }
         }
         val current = pack.value
-        if (current == null) {
-          Note("Загружаем набор…")
-        } else {
-          LazyVerticalGrid(
-            columns = GridCells.Fixed(4),
-            modifier = Modifier.fillMaxSize().padding(horizontal = DEFAULT_PADDING / 2),
-          ) {
-            items(current.stickers, key = { it.file }) { st ->
-              StickerCell(context, transport, current.name, st, onPicked)
+        when {
+          current == null -> Note("Загружаем набор…")
+          // Разбор выкинул всё: набор выложен без sha256 (старый импорт) или испорчен.
+          // Пустая сетка молча выглядела бы как «стикеры кончились» — говорим прямо, что
+          // делать: перевыложить набор с узла, дайджесты появятся вместе с ним.
+          current.stickers.isEmpty() && current.dropped > 0 ->
+            Note("Набор нельзя проверить: в описании нет контрольных сумм. Его надо перевыложить с узла.")
+          current.stickers.isEmpty() -> Note("В наборе нет стикеров.")
+          else -> {
+            val name = current.name
+            LazyVerticalGrid(
+              columns = GridCells.Fixed(4),
+              modifier = Modifier.fillMaxSize().padding(horizontal = DEFAULT_PADDING / 2),
+            ) {
+              // Ключ с именем набора: одинаковые имена файлов есть в каждом наборе, и при
+              // переключении вкладок ключи двух разных наборов совпали бы. Уникальность
+              // внутри набора держит разбор (distinctBy), дубликат ключа роняет Compose.
+              items(current.stickers, key = { name + "/" + it.file }) { st ->
+                StickerCell(context, transport, name, st, onPicked)
+              }
             }
           }
         }
@@ -125,9 +137,20 @@ private fun StickerCell(
 ) {
   val bitmap = remember(packName, st.file) { mutableStateOf<ImageBitmap?>(null) }
   val file = remember(packName, st.file) { mutableStateOf<File?>(null) }
+  // Отдельно от bitmap: ячейка, которую не удалось получить или развернуть, должна
+  // показать, что она сдалась, а не крутить индикатор до конца времён.
+  val failed = remember(packName, st.file) { mutableStateOf(false) }
   LaunchedEffect(packName, st.file) {
-    val f = HearthStickerStore.file(context, transport, packName, st).getOrNull() ?: return@LaunchedEffect
-    val bm = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(f.absolutePath)?.asImageBitmap() } ?: return@LaunchedEffect
+    val f = HearthStickerStore.file(context, transport, packName, st).getOrNull()
+    if (f == null) {
+      failed.value = true
+      return@LaunchedEffect
+    }
+    val bm = withContext(Dispatchers.IO) { decodeBoundedSticker(f.absolutePath)?.asImageBitmap() }
+    if (bm == null) {
+      failed.value = true
+      return@LaunchedEffect
+    }
     file.value = f
     bitmap.value = bm
   }
@@ -148,9 +171,55 @@ private fun StickerCell(
     contentAlignment = Alignment.Center,
   ) {
     val bm = bitmap.value
-    if (bm != null) Image(bm, contentDescription = st.emoji, Modifier.fillMaxSize())
-    else CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+    when {
+      bm != null -> Image(bm, contentDescription = st.emoji, Modifier.fillMaxSize())
+      // Не проверился по sha, не скачался или оказался больше бюджета: эмодзи вместо
+      // картинки — видно, какой это был стикер, и видно, что он не загрузится.
+      failed.value -> Text(st.emoji.ifEmpty { "×" }, textAlign = TextAlign.Center)
+      else -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+    }
   }
+}
+
+/**
+ * Бюджет на размер развёрнутого стикера.
+ *
+ * Потолок на файл — байтовый (HearthStickers.MAX_STICKER_BYTES), а память ест число
+ * пикселей: у WEBP связи между ними нет, полмегабайта сжатых данных законно кодируют
+ * многотысячную сторону. Поэтому здесь два ограничения: сторона (всё, что выходит за
+ * рамки, — не стикер, а попытка нас уронить, такое не рисуем вовсе) и число пикселей
+ * после прореживания, которое задаёт расход на ячейку (~4 МиБ при ARGB_8888).
+ *
+ * Импорт выдаёт 512×512, так что 2048 — это запас, а не рабочий размер.
+ */
+private const val MAX_STICKER_DIMENSION = 2048
+private const val MAX_STICKER_PIXELS = 1024 * 1024
+
+/**
+ * Декодирование стикера с бюджетом: сначала только размеры (inJustDecodeBounds), потом
+ * отказ или прореживание. Тот же приём, что у картинок в чате (Images.android.kt), но их
+ * хелперы приватные, а upstream мы не трогаем.
+ *
+ * runCatching здесь ловит Throwable намеренно: OutOfMemoryError — это Error, и без него
+ * огромная картинка уронила бы не ячейку, а процесс на открытии панели.
+ */
+private fun decodeBoundedSticker(path: String): Bitmap? {
+  return runCatching {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(path, bounds)
+    val w = bounds.outWidth
+    val h = bounds.outHeight
+    // Размеры неизвестны — файл не картинка; больше потолка — не разворачиваем совсем.
+    if (w <= 0 || h <= 0 || w > MAX_STICKER_DIMENSION || h > MAX_STICKER_DIMENSION) {
+      null
+    } else {
+      val opts = BitmapFactory.Options().apply {
+        inSampleSize = HearthStickers.sampleSizeFor(w, h, MAX_STICKER_PIXELS)
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+      }
+      BitmapFactory.decodeFile(path, opts)
+    }
+  }.getOrNull()
 }
 
 @Composable

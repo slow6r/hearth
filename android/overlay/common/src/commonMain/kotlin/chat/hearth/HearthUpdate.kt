@@ -52,6 +52,19 @@ data class HearthUpdateManifest(
    * манифест старее уже виденного, пытается удержать телефон на прежней версии.
    */
   val issued: String = "",
+  /**
+   * До какого момента этому манифесту верить, RFC 3339. Пусто — поля нет.
+   *
+   * Назначает оператор в момент подписи на рабочей станции: ключ лежит там, и только
+   * там известно, когда в следующий раз дойдут руки. Поле ВНУТРИ подписанного
+   * документа, поэтому узел его не подделает и не продлит.
+   *
+   * Почему это лучше запаса по возрасту: запас — это требование к узлу, которое узел
+   * выполнить не может (переподписать манифест он не умеет). Срок — это обещание
+   * оператора, которое он даёт, зная свои обстоятельства. Клиент, живущий по обещанию,
+   * не отрезает семью от обновлений на ровном месте.
+   */
+  val expires: String = "",
 ) {
   companion object {
     const val SUPPORTED_VERSION = 1
@@ -94,11 +107,34 @@ data class HearthUpdateManifest(
 
 private val SHA256 = Regex("^[0-9a-f]{64}$")
 
-/** Чем закончилась проверка обновления. */
+/**
+ * Чем закончилась проверка обновления.
+ *
+ * У успешных исходов есть `notice` — то, что надо сказать человеку, хотя проверка и
+ * прошла. Сегодня там бывает ровно одно: «узел давно не публиковал нового». Раньше
+ * этот случай был отказом, то есть звучал как «обновлений вам больше не будет», хотя
+ * на деле означал «сходите спросите».
+ */
 sealed interface HearthUpdateCheck {
-  data object UpToDate : HearthUpdateCheck
-  data class Available(val manifest: HearthUpdateManifest) : HearthUpdateCheck
-  data class Failed(val reason: String) : HearthUpdateCheck
+  data class UpToDate(val notice: String? = null) : HearthUpdateCheck
+  data class Available(
+    val manifest: HearthUpdateManifest,
+    val notice: String? = null,
+  ) : HearthUpdateCheck
+
+  /**
+   * Проверка не прошла.
+   *
+   * @param actionable узел ОТВЕТИЛ, и ответ не приняли: нет ключа в сборке, подпись не
+   *   сошлась, вышел срок, манифест не разобран. Такой отказ сам не пройдёт — ни через
+   *   час, ни через месяц, — и человеку надо что-то сделать. Поэтому он обязан дойти до
+   *   экрана «Узел», а не остаться в логе, где его не увидит никто.
+   *
+   *   `false` — до узла просто не дошли (нет сети, узел не отвечает). Это не новость:
+   *   одна неудача — обычное дело, а новостью становится МОЛЧАНИЕ, и о нём говорит
+   *   отдельное правило ([HearthUpdateTrust.isStale]).
+   */
+  data class Failed(val reason: String, val actionable: Boolean = false) : HearthUpdateCheck
 }
 
 /** Чем закончилась загрузка. */
@@ -155,23 +191,43 @@ class HearthUpdateChecker(
   private val lastSeenIssued: String? = null,
   /** Куда запомнить отметку принятого манифеста. */
   private val rememberIssued: (String) -> Unit = {},
+  /**
+   * Объявлено ли ресурсом сборки, что она сознательно собрана БЕЗ ключа.
+   *
+   * По умолчанию `false`: отсутствие ключа — отказ. Разрешение жить без проверки
+   * подписи должно быть дописано в сборку явно, а не получиться само из того, что
+   * ресурс с ключом кто-то вырезал.
+   */
+  private val unsignedUpdatesAllowed: Boolean = false,
+  /**
+   * Сегодня по часам телефона, в днях эпохи.
+   *
+   * Параметром, а не обращением к часам внутри: правила свежести тем и хороши, что
+   * гоняются таблицей на JVM, а часы в таблицу не подставишь.
+   */
+  private val nowEpochDays: Long = hearthNowEpochDays(),
+  /** День, когда телефон впервые увидел [lastSeenIssued]. */
+  private val firstSeenEpochDays: Long? = null,
+  /** Куда запомнить день первого появления НОВОЙ отметки. */
+  private val rememberFirstSeenDay: (Long) -> Unit = {},
+  /** Куда запомнить день удавшейся проверки: по нему видно молчание узла. */
+  private val rememberCheckedDay: (Long) -> Unit = {},
 ) {
   suspend fun check(): HearthUpdateCheck {
     val payload = transport.fetchManifest().getOrElse { e ->
       return HearthUpdateCheck.Failed(e.message ?: "узел недоступен")
     }
-    // Подпись запрашивается всегда, когда в сборке есть ключ: её отсутствие — такой
-    // же отказ, как несовпадение.
-    val signature = if (pinnedKey != null) {
-      transport.fetchManifestSignature().getOrElse { e ->
-        return HearthUpdateCheck.Failed(e.message ?: "подпись манифеста не получена")
-      }
-    } else {
-      null
+    // Подпись запрашивается ВСЕГДА, а не только когда в сборке есть ключ. Раньше при
+    // `pinnedKey == null` запроса не было вовсе: решение принималось до того, как
+    // появлялись факты, и «сборка по QR» была неотличима от вырезанного ресурса.
+    val signature = transport.fetchManifestSignature().getOrElse { e ->
+      return HearthUpdateCheck.Failed(e.message ?: "подпись манифеста не получена")
     }
 
     val manifest = HearthUpdateManifest.parse(payload).getOrElse { e ->
-      return HearthUpdateCheck.Failed(e.message ?: "манифест не разобран")
+      // Узел ответил, но ответ не разбирается: это не сетевая осечка, сама она не
+      // пройдёт, и человек должен об этом узнать.
+      return HearthUpdateCheck.Failed(e.message ?: "манифест не разобран", actionable = true)
     }
 
     val verdict = HearthUpdateTrust.decide(
@@ -181,16 +237,35 @@ class HearthUpdateChecker(
         verify(payload.encodeToByteArray(), signature, pinnedKey),
       issued = manifest.issued.ifBlank { null },
       lastSeenIssued = lastSeenIssued,
+      nowEpochDays = nowEpochDays,
+      firstSeenEpochDays = firstSeenEpochDays,
+      unsignedUpdatesAllowed = unsignedUpdatesAllowed,
+      // Срок годности берём из САМОГО манифеста: он внутри подписанного документа, а
+      // значит меняется только вместе с подписью. Пусто — поля нет, и тогда свежесть
+      // судит запас по возрасту (см. HearthUpdateTrust).
+      expires = manifest.expires.ifBlank { null },
     )
     if (verdict is HearthUpdateTrust.Verdict.Refuse) {
-      return HearthUpdateCheck.Failed(verdict.reason)
+      // Отказ политики: узел на связи, а обновления не ставятся. Текст вердикта уже
+      // написан для человека и говорит, что делать, — его и показываем.
+      return HearthUpdateCheck.Failed(verdict.reason, actionable = true)
     }
-    if (manifest.issued.isNotBlank()) rememberIssued(manifest.issued)
+    val notice = (verdict as? HearthUpdateTrust.Verdict.Allow)?.notice
+    if (manifest.issued.isNotBlank() && manifest.issued != lastSeenIssued) {
+      // День первого появления пишется только вместе с НОВОЙ отметкой. Обновляй его
+      // на каждой проверке — и правило «узел две недели отдаёт одно и то же» никогда
+      // бы не сработало: срок отодвигался бы сам собой.
+      rememberIssued(manifest.issued)
+      rememberFirstSeenDay(nowEpochDays)
+    }
+    // Узел ответил и ответ приняли. Пишем день и при UpToDate: «новостей нет» — это
+    // тоже ответ, а молчание — нет, и отличать их надо именно здесь.
+    rememberCheckedDay(nowEpochDays)
 
     return if (manifest.isNewerThan(installedVersionCode)) {
-      HearthUpdateCheck.Available(manifest)
+      HearthUpdateCheck.Available(manifest, notice)
     } else {
-      HearthUpdateCheck.UpToDate
+      HearthUpdateCheck.UpToDate(notice)
     }
   }
 }

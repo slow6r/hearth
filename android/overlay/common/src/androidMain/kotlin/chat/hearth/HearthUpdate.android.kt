@@ -67,7 +67,22 @@ class HearthAndroidUpdateTransport(
     // (`file_paths.xml`, `my_files`), значит намерение установки заработает без правок.
     val dir = File(context.filesDir, "hearth-update").apply { mkdirs() }
     val target = File(dir, "hearth-update.apk")
+    // Рядом с остатком лежит sha256 того обновления, ради которого он качался. Без этой
+    // пометки докачка вслепую продолжает ЧУЖОЙ остаток — от версии, которая уже не
+    // раздаётся, или от загрузки, оборванной на другом манифесте.
+    val marker = File(dir, "hearth-update.sha256")
     runCatching {
+      val marked = runCatching {
+        if (marker.exists()) marker.readText().trim() else null
+      }.getOrNull()
+      if (!HearthDownloadLimits.leftoverIsUsable(marked, expectedSha256)) {
+        // Неполная прошлая загрузка удаляется ДО проверки места. Иначе она держит сотни
+        // мегабайт на телефоне, которому их и так не хватает, и проверка отказывает
+        // из-за мусора, который сама же и не даёт убрать. Докачать его всё равно нельзя:
+        // хеш в конце не сойдётся, и файл будет удалён — только после лишнего трафика.
+        target.delete()
+        marker.delete()
+      }
       // Докачка: если файл уже частично лежит, просим остаток через Range. Обновление
       // весит сотни мегабайт, а телефон в дороге теряет сеть постоянно.
       val already = if (target.exists()) target.length() else 0L
@@ -81,24 +96,55 @@ class HearthAndroidUpdateTransport(
         // Начинаем с нуля, а не сдаёмся.
         if (code == 416) {
           target.delete()
+          marker.delete()
           throw IllegalStateException("остаток от прошлой версии не подошёл, начните заново")
         }
         if (code != 200 && code != 206) throw IllegalStateException("узел ответил $code")
         if (already > 0 && !resuming) target.delete()
+        // Пометка пишется сразу: следующий заход должен знать, чей это остаток, даже
+        // если нынешний оборвётся на первом килобайте.
+        runCatching { marker.writeText(expectedSha256) }
 
-        val total = conn.contentLengthLong.let {
-          if (it > 0) it + (if (resuming) already else 0) else -1L
-        }
-        var done = if (resuming) already else 0L
+        val carried = if (resuming) already else 0L
+        val declared = conn.contentLengthLong
+        val total = if (declared > 0) declared + carried else -1L
+        var done = carried
+
+        // Потолок ДО открытия потока: если узел сам назвал длину больше допустимой,
+        // читать её незачем. Место проверяем там же — заполненная под ноль внутренняя
+        // память ломает не обновление, а всю переписку: ядру некуда писать базу.
+        HearthDownloadLimits.refuseIfDeclaredTooLarge(declared, carried)
+          ?.let { throw HearthApkTooLarge(it) }
+        HearthDownloadLimits.refuseIfNoSpace(declared, context.filesDir.usableSpace)
+          ?.let { throw IllegalStateException(it) }
+        // Та проверка работает только при названной длине. При chunked-ответе
+        // (Content-Length нет, declared = -1) она выходит сразу, и места не проверялось
+        // вовсе. Поэтому здесь же — проверка по ОСТАТКУ свободного места, которой длина
+        // не нужна: она одинаково видит и «телефон уже забит», и «узел льёт без конца».
+        HearthDownloadLimits.refuseIfSpaceRanOut(context.filesDir.usableSpace)
+          ?.let { throw HearthNoSpace(it) }
 
         conn.inputStream.use { input ->
           java.io.FileOutputStream(target, resuming).use { out ->
             val buf = ByteArray(64 * 1024)
+            // На каком объёме последний раз спрашивали файловую систему про место.
+            var spaceCheckedAt = done
             while (true) {
               val n = input.read(buf)
               if (n < 0) break
               out.write(buf, 0, n)
               done += n
+              // Длину узел мог не назвать вовсе (-1) или назвать неправду — поэтому
+              // второй рубеж считает фактически записанное, а не обещанное.
+              HearthDownloadLimits.refuseIfWrittenTooLarge(done)?.let { throw HearthApkTooLarge(it) }
+              // Третий рубеж — место. usableSpace это системный вызов, поэтому не на
+              // каждые 64 КБ, а раз в SPACE_CHECK_EVERY_BYTES: запаса хватает, чтобы за
+              // этот шаг память не кончилась по-настоящему.
+              if (HearthDownloadLimits.shouldRecheckSpace(done, spaceCheckedAt)) {
+                spaceCheckedAt = done
+                HearthDownloadLimits.refuseIfSpaceRanOut(context.filesDir.usableSpace)
+                  ?.let { throw HearthNoSpace(it) }
+              }
               onProgress(done, total)
             }
             // Принудительный сброс на диск: иначе внезапная перезагрузка телефона
@@ -106,6 +152,14 @@ class HearthAndroidUpdateTransport(
             out.fd.sync()
           }
         }
+      } catch (e: HearthDownloadStopped) {
+        // Обрыв сети оставляет недокачанное ради Range-докачки, а наша собственная
+        // остановка — нет. Потолок: иначе следующий заход попросит остаток и наберёт
+        // тот же объём по частям. Место: остаток и есть то, что занимает память, и
+        // держать его на забитом телефоне значит ломать переписку ради трафика.
+        target.delete()
+        marker.delete()
+        throw e
       } finally {
         conn.disconnect()
       }
@@ -116,6 +170,7 @@ class HearthAndroidUpdateTransport(
       val actual = target.sha256Hex()
       if (!actual.equals(expectedSha256, ignoreCase = true)) {
         target.delete()
+        marker.delete()
         throw IllegalStateException("sha256 не совпал: ожидали $expectedSha256, получили $actual")
       }
       HearthDownloadResult.Ready(target.absolutePath) as HearthDownloadResult
@@ -224,6 +279,27 @@ class HearthAndroidUpdateTransport(
     }
   }
 }
+
+/**
+ * Загрузку остановили МЫ САМИ: сработал потолок объёма или кончилось место.
+ *
+ * Отдельный тип, а не просто IllegalStateException: только при нём недокачанный файл
+ * удаляется. Всё остальное (обрыв сети, таймаут) оставляет остаток на месте — ради
+ * докачки, без которой сотни мегабайт в дороге не приезжают никогда.
+ */
+private open class HearthDownloadStopped(message: String) : IllegalStateException(message)
+
+/** Узел отдаёт файл длиннее потолка. */
+private class HearthApkTooLarge(message: String) : HearthDownloadStopped(message)
+
+/**
+ * На телефоне кончилось место.
+ *
+ * Остаток тоже удаляется, и это выбор в пользу связи, а не в пользу трафика: забитая
+ * под ноль внутренняя память ломает не обновление, а саму переписку — ядру некуда
+ * писать базу. Сотню мегабайт лучше скачать заново, чем оставить семью без сообщений.
+ */
+private class HearthNoSpace(message: String) : HearthDownloadStopped(message)
 
 private fun java.io.InputStream.readBoundedBytes(limit: Int): ByteArray {
   val out = java.io.ByteArrayOutputStream()

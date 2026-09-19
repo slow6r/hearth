@@ -78,6 +78,13 @@ class HearthCoreApplier : HearthBundleApplier {
     // разница в поведении нулевая (в обоих случаях ICE нет и звонок не состоится), но
     // явно записанное значение видно в настройках и не выглядит как «забыли настроить».
     ChatController.appPrefs.webrtcIceServers.set(servers.ice.joinToString(separator = "\n"))
+    // И тот же список отдельно, как запасной источник (HearthPrefs.bundleIce). Рабочую
+    // настройку выше перезаписывает каждое обновление кредов TURN, её же правит экран
+    // ручной правки ICE и приносит восстановленная база — то есть она может оказаться
+    // чужой. Тогда единственной альтернативой пустому списку (а значит и полному
+    // отсутствию звонков при relay-only) остаётся вот эта копия: она пришла вместе с
+    // адресами релеев, из QR или кода доступа, полученного лично.
+    HearthPrefs.bundleIce = servers.ice.joinToString(separator = "\n")
   }
 
   /** `preset = false`: это НАШ сервер, а не предустановленный оператором upstream. */
@@ -129,5 +136,25 @@ class HearthCoreApplier : HearthBundleApplier {
     ChatController.appPrefs.hearthUpdateHost.set(node?.host)
     ChatController.appPrefs.hearthUpdateToken.set(node?.token)
     ChatController.appPrefs.hearthUpdatePort.set(node?.port?.toString())
+  }
+
+  override suspend fun rememberBundleHost(host: String?) {
+    // Хранилище то же самое, что у настроек форка (см. HearthPrefs.kt), но ключ наш:
+    // править `AppPreferences` в дереве форка нельзя, а раздваивать хранилище незачем.
+    val previous = HearthPrefs.bundleHost
+    HearthPrefs.bundleHost = host
+    if (previous == null || previous == host) return
+
+    // Устройство перевели на ДРУГОЙ узел. Всё, что телефон помнит про обновления, —
+    // отметка манифеста, день её первого появления, день последней проверки, показанные
+    // предупреждения — относится к прежнему узлу и теперь врёт. Причём врёт в обе
+    // стороны: свежепереведённый телефон сразу сообщил бы «узел молчит сорок дней», а
+    // защита от отката метаданных сравнивала бы манифест НОВОГО узла с отметкой СТАРОГО
+    // и могла бы отказать в обновлении насовсем. Забываем.
+    //
+    // Откат при этом не ослабляется: человек только что предъявил bundle нового узла
+    // лично — это сильнее любой отметки, накопленной автоматически.
+    HearthPrefs.forgetUpdateState()
+    ChatController.appPrefs.hearthLastManifestIssued.set(null)
   }
 }

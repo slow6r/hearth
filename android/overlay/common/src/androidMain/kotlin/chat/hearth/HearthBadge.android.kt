@@ -52,7 +52,7 @@ object HearthBadge {
     if (!HearthHuawei.isHuawei) return
     val launcher = context.packageManager
       .getLaunchIntentForPackage(context.packageName)?.component?.className ?: return
-    val n = count.coerceIn(0, 99)
+    val n = HearthBadgeTargets.badgeNumber(count)
     try {
       context.contentResolver.call(
         Uri.parse("content://com.huawei.android.launcher.settings/badge/"),
@@ -66,9 +66,39 @@ object HearthBadge {
       )
     } catch (_: Exception) {
       // Старые EMUI: провайдера нет, работает рассылка.
+      broadcast(context, launcher, n)
+    }
+  }
+
+  /**
+   * Рассылка о значке — только названному лаунчеру.
+   *
+   * Раньше здесь был неявный intent: система разносила его любому receiver'у с подходящим
+   * фильтром, и постороннее приложение, уже работающее на телефоне, читало из него имя
+   * нашего пакета и число непрочитанных. Содержимого сообщений там нет, но сам факт
+   * «Очагом пользуются, непрочитанных семь» — тоже не его дело.
+   *
+   * setPackage на каждый известный лаунчер: получателей у такой рассылки ровно столько,
+   * сколько названо, а подделать имя системного пакета на устройстве нельзя. Слать в цикле
+   * дёшево — лишний пакет просто не найдётся, исключения на этом пути нет.
+   *
+   * receiverPermission (CHANGE_BADGE) сюда сознательно НЕ добавлен: это разрешение
+   * лаунчер требует от отправителя (потому оно и стоит в нашем манифесте), а в
+   * receiverPermission оно означало бы обратное — что им владеет сам лаунчер. Проверить
+   * это можно только на живом EMUI, а ошибка стоит молча переставшего обновляться значка
+   * у тех, у кого нет провайдера. Адресность уже даёт setPackage.
+   *
+   * Список адресатов берётся через [HearthBadgeTargets.broadcastTargets], а не напрямую:
+   * фильтр отбрасывает строку, которая адресом не является (пустая, с опечаткой), — иначе
+   * `setPackage("")` выглядел бы адресацией, ею не будучи. Проверка стоит на пути рассылки,
+   * а не рядом с ним.
+   */
+  private fun broadcast(context: Context, launcher: String, n: Int) {
+    for (pkg in HearthBadgeTargets.broadcastTargets()) {
       try {
         context.sendBroadcast(
-          Intent("com.huawei.android.launcher.action.CHANGE_BADGE").apply {
+          Intent(HearthBadgeTargets.CHANGE_BADGE).apply {
+            setPackage(pkg)
             putExtra("package", context.packageName)
             putExtra("class", launcher)
             putExtra("badgenumber", n)
