@@ -2,6 +2,7 @@ package chat.hearth
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
 import android.os.Build
 import androidx.core.app.NotificationCompat
@@ -152,8 +153,14 @@ object HearthUpdates {
     val result = checker(context, transport, installedVersionCode(context)).check()
     remember(result)
     when (result) {
-      is HearthUpdateCheck.Available ->
+      is HearthUpdateCheck.Available -> {
         Log.w("hearth", "на узле есть версия ${result.manifest.versionName}")
+        // Экран «Узел» человек может не открыть ни разу за год — ровно по этой причине
+        // туда же, в шторку, уходят отказ и молчание. Доступная версия до недавнего
+        // времени была единственным исходом, остававшимся только в настройках: человек
+        // узнавал о сломанном обновлении, но не о готовом.
+        offerUpdate(context, result.manifest)
+      }
       is HearthUpdateCheck.UpToDate ->
         Log.d("hearth", "обновлений нет, узел отвечает")
       is HearthUpdateCheck.Failed -> {
@@ -208,7 +215,63 @@ object HearthUpdates {
    * Разрешения на уведомления может не быть, менеджера может не оказаться, прошивка
    * Huawei может отказать — но проверка обновлений не должна из-за этого срываться.
    */
-  private fun show(context: Context, title: String, text: String): Boolean = runCatching {
+  /**
+   * Сказать в шторку, что на узле готова новая версия.
+   *
+   * Правило «говорить ли» — [HearthUpdateOffer.shouldAnnounce], и оно намеренно живёт в
+   * commonMain: это единственная часть, которую можно проверить тестом без устройства.
+   * Здесь остаётся то, что без Android не проверяется, — показ и запись отметки.
+   *
+   * Отметка ставится ТОЛЬКО если уведомление действительно показано. Иначе телефон, где
+   * уведомления запрещены, записал бы «сказано» и замолчал на неделю, ничего не сказав.
+   */
+  private fun offerUpdate(context: Context, manifest: HearthUpdateManifest) {
+    val today = hearthNowEpochDays()
+    val announce = HearthUpdateOffer.shouldAnnounce(
+      versionCode = manifest.versionCode,
+      announcedVersionCode = HearthPrefs.updateOfferedVersionCode,
+      announcedDay = HearthPrefs.updateOfferedDay,
+      todayEpochDays = today,
+    )
+    if (!announce) return
+    val shown = show(
+      context,
+      HearthUpdateOffer.TITLE,
+      HearthUpdateOffer.text(manifest.versionName),
+      openApp(context),
+    )
+    if (shown) {
+      HearthPrefs.updateOfferedVersionCode = manifest.versionCode.toLong()
+      HearthPrefs.updateOfferedDay = today
+    }
+  }
+
+  /**
+   * Куда ведёт нажатие на уведомление.
+   *
+   * Уведомление «есть новая версия», по которому некуда нажать, отправляет человека
+   * искать экран самостоятельно — а мы в тексте этот экран и называем.
+   *
+   * Точка входа берётся у системы по имени пакета, а не `Intent(context, MainActivity::class)`:
+   * `MainActivity` лежит в модуле приложения, а этот файл — в общем модуле, и модуль
+   * приложения зависит от него, а не наоборот. Ссылка на класс просто не собралась бы.
+   */
+  private fun openApp(context: Context): PendingIntent? = runCatching {
+    val intent = context.packageManager.getLaunchIntentForPackage(context.packageName) ?: return null
+    PendingIntent.getActivity(
+      context,
+      0,
+      intent,
+      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
+  }.getOrNull()
+
+  private fun show(
+    context: Context,
+    title: String,
+    text: String,
+    contentIntent: PendingIntent? = null,
+  ): Boolean = runCatching {
     val mgr = context.getSystemService(NotificationManager::class.java) ?: return false
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && mgr.getNotificationChannel(CHANNEL) == null) {
       mgr.createNotificationChannel(
@@ -227,6 +290,7 @@ object HearthUpdates {
         .setStyle(NotificationCompat.BigTextStyle().bigText(text))
         .setOnlyAlertOnce(true)
         .setAutoCancel(true)
+        .apply { if (contentIntent != null) setContentIntent(contentIntent) }
         .build(),
     )
     true

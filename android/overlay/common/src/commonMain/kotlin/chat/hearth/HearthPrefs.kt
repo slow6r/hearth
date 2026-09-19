@@ -70,6 +70,23 @@ object HearthPrefs {
     set(value) = writeDay(UPDATE_PROBLEM_NOTICE_DAY, value)
 
   /**
+   * Какой `versionCode` уже объявляли человеку в шторке как доступный.
+   *
+   * Хранится именно версия, а не только день: повод здесь не длящийся, а сменяющийся.
+   * Вышла версия новее объявленной — это новость, и ждать конца окна нельзя, иначе в
+   * эту разницу попадёт security-релиз, выпущенный через день после обычного. Разбор —
+   * [HearthUpdateOffer.shouldAnnounce].
+   */
+  var updateOfferedVersionCode: Long?
+    get() = readDay(UPDATE_OFFERED_VERSION)
+    set(value) = writeDay(UPDATE_OFFERED_VERSION, value)
+
+  /** День, когда про эту версию сказали: тот же versionCode повторяем не чаще раза в окно. */
+  var updateOfferedDay: Long?
+    get() = readDay(UPDATE_OFFERED_DAY)
+    set(value) = writeDay(UPDATE_OFFERED_DAY, value)
+
+  /**
    * Узел ответил: забыть счёт неудачных дней.
    *
    * Счётчик меряет НЕПРЕРЫВНУЮ полосу молчания, а не сумму неудач за всю жизнь
@@ -240,6 +257,8 @@ object HearthPrefs {
     failedUpdateCheckDays = 0
     lastFailedCheckDay = null
     updateProblemNoticeDay = null
+    updateOfferedVersionCode = null
+    updateOfferedDay = null
   }
 
   private const val BUNDLE_HOST = "hearthBundleHost"
@@ -254,6 +273,8 @@ object HearthPrefs {
   private const val FAILED_CHECK_DAYS = "hearthFailedUpdateCheckDays"
   private const val LAST_FAILED_CHECK_DAY = "hearthLastFailedUpdateCheckDay"
   private const val UPDATE_PROBLEM_NOTICE_DAY = "hearthUpdateProblemNoticeDay"
+  private const val UPDATE_OFFERED_VERSION = "hearthUpdateOfferedVersion"
+  private const val UPDATE_OFFERED_DAY = "hearthUpdateOfferedDay"
 
   /**
    * Значения нет.
