@@ -298,12 +298,18 @@ check_ice_defaults_empty() {
 # сравнивается ПОЛНОСТЬЮ, а не как подстрока.
 hearth_res_has() {
     local table="$1" name="$2"
-    printf '%s\n' "$table" | grep -oE 'raw/[A-Za-z0-9_]+' | grep -qx "raw/$name"
+    # Herestring, а НЕ `printf | grep`. Под `set -o pipefail` ранний выход grep рвёт
+    # трубу, printf получает SIGPIPE, и pipefail поднимает 141 как отказ проверки.
+    # На таблице ресурсов в 4 МБ это срабатывает всегда, на фикстуре в три строки —
+    # никогда, поэтому тесты молчали, а гейт валился на настоящем APK.
+    grep -oE 'raw/[A-Za-z0-9_]+' <<<"$table" | grep -qx "raw/$name"
 }
 
 # Похоже ли это вообще на таблицу ресурсов. Без заголовка пакета судить не о чем.
 hearth_res_table_ok() {
-    printf '%s\n' "$1" | grep -q 'Package name='
+    # Herestring по той же причине, что в [hearth_res_has]: «Package name=» стоит во
+    # второй строке, grep -q выходит сразу, а printf продолжает писать мегабайты.
+    grep -q 'Package name=' <<<"$1"
 }
 
 # Ключ проверки манифестов обязан быть в сборке: без него клиент не отличит наш

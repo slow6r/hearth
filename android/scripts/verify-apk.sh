@@ -53,10 +53,12 @@ expect_marker() {
 
 # reporter <описание-по-умолчанию> <функция> <аргументы...>
 check() {
-    local out rc
-    out="$("$@" 2>&1)"
-    rc=$?
-    if [[ $rc -eq 0 ]]; then pass "$out"; else fail "$out"; fi
+    local out
+    # Присваивание СНАРУЖИ `if` убивало бы скрипт: под `set -e` неудачная подстановка
+    # это выход, и провал одной проверки выглядел как обрыв без единого слова — ровно
+    # то состояние «сломалось неотличимо от чисто», против которого написан заголовок
+    # этого файла. Внутри условия `set -e` не действует, и FAIL доходит до человека.
+    if out="$("$@" 2>&1)"; then pass "$out"; else fail "$out"; fi
 }
 
 for tool in apkanalyzer aapt2 apksigner unzip strings; do need "$tool"; done

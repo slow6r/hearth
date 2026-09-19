@@ -122,6 +122,17 @@ expect fail "пустая таблица ресурсов не проходит"
 # похоже названный файл; и наоборот, `..._disabled` он засчитывал за отказ от подписи.
 expect fail "похожее имя за ключ не считается"              check_release_key_present "$(read_fixture resources-lookalike.txt)"
 expect pass "похожее имя за отказ от подписи не считается"  check_no_unsigned_updates_flag "$(read_fixture resources-lookalike.txt)"
+# Таблица настоящего APK — это ~4 МБ, а все фикстуры выше умещаются в несколько строк.
+# Разница не косметическая: при `printf '%s\n' "$table" | grep -q` ранний выход grep
+# рвёт трубу, printf получает SIGPIPE, `set -o pipefail` поднимает 141 — и проверка
+# сообщает «таблица не разобрана» на совершенно нормальной сборке. На коротком вводе
+# printf успевает дописать раньше, чем grep выйдет, поэтому фикстуры этого не видели,
+# и гейт свалился только на живом h23. Генерируем большую таблицу прямо здесь.
+BIG_TABLE="$(read_fixture resources-good.txt)
+$(for i in $(seq 1 60000); do echo "    resource 0x7f0a$i id/filler_$i"; done)"
+expect pass "ключ подписи виден в таблице настоящего размера"  check_release_key_present "$BIG_TABLE"
+expect pass "отказ от подписи отсутствует и в большой таблице" check_no_unsigned_updates_flag "$BIG_TABLE"
+unset BIG_TABLE
 
 echo "== подпись"
 EXPECTED="608e713c04a69a695fde298f315f59fdda4b9550d6a299a25aca553e6b294ab7"
