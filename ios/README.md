@@ -45,7 +45,21 @@ iOS выгружаются в `android/fork-patches/` тем же `export-fork-p
 # 1. ядро (часы при первом прогоне)
 ios/scripts/build-core.sh device     # для телефона — только Mac на Apple Silicon
 ios/scripts/build-core.sh sim        # симулятор — годится и Intel
+```
 
+Если Apple Silicon под рукой нет, ядро для телефона собирает GitHub Actions —
+`.github/workflows/ios-core.yml`, раннер `macos-15` (он arm64). Запуск вручную,
+секретов workflow не требует: подпись и загрузка остаются на машине владельца.
+Артефакт распаковывается в дерево форка, после чего проект узнаёт новые имена
+библиотек:
+
+```bash
+gh run download <id> -n hearth-ios-core-device -D /tmp/core
+cp -R /tmp/core/ios android/simplex-chat/apps/ios/Libraries/
+(cd android/simplex-chat && sh scripts/ios/update-pbxproj.sh)
+```
+
+```bash
 # 2. узел: адрес device API, CA и адрес push-сервера (печатает relays/ntf/init-ntf.sh)
 ios/scripts/bake-node.sh relay.myhearth.ru 7444 'ntf://<fp>@relay.myhearth.ru:2053'
 

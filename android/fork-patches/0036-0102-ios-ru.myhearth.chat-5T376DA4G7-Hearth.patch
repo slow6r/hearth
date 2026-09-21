@@ -1,0 +1,1303 @@
+From 14708812a14cd335ecd4d38bb8ce9a06b6a3f7d1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=D0=A4=D1=91=D0=B4=D0=BE=D1=80=20=D0=9B=D0=BE=D0=B4=D0=B8?=
+ =?UTF-8?q?=D0=BA=D0=BE=D0=B2?= <fedor_ramoz@mail.ru>
+Date: Mon, 14 Sep 2026 15:37:48 +0300
+Subject: [PATCH 36/37] =?UTF-8?q?0102:=20ios=20=E2=80=94=20ru.myhearth.cha?=
+ =?UTF-8?q?t,=20=D0=BA=D0=BE=D0=BC=D0=B0=D0=BD=D0=B4=D0=B0=205T376DA4G7,?=
+ =?UTF-8?q?=20=D0=B8=D0=BC=D1=8F=20Hearth?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Свои bundle ID, App Group и keychain, чтобы приложение стояло рядом со стоковым
+SimpleX и не делило с ним базу. Из entitlements убраны universal links simplex.chat
+и права, которые Apple выдаёт по заявке (multicast, имя устройства).
+Описание: ios/patches/0102-branding.md репозитория hearth.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Mx8aKjA6vdDtgovjS9kAMx
+---
+ apps/ios/Shared/Model/BGManager.swift         |  2 +-
+ apps/ios/SimpleX (iOS).entitlements           | 18 +----
+ apps/ios/SimpleX NSE/SimpleX NSE.entitlements |  4 +-
+ .../SimpleX NSE/bg.lproj/InfoPlist.strings    |  4 +-
+ .../SimpleX NSE/cs.lproj/InfoPlist.strings    |  4 +-
+ .../SimpleX NSE/de.lproj/InfoPlist.strings    |  4 +-
+ .../SimpleX NSE/en.lproj/InfoPlist.strings    |  4 +-
+ .../SimpleX NSE/es.lproj/InfoPlist.strings    |  4 +-
+ .../SimpleX NSE/fi.lproj/InfoPlist.strings    |  4 +-
+ .../SimpleX NSE/fr.lproj/InfoPlist.strings    |  4 +-
+ .../SimpleX NSE/hu.lproj/InfoPlist.strings    |  4 +-
+ .../SimpleX NSE/it.lproj/InfoPlist.strings    |  4 +-
+ .../SimpleX NSE/ja.lproj/InfoPlist.strings    |  4 +-
+ .../SimpleX NSE/nl.lproj/InfoPlist.strings    |  4 +-
+ .../SimpleX NSE/pl.lproj/InfoPlist.strings    |  4 +-
+ .../SimpleX NSE/ru.lproj/InfoPlist.strings    |  4 +-
+ .../SimpleX NSE/th.lproj/InfoPlist.strings    |  4 +-
+ .../SimpleX NSE/tr.lproj/InfoPlist.strings    |  4 +-
+ .../SimpleX NSE/uk.lproj/InfoPlist.strings    |  4 +-
+ .../zh-Hans.lproj/InfoPlist.strings           |  4 +-
+ apps/ios/SimpleX SE/SimpleX SE.entitlements   |  4 +-
+ .../ios/SimpleX SE/de.lproj/InfoPlist.strings |  4 +-
+ .../ios/SimpleX SE/es.lproj/InfoPlist.strings |  4 +-
+ .../ios/SimpleX SE/fr.lproj/InfoPlist.strings |  4 +-
+ .../ios/SimpleX SE/hu.lproj/InfoPlist.strings |  4 +-
+ .../ios/SimpleX SE/it.lproj/InfoPlist.strings |  4 +-
+ .../ios/SimpleX SE/nl.lproj/InfoPlist.strings |  4 +-
+ .../ios/SimpleX SE/pl.lproj/InfoPlist.strings |  4 +-
+ .../ios/SimpleX SE/ru.lproj/InfoPlist.strings |  4 +-
+ .../ios/SimpleX SE/tr.lproj/InfoPlist.strings |  4 +-
+ .../ios/SimpleX SE/uk.lproj/InfoPlist.strings |  4 +-
+ .../zh-Hans.lproj/InfoPlist.strings           |  4 +-
+ apps/ios/SimpleX--iOS--Info.plist             |  4 +-
+ apps/ios/SimpleX.xcodeproj/project.pbxproj    | 70 ++++++++++---------
+ apps/ios/SimpleXChat/AppGroup.swift           |  2 +-
+ apps/ios/SimpleXChat/KeyChain.swift           |  2 +-
+ .../bg.lproj/SimpleX--iOS--InfoPlist.strings  | 12 ++--
+ .../cs.lproj/SimpleX--iOS--InfoPlist.strings  | 10 +--
+ .../de.lproj/SimpleX--iOS--InfoPlist.strings  | 12 ++--
+ .../es.lproj/SimpleX--iOS--InfoPlist.strings  | 12 ++--
+ .../fi.lproj/SimpleX--iOS--InfoPlist.strings  | 10 +--
+ .../fr.lproj/SimpleX--iOS--InfoPlist.strings  | 10 +--
+ .../hu.lproj/SimpleX--iOS--InfoPlist.strings  | 12 ++--
+ .../it.lproj/SimpleX--iOS--InfoPlist.strings  | 12 ++--
+ .../ja.lproj/SimpleX--iOS--InfoPlist.strings  | 10 +--
+ .../nl.lproj/SimpleX--iOS--InfoPlist.strings  | 12 ++--
+ .../pl.lproj/SimpleX--iOS--InfoPlist.strings  | 12 ++--
+ .../ru.lproj/SimpleX--iOS--InfoPlist.strings  | 12 ++--
+ .../th.lproj/SimpleX--iOS--InfoPlist.strings  | 10 +--
+ .../tr.lproj/SimpleX--iOS--InfoPlist.strings  | 12 ++--
+ .../uk.lproj/SimpleX--iOS--InfoPlist.strings  | 12 ++--
+ .../SimpleX--iOS--InfoPlist.strings           | 12 ++--
+ 52 files changed, 194 insertions(+), 206 deletions(-)
+
+diff --git a/apps/ios/Shared/Model/BGManager.swift b/apps/ios/Shared/Model/BGManager.swift
+index aa4dfa2..16cddd1 100644
+--- a/apps/ios/Shared/Model/BGManager.swift
++++ b/apps/ios/Shared/Model/BGManager.swift
+@@ -11,7 +11,7 @@ import Foundation
+ import BackgroundTasks
+ import SimpleXChat
+ 
+-private let receiveTaskId = "chat.simplex.app.receive"
++private let receiveTaskId = "ru.myhearth.chat.receive"
+ 
+ // TCP timeout + 2 sec
+ private let waitForMessages: TimeInterval = 6
+diff --git a/apps/ios/SimpleX (iOS).entitlements b/apps/ios/SimpleX (iOS).entitlements
+index 2ec32de..6f3aadc 100644
+--- a/apps/ios/SimpleX (iOS).entitlements	
++++ b/apps/ios/SimpleX (iOS).entitlements	
+@@ -4,27 +4,13 @@
+ <dict>
+ 	<key>aps-environment</key>
+ 	<string>development</string>
+-	<key>com.apple.developer.associated-domains</key>
+-	<array>
+-		<string>applinks:simplex.chat</string>
+-		<string>applinks:www.simplex.chat</string>
+-		<string>applinks:simplex.chat?mode=developer</string>
+-		<string>applinks:*.simplex.im</string>
+-		<string>applinks:*.simplex.im?mode=developer</string>
+-		<string>applinks:*.simplexonflux.com</string>
+-		<string>applinks:*.simplexonflux.com?mode=developer</string>
+-	</array>
+ 	<key>com.apple.security.application-groups</key>
+ 	<array>
+-		<string>group.chat.simplex.app</string>
++		<string>group.ru.myhearth.chat</string>
+ 	</array>
+ 	<key>keychain-access-groups</key>
+ 	<array>
+-		<string>$(AppIdentifierPrefix)chat.simplex.app</string>
++		<string>$(AppIdentifierPrefix)ru.myhearth.chat</string>
+ 	</array>
+-	<key>com.apple.developer.networking.multicast</key>
+-	<true/>
+-	<key>com.apple.developer.device-information.user-assigned-device-name</key>
+-	<true/>
+ </dict>
+ </plist>
+diff --git a/apps/ios/SimpleX NSE/SimpleX NSE.entitlements b/apps/ios/SimpleX NSE/SimpleX NSE.entitlements
+index 5793de3..fa8bf41 100644
+--- a/apps/ios/SimpleX NSE/SimpleX NSE.entitlements	
++++ b/apps/ios/SimpleX NSE/SimpleX NSE.entitlements	
+@@ -4,11 +4,11 @@
+ <dict>
+ 	<key>com.apple.security.application-groups</key>
+ 	<array>
+-		<string>group.chat.simplex.app</string>
++		<string>group.ru.myhearth.chat</string>
+ 	</array>
+ 	<key>keychain-access-groups</key>
+ 	<array>
+-		<string>$(AppIdentifierPrefix)chat.simplex.app</string>
++		<string>$(AppIdentifierPrefix)ru.myhearth.chat</string>
+ 	</array>
+ 	<key>com.apple.developer.usernotifications.filtering</key>
+ 	<true/>
+diff --git a/apps/ios/SimpleX NSE/bg.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/bg.lproj/InfoPlist.strings
+index b1c515f..8abc9f5 100644
+--- a/apps/ios/SimpleX NSE/bg.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/bg.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Авторско право © 2022 SimpleX Chat. Всички права запазени.";
+diff --git a/apps/ios/SimpleX NSE/cs.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/cs.lproj/InfoPlist.strings
+index 4771dbc..3deb307 100644
+--- a/apps/ios/SimpleX NSE/cs.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/cs.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Autorská práva © 2022 SimpleX Chat. Všechna práva vyhrazena.";
+diff --git a/apps/ios/SimpleX NSE/de.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/de.lproj/InfoPlist.strings
+index 2ea2a33..e3ba804 100644
+--- a/apps/ios/SimpleX NSE/de.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/de.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2025 SimpleX Chat. All rights reserved.";
+diff --git a/apps/ios/SimpleX NSE/en.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/en.lproj/InfoPlist.strings
+index 9c67551..d82a841 100644
+--- a/apps/ios/SimpleX NSE/en.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/en.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2022 SimpleX Chat. All rights reserved.";
+diff --git a/apps/ios/SimpleX NSE/es.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/es.lproj/InfoPlist.strings
+index 26efde9..eb3da37 100644
+--- a/apps/ios/SimpleX NSE/es.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/es.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2022 SimpleX Chat. Todos los derechos reservados.";
+diff --git a/apps/ios/SimpleX NSE/fi.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/fi.lproj/InfoPlist.strings
+index 28a503d..b977134 100644
+--- a/apps/ios/SimpleX NSE/fi.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/fi.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2022 SimpleX Chat. Kaikki oikeudet pidätetään.";
+diff --git a/apps/ios/SimpleX NSE/fr.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/fr.lproj/InfoPlist.strings
+index 3c89fdc..0b661e3 100644
+--- a/apps/ios/SimpleX NSE/fr.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/fr.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2022 SimpleX Chat. Tous droits réservés.";
+diff --git a/apps/ios/SimpleX NSE/hu.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/hu.lproj/InfoPlist.strings
+index 1a7b57b..77572a7 100644
+--- a/apps/ios/SimpleX NSE/hu.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/hu.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2022 SimpleX Chat. Minden jog fenntartva.";
+diff --git a/apps/ios/SimpleX NSE/it.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/it.lproj/InfoPlist.strings
+index 4b1c67a..31534db 100644
+--- a/apps/ios/SimpleX NSE/it.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/it.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2022 SimpleX Chat. Tutti i diritti riservati.";
+diff --git a/apps/ios/SimpleX NSE/ja.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/ja.lproj/InfoPlist.strings
+index 9c67551..d82a841 100644
+--- a/apps/ios/SimpleX NSE/ja.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/ja.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2022 SimpleX Chat. All rights reserved.";
+diff --git a/apps/ios/SimpleX NSE/nl.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/nl.lproj/InfoPlist.strings
+index 5b932ff..f26e2c3 100644
+--- a/apps/ios/SimpleX NSE/nl.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/nl.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2022 SimpleX Chat. Alle rechten voorbehouden.";
+diff --git a/apps/ios/SimpleX NSE/pl.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/pl.lproj/InfoPlist.strings
+index 844f6b1..21d022a 100644
+--- a/apps/ios/SimpleX NSE/pl.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/pl.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2022 SimpleX Chat. Wszelkie prawa zastrzeżone.";
+diff --git a/apps/ios/SimpleX NSE/ru.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/ru.lproj/InfoPlist.strings
+index d41717d..0e4f137 100644
+--- a/apps/ios/SimpleX NSE/ru.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/ru.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2022 SimpleX Chat. Все права зарезервированы.";
+diff --git a/apps/ios/SimpleX NSE/th.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/th.lproj/InfoPlist.strings
+index 2d0d742..479dbf2 100644
+--- a/apps/ios/SimpleX NSE/th.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/th.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "ลิขสิทธิ์ © 2022 SimpleX Chat สงวนลิขสิทธิ์";
+diff --git a/apps/ios/SimpleX NSE/tr.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/tr.lproj/InfoPlist.strings
+index 476da9e..a5d0afe 100644
+--- a/apps/ios/SimpleX NSE/tr.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/tr.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Telif Hakkı © 2024 SimpleX Chat. Tüm hakları saklıdır.";
+diff --git a/apps/ios/SimpleX NSE/uk.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/uk.lproj/InfoPlist.strings
+index da1f536..14c243e 100644
+--- a/apps/ios/SimpleX NSE/uk.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/uk.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Авторське право © 2022 SimpleX Chat. Всі права захищені.";
+diff --git a/apps/ios/SimpleX NSE/zh-Hans.lproj/InfoPlist.strings b/apps/ios/SimpleX NSE/zh-Hans.lproj/InfoPlist.strings
+index 5b9d11a..1fb1259 100644
+--- a/apps/ios/SimpleX NSE/zh-Hans.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX NSE/zh-Hans.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX NSE";
++"CFBundleDisplayName" = "Hearth NSE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX NSE";
++"CFBundleName" = "Hearth NSE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "版权所有 © 2022 SimpleX Chat。保留所有权利。";
+diff --git a/apps/ios/SimpleX SE/SimpleX SE.entitlements b/apps/ios/SimpleX SE/SimpleX SE.entitlements
+index 51dea2c..05c3766 100644
+--- a/apps/ios/SimpleX SE/SimpleX SE.entitlements	
++++ b/apps/ios/SimpleX SE/SimpleX SE.entitlements	
+@@ -4,11 +4,11 @@
+ <dict>
+ 	<key>com.apple.security.application-groups</key>
+ 	<array>
+-		<string>group.chat.simplex.app</string>
++		<string>group.ru.myhearth.chat</string>
+ 	</array>
+ 	<key>keychain-access-groups</key>
+ 	<array>
+-		<string>$(AppIdentifierPrefix)chat.simplex.app</string>
++		<string>$(AppIdentifierPrefix)ru.myhearth.chat</string>
+ 	</array>
+ </dict>
+ </plist>
+diff --git a/apps/ios/SimpleX SE/de.lproj/InfoPlist.strings b/apps/ios/SimpleX SE/de.lproj/InfoPlist.strings
+index 4a387a4..aa42bde 100644
+--- a/apps/ios/SimpleX SE/de.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX SE/de.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX SE";
++"CFBundleDisplayName" = "Hearth SE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX SE";
++"CFBundleName" = "Hearth SE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2025 SimpleX Chat. Alle Rechte vorbehalten.";
+diff --git a/apps/ios/SimpleX SE/es.lproj/InfoPlist.strings b/apps/ios/SimpleX SE/es.lproj/InfoPlist.strings
+index 74bda58..92f522a 100644
+--- a/apps/ios/SimpleX SE/es.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX SE/es.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX SE";
++"CFBundleDisplayName" = "Hearth SE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX SE";
++"CFBundleName" = "Hearth SE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2024 SimpleX Chat. Todos los derechos reservados.";
+diff --git a/apps/ios/SimpleX SE/fr.lproj/InfoPlist.strings b/apps/ios/SimpleX SE/fr.lproj/InfoPlist.strings
+index 4f89e54..66ecd7b 100644
+--- a/apps/ios/SimpleX SE/fr.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX SE/fr.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX SE";
++"CFBundleDisplayName" = "Hearth SE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX SE";
++"CFBundleName" = "Hearth SE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2024 SimpleX Chat. Tous droits réservés.";
+diff --git a/apps/ios/SimpleX SE/hu.lproj/InfoPlist.strings b/apps/ios/SimpleX SE/hu.lproj/InfoPlist.strings
+index e197985..b1323ee 100644
+--- a/apps/ios/SimpleX SE/hu.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX SE/hu.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX SE";
++"CFBundleDisplayName" = "Hearth SE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX SE";
++"CFBundleName" = "Hearth SE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2024 SimpleX Chat. Minden jog fenntartva.";
+diff --git a/apps/ios/SimpleX SE/it.lproj/InfoPlist.strings b/apps/ios/SimpleX SE/it.lproj/InfoPlist.strings
+index 7814528..ecb5052 100644
+--- a/apps/ios/SimpleX SE/it.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX SE/it.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX SE";
++"CFBundleDisplayName" = "Hearth SE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX SE";
++"CFBundleName" = "Hearth SE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2024 SimpleX Chat. Tutti i diritti riservati.";
+diff --git a/apps/ios/SimpleX SE/nl.lproj/InfoPlist.strings b/apps/ios/SimpleX SE/nl.lproj/InfoPlist.strings
+index c61e43a..9586bfd 100644
+--- a/apps/ios/SimpleX SE/nl.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX SE/nl.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX SE";
++"CFBundleDisplayName" = "Hearth SE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX SE";
++"CFBundleName" = "Hearth SE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2024 SimpleX Chat. All rights reserved.";
+diff --git a/apps/ios/SimpleX SE/pl.lproj/InfoPlist.strings b/apps/ios/SimpleX SE/pl.lproj/InfoPlist.strings
+index 81283a3..61f717d 100644
+--- a/apps/ios/SimpleX SE/pl.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX SE/pl.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX SE";
++"CFBundleDisplayName" = "Hearth SE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX SE";
++"CFBundleName" = "Hearth SE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2024 SimpleX Chat. Wszelkie prawa zastrzeżone.";
+diff --git a/apps/ios/SimpleX SE/ru.lproj/InfoPlist.strings b/apps/ios/SimpleX SE/ru.lproj/InfoPlist.strings
+index d45b3d7..b189c7f 100644
+--- a/apps/ios/SimpleX SE/ru.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX SE/ru.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX SE";
++"CFBundleDisplayName" = "Hearth SE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX SE";
++"CFBundleName" = "Hearth SE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2024 SimpleX Chat. Все права защищены.";
+diff --git a/apps/ios/SimpleX SE/tr.lproj/InfoPlist.strings b/apps/ios/SimpleX SE/tr.lproj/InfoPlist.strings
+index cf1ca31..5d8a768 100644
+--- a/apps/ios/SimpleX SE/tr.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX SE/tr.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX SE";
++"CFBundleDisplayName" = "Hearth SE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX SE";
++"CFBundleName" = "Hearth SE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Telif Hakkı © 2024 SimpleX Chat. Tüm hakları saklıdır.";
+diff --git a/apps/ios/SimpleX SE/uk.lproj/InfoPlist.strings b/apps/ios/SimpleX SE/uk.lproj/InfoPlist.strings
+index 18c4d5e..36b9fac 100644
+--- a/apps/ios/SimpleX SE/uk.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX SE/uk.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX SE";
++"CFBundleDisplayName" = "Hearth SE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX SE";
++"CFBundleName" = "Hearth SE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "Copyright © 2024 SimpleX Chat. Всі права захищені.";
+diff --git a/apps/ios/SimpleX SE/zh-Hans.lproj/InfoPlist.strings b/apps/ios/SimpleX SE/zh-Hans.lproj/InfoPlist.strings
+index 760be62..a607e2d 100644
+--- a/apps/ios/SimpleX SE/zh-Hans.lproj/InfoPlist.strings	
++++ b/apps/ios/SimpleX SE/zh-Hans.lproj/InfoPlist.strings	
+@@ -1,8 +1,8 @@
+ /* Bundle display name */
+-"CFBundleDisplayName" = "SimpleX SE";
++"CFBundleDisplayName" = "Hearth SE";
+ 
+ /* Bundle name */
+-"CFBundleName" = "SimpleX SE";
++"CFBundleName" = "Hearth SE";
+ 
+ /* Copyright (human-readable) */
+ "NSHumanReadableCopyright" = "版权所有 © 2024 SimpleX Chat。保留所有权利。";
+diff --git a/apps/ios/SimpleX--iOS--Info.plist b/apps/ios/SimpleX--iOS--Info.plist
+index 72bd9b0..f6f739f 100644
+--- a/apps/ios/SimpleX--iOS--Info.plist
++++ b/apps/ios/SimpleX--iOS--Info.plist
+@@ -4,7 +4,7 @@
+ <dict>
+ 	<key>BGTaskSchedulerPermittedIdentifiers</key>
+ 	<array>
+-		<string>chat.simplex.app.receive</string>
++		<string>ru.myhearth.chat.receive</string>
+ 	</array>
+ 	<key>CFBundleIcons</key>
+ 	<dict>
+@@ -36,7 +36,7 @@
+ 			<key>CFBundleTypeRole</key>
+ 			<string>Editor</string>
+ 			<key>CFBundleURLName</key>
+-			<string>chat.simplex.app</string>
++			<string>ru.myhearth.chat</string>
+ 			<key>CFBundleURLSchemes</key>
+ 			<array>
+ 				<string>simplex</string>
+diff --git a/apps/ios/SimpleX.xcodeproj/project.pbxproj b/apps/ios/SimpleX.xcodeproj/project.pbxproj
+index 7cd5f06..db2c3a1 100644
+--- a/apps/ios/SimpleX.xcodeproj/project.pbxproj
++++ b/apps/ios/SimpleX.xcodeproj/project.pbxproj
+@@ -2083,17 +2083,18 @@
+ 				CODE_SIGN_STYLE = Automatic;
+ 				CURRENT_PROJECT_VERSION = 349;
+ 				DEAD_CODE_STRIPPING = YES;
+-				DEVELOPMENT_TEAM = 5NN7GUYB6T;
++				DEVELOPMENT_TEAM = 5T376DA4G7;
+ 				ENABLE_BITCODE = NO;
+ 				ENABLE_PREVIEWS = YES;
+ 				GCC_OPTIMIZATION_LEVEL = s;
+ 				GENERATE_INFOPLIST_FILE = YES;
+ 				INFOPLIST_FILE = "SimpleX--iOS--Info.plist";
+-				INFOPLIST_KEY_NSCameraUsageDescription = "SimpleX needs camera access to scan QR codes to connect to other users and for video calls.";
+-				INFOPLIST_KEY_NSFaceIDUsageDescription = "SimpleX uses Face ID for local authentication";
+-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "SimpleX uses local network access to allow using user chat profile via desktop app on the same network.";
+-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "SimpleX needs microphone access for audio and video calls, and to record voice messages.";
+-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "SimpleX needs access to Photo Library for saving captured and received media";
++				INFOPLIST_KEY_CFBundleDisplayName = Hearth;
++				INFOPLIST_KEY_NSCameraUsageDescription = "Hearth needs camera access to scan QR codes to connect to other users and for video calls.";
++				INFOPLIST_KEY_NSFaceIDUsageDescription = "Hearth uses Face ID for local authentication";
++				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Hearth uses local network access to allow using user chat profile via desktop app on the same network.";
++				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Hearth needs microphone access for audio and video calls, and to record voice messages.";
++				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Hearth needs access to Photo Library for saving captured and received media";
+ 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+ 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+ 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+@@ -2108,7 +2109,7 @@
+ 				LLVM_LTO = YES_THIN;
+ 				MARKETING_VERSION = 7.0.1;
+ 				OTHER_LDFLAGS = "-Wl,-stack_size,0x1000000";
+-				PRODUCT_BUNDLE_IDENTIFIER = chat.simplex.app;
++				PRODUCT_BUNDLE_IDENTIFIER = ru.myhearth.chat;
+ 				PRODUCT_NAME = SimpleX;
+ 				SDKROOT = iphoneos;
+ 				SWIFT_EMIT_LOC_STRINGS = YES;
+@@ -2133,17 +2134,18 @@
+ 				CODE_SIGN_STYLE = Automatic;
+ 				CURRENT_PROJECT_VERSION = 349;
+ 				DEAD_CODE_STRIPPING = YES;
+-				DEVELOPMENT_TEAM = 5NN7GUYB6T;
++				DEVELOPMENT_TEAM = 5T376DA4G7;
+ 				ENABLE_BITCODE = NO;
+ 				ENABLE_CODE_COVERAGE = NO;
+ 				ENABLE_PREVIEWS = NO;
+ 				GENERATE_INFOPLIST_FILE = YES;
+ 				INFOPLIST_FILE = "SimpleX--iOS--Info.plist";
+-				INFOPLIST_KEY_NSCameraUsageDescription = "SimpleX needs camera access to scan QR codes to connect to other users and for video calls.";
+-				INFOPLIST_KEY_NSFaceIDUsageDescription = "SimpleX uses Face ID for local authentication";
+-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "SimpleX uses local network access to allow using user chat profile via desktop app on the same network.";
+-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "SimpleX needs microphone access for audio and video calls, and to record voice messages.";
+-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "SimpleX needs access to Photo Library for saving captured and received media";
++				INFOPLIST_KEY_CFBundleDisplayName = Hearth;
++				INFOPLIST_KEY_NSCameraUsageDescription = "Hearth needs camera access to scan QR codes to connect to other users and for video calls.";
++				INFOPLIST_KEY_NSFaceIDUsageDescription = "Hearth uses Face ID for local authentication";
++				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Hearth uses local network access to allow using user chat profile via desktop app on the same network.";
++				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Hearth needs microphone access for audio and video calls, and to record voice messages.";
++				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Hearth needs access to Photo Library for saving captured and received media";
+ 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+ 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+ 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+@@ -2158,7 +2160,7 @@
+ 				LLVM_LTO = YES;
+ 				MARKETING_VERSION = 7.0.1;
+ 				OTHER_LDFLAGS = "-Wl,-stack_size,0x1000000";
+-				PRODUCT_BUNDLE_IDENTIFIER = chat.simplex.app;
++				PRODUCT_BUNDLE_IDENTIFIER = ru.myhearth.chat;
+ 				PRODUCT_NAME = SimpleX;
+ 				SDKROOT = iphoneos;
+ 				SWIFT_EMIT_LOC_STRINGS = YES;
+@@ -2174,11 +2176,11 @@
+ 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+ 				CODE_SIGN_STYLE = Automatic;
+ 				CURRENT_PROJECT_VERSION = 349;
+-				DEVELOPMENT_TEAM = 5NN7GUYB6T;
++				DEVELOPMENT_TEAM = 5T376DA4G7;
+ 				GENERATE_INFOPLIST_FILE = YES;
+ 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+ 				MARKETING_VERSION = 7.0.1;
+-				PRODUCT_BUNDLE_IDENTIFIER = "chat.simplex.Tests-iOS";
++				PRODUCT_BUNDLE_IDENTIFIER = ru.myhearth.chat.tests;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				SDKROOT = iphoneos;
+ 				SWIFT_EMIT_LOC_STRINGS = NO;
+@@ -2194,11 +2196,11 @@
+ 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+ 				CODE_SIGN_STYLE = Automatic;
+ 				CURRENT_PROJECT_VERSION = 349;
+-				DEVELOPMENT_TEAM = 5NN7GUYB6T;
++				DEVELOPMENT_TEAM = 5T376DA4G7;
+ 				GENERATE_INFOPLIST_FILE = YES;
+ 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+ 				MARKETING_VERSION = 7.0.1;
+-				PRODUCT_BUNDLE_IDENTIFIER = "chat.simplex.Tests-iOS";
++				PRODUCT_BUNDLE_IDENTIFIER = ru.myhearth.chat.tests;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				SDKROOT = iphoneos;
+ 				SWIFT_EMIT_LOC_STRINGS = NO;
+@@ -2219,12 +2221,12 @@
+ 				CODE_SIGN_IDENTITY = "Apple Development";
+ 				CODE_SIGN_STYLE = Automatic;
+ 				CURRENT_PROJECT_VERSION = 349;
+-				DEVELOPMENT_TEAM = 5NN7GUYB6T;
++				DEVELOPMENT_TEAM = 5T376DA4G7;
+ 				ENABLE_BITCODE = NO;
+ 				GCC_OPTIMIZATION_LEVEL = s;
+ 				GENERATE_INFOPLIST_FILE = YES;
+ 				INFOPLIST_FILE = "SimpleX NSE/Info.plist";
+-				INFOPLIST_KEY_CFBundleDisplayName = "SimpleX NSE";
++				INFOPLIST_KEY_CFBundleDisplayName = "Hearth NSE";
+ 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2022 SimpleX Chat. All rights reserved.";
+ 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+ 				LD_RUNPATH_SEARCH_PATHS = (
+@@ -2234,7 +2236,7 @@
+ 				);
+ 				LLVM_LTO = YES;
+ 				MARKETING_VERSION = 7.0.1;
+-				PRODUCT_BUNDLE_IDENTIFIER = "chat.simplex.app.SimpleX-NSE";
++				PRODUCT_BUNDLE_IDENTIFIER = ru.myhearth.chat.nse;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				PROVISIONING_PROFILE_SPECIFIER = "";
+ 				SDKROOT = iphoneos;
+@@ -2256,12 +2258,12 @@
+ 				CODE_SIGN_IDENTITY = "Apple Development";
+ 				CODE_SIGN_STYLE = Automatic;
+ 				CURRENT_PROJECT_VERSION = 349;
+-				DEVELOPMENT_TEAM = 5NN7GUYB6T;
++				DEVELOPMENT_TEAM = 5T376DA4G7;
+ 				ENABLE_BITCODE = NO;
+ 				ENABLE_CODE_COVERAGE = NO;
+ 				GENERATE_INFOPLIST_FILE = YES;
+ 				INFOPLIST_FILE = "SimpleX NSE/Info.plist";
+-				INFOPLIST_KEY_CFBundleDisplayName = "SimpleX NSE";
++				INFOPLIST_KEY_CFBundleDisplayName = "Hearth NSE";
+ 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2022 SimpleX Chat. All rights reserved.";
+ 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+ 				LD_RUNPATH_SEARCH_PATHS = (
+@@ -2271,7 +2273,7 @@
+ 				);
+ 				LLVM_LTO = YES;
+ 				MARKETING_VERSION = 7.0.1;
+-				PRODUCT_BUNDLE_IDENTIFIER = "chat.simplex.app.SimpleX-NSE";
++				PRODUCT_BUNDLE_IDENTIFIER = ru.myhearth.chat.nse;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				PROVISIONING_PROFILE_SPECIFIER = "";
+ 				SDKROOT = iphoneos;
+@@ -2294,7 +2296,7 @@
+ 				CODE_SIGN_STYLE = Automatic;
+ 				CURRENT_PROJECT_VERSION = 349;
+ 				DEFINES_MODULE = YES;
+-				DEVELOPMENT_TEAM = 5NN7GUYB6T;
++				DEVELOPMENT_TEAM = 5T376DA4G7;
+ 				DYLIB_COMPATIBILITY_VERSION = 1;
+ 				DYLIB_CURRENT_VERSION = 1;
+ 				DYLIB_INSTALL_NAME_BASE = "@rpath";
+@@ -2319,7 +2321,7 @@
+ 				);
+ 				LLVM_LTO = YES;
+ 				MARKETING_VERSION = 7.0.1;
+-				PRODUCT_BUNDLE_IDENTIFIER = chat.simplex.SimpleXChat;
++				PRODUCT_BUNDLE_IDENTIFIER = ru.myhearth.chat.core;
+ 				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+ 				SDKROOT = iphoneos;
+ 				SKIP_INSTALL = YES;
+@@ -2345,7 +2347,7 @@
+ 				CODE_SIGN_STYLE = Automatic;
+ 				CURRENT_PROJECT_VERSION = 349;
+ 				DEFINES_MODULE = YES;
+-				DEVELOPMENT_TEAM = 5NN7GUYB6T;
++				DEVELOPMENT_TEAM = 5T376DA4G7;
+ 				DYLIB_COMPATIBILITY_VERSION = 1;
+ 				DYLIB_CURRENT_VERSION = 1;
+ 				DYLIB_INSTALL_NAME_BASE = "@rpath";
+@@ -2371,7 +2373,7 @@
+ 				);
+ 				LLVM_LTO = YES;
+ 				MARKETING_VERSION = 7.0.1;
+-				PRODUCT_BUNDLE_IDENTIFIER = chat.simplex.SimpleXChat;
++				PRODUCT_BUNDLE_IDENTIFIER = ru.myhearth.chat.core;
+ 				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+ 				SDKROOT = iphoneos;
+ 				SKIP_INSTALL = YES;
+@@ -2398,12 +2400,12 @@
+ 				CODE_SIGN_ENTITLEMENTS = "SimpleX SE/SimpleX SE.entitlements";
+ 				CODE_SIGN_STYLE = Automatic;
+ 				CURRENT_PROJECT_VERSION = 349;
+-				DEVELOPMENT_TEAM = 5NN7GUYB6T;
++				DEVELOPMENT_TEAM = 5T376DA4G7;
+ 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+ 				GCC_C_LANGUAGE_STANDARD = gnu17;
+ 				GENERATE_INFOPLIST_FILE = YES;
+ 				INFOPLIST_FILE = "SimpleX SE/Info.plist";
+-				INFOPLIST_KEY_CFBundleDisplayName = "SimpleX SE";
++				INFOPLIST_KEY_CFBundleDisplayName = "Hearth SE";
+ 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2024 SimpleX Chat. All rights reserved.";
+ 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+ 				LD_RUNPATH_SEARCH_PATHS = (
+@@ -2413,7 +2415,7 @@
+ 				);
+ 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+ 				MARKETING_VERSION = 7.0.1;
+-				PRODUCT_BUNDLE_IDENTIFIER = "chat.simplex.app.SimpleX-SE";
++				PRODUCT_BUNDLE_IDENTIFIER = ru.myhearth.chat.share;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				SDKROOT = iphoneos;
+ 				SKIP_INSTALL = YES;
+@@ -2432,12 +2434,12 @@
+ 				CODE_SIGN_ENTITLEMENTS = "SimpleX SE/SimpleX SE.entitlements";
+ 				CODE_SIGN_STYLE = Automatic;
+ 				CURRENT_PROJECT_VERSION = 349;
+-				DEVELOPMENT_TEAM = 5NN7GUYB6T;
++				DEVELOPMENT_TEAM = 5T376DA4G7;
+ 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+ 				GCC_C_LANGUAGE_STANDARD = gnu17;
+ 				GENERATE_INFOPLIST_FILE = YES;
+ 				INFOPLIST_FILE = "SimpleX SE/Info.plist";
+-				INFOPLIST_KEY_CFBundleDisplayName = "SimpleX SE";
++				INFOPLIST_KEY_CFBundleDisplayName = "Hearth SE";
+ 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2024 SimpleX Chat. All rights reserved.";
+ 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+ 				LD_RUNPATH_SEARCH_PATHS = (
+@@ -2447,7 +2449,7 @@
+ 				);
+ 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+ 				MARKETING_VERSION = 7.0.1;
+-				PRODUCT_BUNDLE_IDENTIFIER = "chat.simplex.app.SimpleX-SE";
++				PRODUCT_BUNDLE_IDENTIFIER = ru.myhearth.chat.share;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				SDKROOT = iphoneos;
+ 				SKIP_INSTALL = YES;
+diff --git a/apps/ios/SimpleXChat/AppGroup.swift b/apps/ios/SimpleXChat/AppGroup.swift
+index d854373..7acc41b 100644
+--- a/apps/ios/SimpleXChat/AppGroup.swift
++++ b/apps/ios/SimpleXChat/AppGroup.swift
+@@ -66,7 +66,7 @@ public let GROUP_DEFAULT_PQ_EXPERIMENTAL_ENABLED = "pqExperimentalEnabled" // no
+ public let GROUP_DEFAULT_ONE_HAND_UI = "oneHandUI"
+ public let GROUP_DEFAULT_CHAT_BOTTOM_BAR = "chatBottomBar"
+ 
+-public let APP_GROUP_NAME = "group.chat.simplex.app"
++public let APP_GROUP_NAME = "group.ru.myhearth.chat"
+ 
+ public let groupDefaults = UserDefaults(suiteName: APP_GROUP_NAME)!
+ 
+diff --git a/apps/ios/SimpleXChat/KeyChain.swift b/apps/ios/SimpleXChat/KeyChain.swift
+index 50a5946..7fdd8a3 100644
+--- a/apps/ios/SimpleXChat/KeyChain.swift
++++ b/apps/ios/SimpleXChat/KeyChain.swift
+@@ -10,7 +10,7 @@ import Foundation
+ import Security
+ 
+ private let ACCESS_POLICY: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+-private let ACCESS_GROUP: String = "5NN7GUYB6T.chat.simplex.app"
++private let ACCESS_GROUP: String = "5T376DA4G7.ru.myhearth.chat"
+ private let DATABASE_PASSWORD_ITEM: String = "databasePassword"
+ private let APP_PASSWORD_ITEM: String = "appPassword"
+ private let SELF_DESTRUCT_PASSWORD_ITEM: String = "selfDestructPassword"
+diff --git a/apps/ios/bg.lproj/SimpleX--iOS--InfoPlist.strings b/apps/ios/bg.lproj/SimpleX--iOS--InfoPlist.strings
+index 8b1f135..f3052df 100644
+--- a/apps/ios/bg.lproj/SimpleX--iOS--InfoPlist.strings
++++ b/apps/ios/bg.lproj/SimpleX--iOS--InfoPlist.strings
+@@ -1,18 +1,18 @@
+ /* Bundle name */
+-"CFBundleName" = "SimpleX";
++"CFBundleName" = "Hearth";
+ 
+ /* Privacy - Camera Usage Description */
+-"NSCameraUsageDescription" = "SimpleX се нуждае от достъп до камерата, за да сканира QR кодове, за да се свърже с други потребители и за видео разговори.";
++"NSCameraUsageDescription" = "Hearth се нуждае от достъп до камерата, за да сканира QR кодове, за да се свърже с други потребители и за видео разговори.";
+ 
+ /* Privacy - Face ID Usage Description */
+-"NSFaceIDUsageDescription" = "SimpleX използва Face ID за локалнa идентификация";
++"NSFaceIDUsageDescription" = "Hearth използва Face ID за локалнa идентификация";
+ 
+ /* Privacy - Local Network Usage Description */
+-"NSLocalNetworkUsageDescription" = "SimpleX използва достъп до локална мрежа, за да позволи използването на потребителския чат профил чрез настолно приложение в същата мрежа.";
++"NSLocalNetworkUsageDescription" = "Hearth използва достъп до локална мрежа, за да позволи използването на потребителския чат профил чрез настолно приложение в същата мрежа.";
+ 
+ /* Privacy - Microphone Usage Description */
+-"NSMicrophoneUsageDescription" = "SimpleX се нуждае от достъп до микрофона за аудио и видео разговори и за запис на гласови съобщения.";
++"NSMicrophoneUsageDescription" = "Hearth се нуждае от достъп до микрофона за аудио и видео разговори и за запис на гласови съобщения.";
+ 
+ /* Privacy - Photo Library Additions Usage Description */
+-"NSPhotoLibraryAddUsageDescription" = "SimpleX се нуждае от достъп до фотобиблиотека за запазване на заснета и получена медия";
++"NSPhotoLibraryAddUsageDescription" = "Hearth се нуждае от достъп до фотобиблиотека за запазване на заснета и получена медия";
+ 
+diff --git a/apps/ios/cs.lproj/SimpleX--iOS--InfoPlist.strings b/apps/ios/cs.lproj/SimpleX--iOS--InfoPlist.strings
+index cfbbf1f..1283604 100644
+--- a/apps/ios/cs.lproj/SimpleX--iOS--InfoPlist.strings
++++ b/apps/ios/cs.lproj/SimpleX--iOS--InfoPlist.strings
+@@ -1,15 +1,15 @@
+ /* Bundle name */
+-"CFBundleName" = "SimpleX";
++"CFBundleName" = "Hearth";
+ 
+ /* Privacy - Camera Usage Description */
+-"NSCameraUsageDescription" = "SimpleX potřebuje přístup k fotoaparátu, aby mohl skenovat QR kódy pro připojení k ostatním uživatelům a pro videohovory.";
++"NSCameraUsageDescription" = "Hearth potřebuje přístup k fotoaparátu, aby mohl skenovat QR kódy pro připojení k ostatním uživatelům a pro videohovory.";
+ 
+ /* Privacy - Face ID Usage Description */
+-"NSFaceIDUsageDescription" = "SimpleX používá Face ID pro místní ověřování";
++"NSFaceIDUsageDescription" = "Hearth používá Face ID pro místní ověřování";
+ 
+ /* Privacy - Microphone Usage Description */
+-"NSMicrophoneUsageDescription" = "SimpleX potřebuje přístup k mikrofonu pro audio a video hovory a pro nahrávání hlasových zpráv.";
++"NSMicrophoneUsageDescription" = "Hearth potřebuje přístup k mikrofonu pro audio a video hovory a pro nahrávání hlasových zpráv.";
+ 
+ /* Privacy - Photo Library Additions Usage Description */
+-"NSPhotoLibraryAddUsageDescription" = "SimpleX potřebuje přístup do knihovny fotografií pro ukládání zachycených a přijatých médií";
++"NSPhotoLibraryAddUsageDescription" = "Hearth potřebuje přístup do knihovny fotografií pro ukládání zachycených a přijatých médií";
+ 
+diff --git a/apps/ios/de.lproj/SimpleX--iOS--InfoPlist.strings b/apps/ios/de.lproj/SimpleX--iOS--InfoPlist.strings
+index e0554c9..63463e1 100644
+--- a/apps/ios/de.lproj/SimpleX--iOS--InfoPlist.strings
++++ b/apps/ios/de.lproj/SimpleX--iOS--InfoPlist.strings
+@@ -1,18 +1,18 @@
+ /* Bundle name */
+-"CFBundleName" = "SimpleX";
++"CFBundleName" = "Hearth";
+ 
+ /* Privacy - Camera Usage Description */
+-"NSCameraUsageDescription" = "SimpleX benötigt Zugriff auf die Kamera, um QR Codes für die Verbindung mit anderen Benutzern zu scannen und Videoanrufe durchzuführen.";
++"NSCameraUsageDescription" = "Hearth benötigt Zugriff auf die Kamera, um QR Codes für die Verbindung mit anderen Benutzern zu scannen und Videoanrufe durchzuführen.";
+ 
+ /* Privacy - Face ID Usage Description */
+-"NSFaceIDUsageDescription" = "Face ID wird von SimpleX für die lokale Authentifizierung genutzt";
++"NSFaceIDUsageDescription" = "Face ID wird von Hearth für die lokale Authentifizierung genutzt";
+ 
+ /* Privacy - Local Network Usage Description */
+-"NSLocalNetworkUsageDescription" = "SimpleX nutzt den lokalen Netzwerkzugriff, um die Nutzung von Benutzer-Chatprofilen über eine Desktop-App im gleichen Netzwerk zu erlauben.";
++"NSLocalNetworkUsageDescription" = "Hearth nutzt den lokalen Netzwerkzugriff, um die Nutzung von Benutzer-Chatprofilen über eine Desktop-App im gleichen Netzwerk zu erlauben.";
+ 
+ /* Privacy - Microphone Usage Description */
+-"NSMicrophoneUsageDescription" = "SimpleX benötigt Zugriff auf das Mikrofon, um Audio- und Videoanrufe und die Aufnahme von Sprachnachrichten zu ermöglichen.";
++"NSMicrophoneUsageDescription" = "Hearth benötigt Zugriff auf das Mikrofon, um Audio- und Videoanrufe und die Aufnahme von Sprachnachrichten zu ermöglichen.";
+ 
+ /* Privacy - Photo Library Additions Usage Description */
+-"NSPhotoLibraryAddUsageDescription" = "SimpleX benötigt Zugriff auf das Fotoalbum, um selbst gemachte oder heruntergeladene Bilder zu speichern";
++"NSPhotoLibraryAddUsageDescription" = "Hearth benötigt Zugriff auf das Fotoalbum, um selbst gemachte oder heruntergeladene Bilder zu speichern";
+ 
+diff --git a/apps/ios/es.lproj/SimpleX--iOS--InfoPlist.strings b/apps/ios/es.lproj/SimpleX--iOS--InfoPlist.strings
+index 3fc7b2c..ad224b2 100644
+--- a/apps/ios/es.lproj/SimpleX--iOS--InfoPlist.strings
++++ b/apps/ios/es.lproj/SimpleX--iOS--InfoPlist.strings
+@@ -1,18 +1,18 @@
+ /* Bundle name */
+-"CFBundleName" = "SimpleX";
++"CFBundleName" = "Hearth";
+ 
+ /* Privacy - Camera Usage Description */
+-"NSCameraUsageDescription" = "SimpleX necesita acceso a la cámara para escanear códigos QR para conectarse con otros usuarios y para las videollamadas.";
++"NSCameraUsageDescription" = "Hearth necesita acceso a la cámara para escanear códigos QR para conectarse con otros usuarios y para las videollamadas.";
+ 
+ /* Privacy - Face ID Usage Description */
+-"NSFaceIDUsageDescription" = "SimpleX usa reconocimiento facial para la autenticación local";
++"NSFaceIDUsageDescription" = "Hearth usa reconocimiento facial para la autenticación local";
+ 
+ /* Privacy - Local Network Usage Description */
+-"NSLocalNetworkUsageDescription" = "SimpleX utiliza el acceso a la red local para abrir el perfil de chat en la aplicación de ordenador en la misma red.";
++"NSLocalNetworkUsageDescription" = "Hearth utiliza el acceso a la red local para abrir el perfil de chat en la aplicación de ordenador en la misma red.";
+ 
+ /* Privacy - Microphone Usage Description */
+-"NSMicrophoneUsageDescription" = "SimpleX necesita acceso al micrófono para las llamadas de audio, vídeo y para grabar mensajes de voz.";
++"NSMicrophoneUsageDescription" = "Hearth necesita acceso al micrófono para las llamadas de audio, vídeo y para grabar mensajes de voz.";
+ 
+ /* Privacy - Photo Library Additions Usage Description */
+-"NSPhotoLibraryAddUsageDescription" = "SimpleX necesita acceso a la galería de fotos para guardar los medios capturados y recibidos";
++"NSPhotoLibraryAddUsageDescription" = "Hearth necesita acceso a la galería de fotos para guardar los medios capturados y recibidos";
+ 
+diff --git a/apps/ios/fi.lproj/SimpleX--iOS--InfoPlist.strings b/apps/ios/fi.lproj/SimpleX--iOS--InfoPlist.strings
+index 969e43e..c95af6d 100644
+--- a/apps/ios/fi.lproj/SimpleX--iOS--InfoPlist.strings
++++ b/apps/ios/fi.lproj/SimpleX--iOS--InfoPlist.strings
+@@ -1,15 +1,15 @@
+ /* Bundle name */
+-"CFBundleName" = "SimpleX";
++"CFBundleName" = "Hearth";
+ 
+ /* Privacy - Camera Usage Description */
+-"NSCameraUsageDescription" = "SimpleX tarvitsee pääsyn kameraan, jotta se voi skannata QR-koodeja muodostaakseen yhteyden muihin käyttäjiin ja videopuheluita varten.";
++"NSCameraUsageDescription" = "Hearth tarvitsee pääsyn kameraan, jotta se voi skannata QR-koodeja muodostaakseen yhteyden muihin käyttäjiin ja videopuheluita varten.";
+ 
+ /* Privacy - Face ID Usage Description */
+-"NSFaceIDUsageDescription" = "SimpleX käyttää Face ID:tä paikalliseen todennukseen";
++"NSFaceIDUsageDescription" = "Hearth käyttää Face ID:tä paikalliseen todennukseen";
+ 
+ /* Privacy - Microphone Usage Description */
+-"NSMicrophoneUsageDescription" = "SimpleX tarvitsee mikrofonia ääni- ja videopuheluita ja ääniviestien tallentamista varten.";
++"NSMicrophoneUsageDescription" = "Hearth tarvitsee mikrofonia ääni- ja videopuheluita ja ääniviestien tallentamista varten.";
+ 
+ /* Privacy - Photo Library Additions Usage Description */
+-"NSPhotoLibraryAddUsageDescription" = "SimpleX tarvitsee pääsyn valokuvakirjastoon kuvattujen ja vastaanotettujen medioiden tallentamista varten";
++"NSPhotoLibraryAddUsageDescription" = "Hearth tarvitsee pääsyn valokuvakirjastoon kuvattujen ja vastaanotettujen medioiden tallentamista varten";
+ 
+diff --git a/apps/ios/fr.lproj/SimpleX--iOS--InfoPlist.strings b/apps/ios/fr.lproj/SimpleX--iOS--InfoPlist.strings
+index e5bfdf0..7928ff2 100644
+--- a/apps/ios/fr.lproj/SimpleX--iOS--InfoPlist.strings
++++ b/apps/ios/fr.lproj/SimpleX--iOS--InfoPlist.strings
+@@ -1,18 +1,18 @@
+ /* Bundle name */
+-"CFBundleName" = "SimpleX";
++"CFBundleName" = "Hearth";
+ 
+ /* Privacy - Camera Usage Description */
+-"NSCameraUsageDescription" = "SimpleX a besoin d'un accès à la caméra pour scanner les codes QR afin de se connecter aux autres utilisateurs ainsi que pour les appels vidéo.";
++"NSCameraUsageDescription" = "Hearth a besoin d'un accès à la caméra pour scanner les codes QR afin de se connecter aux autres utilisateurs ainsi que pour les appels vidéo.";
+ 
+ /* Privacy - Face ID Usage Description */
+ "NSFaceIDUsageDescription" = "SimpleGroup not found!X utilise Face ID pour l'authentification locale";
+ 
+ /* Privacy - Local Network Usage Description */
+-"NSLocalNetworkUsageDescription" = "SimpleX utilise un accès au réseau local pour permettre l'utilisation du profil de chat de l'utilisateur via l'application de bureau au sein de ce même réseau.";
++"NSLocalNetworkUsageDescription" = "Hearth utilise un accès au réseau local pour permettre l'utilisation du profil de chat de l'utilisateur via l'application de bureau au sein de ce même réseau.";
+ 
+ /* Privacy - Microphone Usage Description */
+-"NSMicrophoneUsageDescription" = "SimpleX a besoin d'un accès au microphone pour les appels audio et vidéo ainsi que pour enregistrer des messages vocaux.";
++"NSMicrophoneUsageDescription" = "Hearth a besoin d'un accès au microphone pour les appels audio et vidéo ainsi que pour enregistrer des messages vocaux.";
+ 
+ /* Privacy - Photo Library Additions Usage Description */
+-"NSPhotoLibraryAddUsageDescription" = "SimpleX a besoin d'un accès à la photothèque pour enregistrer les médias capturés et reçus";
++"NSPhotoLibraryAddUsageDescription" = "Hearth a besoin d'un accès à la photothèque pour enregistrer les médias capturés et reçus";
+ 
+diff --git a/apps/ios/hu.lproj/SimpleX--iOS--InfoPlist.strings b/apps/ios/hu.lproj/SimpleX--iOS--InfoPlist.strings
+index d1b68ad..1b5b7be 100644
+--- a/apps/ios/hu.lproj/SimpleX--iOS--InfoPlist.strings
++++ b/apps/ios/hu.lproj/SimpleX--iOS--InfoPlist.strings
+@@ -1,18 +1,18 @@
+ /* Bundle name */
+-"CFBundleName" = "SimpleX";
++"CFBundleName" = "Hearth";
+ 
+ /* Privacy - Camera Usage Description */
+-"NSCameraUsageDescription" = "A SimpleXnek hozzáférésre van szüksége a kamerához a QR-kódok beolvasásához, hogy kapcsolódhasson más felhasználókhoz és videohívásokhoz.";
++"NSCameraUsageDescription" = "A Hearthnek hozzáférésre van szüksége a kamerához a QR-kódok beolvasásához, hogy kapcsolódhasson más felhasználókhoz és videohívásokhoz.";
+ 
+ /* Privacy - Face ID Usage Description */
+-"NSFaceIDUsageDescription" = "A SimpleX Face ID-t használ a helyi hitelesítéshez";
++"NSFaceIDUsageDescription" = "A Hearth Face ID-t használ a helyi hitelesítéshez";
+ 
+ /* Privacy - Local Network Usage Description */
+-"NSLocalNetworkUsageDescription" = "A SimpleX helyi hálózati hozzáférést használ, hogy lehetővé tegye a felhasználói csevegési profil használatát számítógépen keresztül ugyanazon a hálózaton.";
++"NSLocalNetworkUsageDescription" = "A Hearth helyi hálózati hozzáférést használ, hogy lehetővé tegye a felhasználói csevegési profil használatát számítógépen keresztül ugyanazon a hálózaton.";
+ 
+ /* Privacy - Microphone Usage Description */
+-"NSMicrophoneUsageDescription" = "A SimpleXnek hozzáférésre van szüksége a mikrofonhoz a hang- és videohívásokhoz, valamint hangüzenetek rögzítéséhez.";
++"NSMicrophoneUsageDescription" = "A Hearthnek hozzáférésre van szüksége a mikrofonhoz a hang- és videohívásokhoz, valamint hangüzenetek rögzítéséhez.";
+ 
+ /* Privacy - Photo Library Additions Usage Description */
+-"NSPhotoLibraryAddUsageDescription" = "A SimpleXnek hozzáférésre van szüksége a galériához a rögzített és fogadott média mentéséhez";
++"NSPhotoLibraryAddUsageDescription" = "A Hearthnek hozzáférésre van szüksége a galériához a rögzített és fogadott média mentéséhez";
+ 
+diff --git a/apps/ios/it.lproj/SimpleX--iOS--InfoPlist.strings b/apps/ios/it.lproj/SimpleX--iOS--InfoPlist.strings
+index 8830d77..f2b63ac 100644
+--- a/apps/ios/it.lproj/SimpleX--iOS--InfoPlist.strings
++++ b/apps/ios/it.lproj/SimpleX--iOS--InfoPlist.strings
+@@ -1,18 +1,18 @@
+ /* Bundle name */
+-"CFBundleName" = "SimpleX";
++"CFBundleName" = "Hearth";
+ 
+ /* Privacy - Camera Usage Description */
+-"NSCameraUsageDescription" = "SimpleX ha bisogno dell'accesso alla fotocamera per scansionare i codici QR per connettersi ad altri utenti e per le videochiamate.";
++"NSCameraUsageDescription" = "Hearth ha bisogno dell'accesso alla fotocamera per scansionare i codici QR per connettersi ad altri utenti e per le videochiamate.";
+ 
+ /* Privacy - Face ID Usage Description */
+-"NSFaceIDUsageDescription" = "SimpleX usa Face ID per l'autenticazione locale";
++"NSFaceIDUsageDescription" = "Hearth usa Face ID per l'autenticazione locale";
+ 
+ /* Privacy - Local Network Usage Description */
+-"NSLocalNetworkUsageDescription" = "SimpleX usa l'accesso alla rete locale per consentire di usare il profilo di chat tramite l'app desktop sulla stessa rete.";
++"NSLocalNetworkUsageDescription" = "Hearth usa l'accesso alla rete locale per consentire di usare il profilo di chat tramite l'app desktop sulla stessa rete.";
+ 
+ /* Privacy - Microphone Usage Description */
+-"NSMicrophoneUsageDescription" = "SimpleX ha bisogno dell'accesso al microfono per le chiamate audio e video e per registrare messaggi vocali.";
++"NSMicrophoneUsageDescription" = "Hearth ha bisogno dell'accesso al microfono per le chiamate audio e video e per registrare messaggi vocali.";
+ 
+ /* Privacy - Photo Library Additions Usage Description */
+-"NSPhotoLibraryAddUsageDescription" = "SimpleX ha bisogno di accedere alla libreria di foto per salvare i contenuti multimediali acquisiti e ricevuti";
++"NSPhotoLibraryAddUsageDescription" = "Hearth ha bisogno di accedere alla libreria di foto per salvare i contenuti multimediali acquisiti e ricevuti";
+ 
+diff --git a/apps/ios/ja.lproj/SimpleX--iOS--InfoPlist.strings b/apps/ios/ja.lproj/SimpleX--iOS--InfoPlist.strings
+index e5eda32..b77914b 100644
+--- a/apps/ios/ja.lproj/SimpleX--iOS--InfoPlist.strings
++++ b/apps/ios/ja.lproj/SimpleX--iOS--InfoPlist.strings
+@@ -1,15 +1,15 @@
+ /* Bundle name */
+-"CFBundleName" = "SimpleX";
++"CFBundleName" = "Hearth";
+ 
+ /* Privacy - Camera Usage Description */
+-"NSCameraUsageDescription" = "SimpleXは他のユーザーに接続したりビデオ通話する際にQRコード読み取りのためにカメラにアクセスする必要があります。";
++"NSCameraUsageDescription" = "Hearthは他のユーザーに接続したりビデオ通話する際にQRコード読み取りのためにカメラにアクセスする必要があります。";
+ 
+ /* Privacy - Face ID Usage Description */
+-"NSFaceIDUsageDescription" = "SimpleXはローカル認証にFace IDを使用します";
++"NSFaceIDUsageDescription" = "Hearthはローカル認証にFace IDを使用します";
+ 
+ /* Privacy - Microphone Usage Description */
+-"NSMicrophoneUsageDescription" = "SimpleXは音声通話やビデオ通話および音声メッセージの録音のためにマイクにアクセスする必要があります。";
++"NSMicrophoneUsageDescription" = "Hearthは音声通話やビデオ通話および音声メッセージの録音のためにマイクにアクセスする必要があります。";
+ 
+ /* Privacy - Photo Library Additions Usage Description */
+-"NSPhotoLibraryAddUsageDescription" = "SimpleXはキャプチャおよび受信したメディアを保存するためにフォトライブラリにアクセスする必要があります";
++"NSPhotoLibraryAddUsageDescription" = "Hearthはキャプチャおよび受信したメディアを保存するためにフォトライブラリにアクセスする必要があります";
+ 
+diff --git a/apps/ios/nl.lproj/SimpleX--iOS--InfoPlist.strings b/apps/ios/nl.lproj/SimpleX--iOS--InfoPlist.strings
+index 0b9e594..1175fda 100644
+--- a/apps/ios/nl.lproj/SimpleX--iOS--InfoPlist.strings
++++ b/apps/ios/nl.lproj/SimpleX--iOS--InfoPlist.strings
+@@ -1,18 +1,18 @@
+ /* Bundle name */
+-"CFBundleName" = "SimpleX";
++"CFBundleName" = "Hearth";
+ 
+ /* Privacy - Camera Usage Description */
+-"NSCameraUsageDescription" = "SimpleX heeft camera toegang nodig om QR-codes te scannen om verbinding te maken met andere gebruikers en voor video gesprekken.";
++"NSCameraUsageDescription" = "Hearth heeft camera toegang nodig om QR-codes te scannen om verbinding te maken met andere gebruikers en voor video gesprekken.";
+ 
+ /* Privacy - Face ID Usage Description */
+-"NSFaceIDUsageDescription" = "SimpleX gebruikt Face-ID voor lokale authenticatie";
++"NSFaceIDUsageDescription" = "Hearth gebruikt Face-ID voor lokale authenticatie";
+ 
+ /* Privacy - Local Network Usage Description */
+-"NSLocalNetworkUsageDescription" = "SimpleX maakt gebruik van lokale netwerktoegang om het gebruik van een gebruikerschatprofiel via de desktop-app op hetzelfde netwerk mogelijk te maken.";
++"NSLocalNetworkUsageDescription" = "Hearth maakt gebruik van lokale netwerktoegang om het gebruik van een gebruikerschatprofiel via de desktop-app op hetzelfde netwerk mogelijk te maken.";
+ 
+ /* Privacy - Microphone Usage Description */
+-"NSMicrophoneUsageDescription" = "SimpleX heeft microfoon toegang nodig voor audio en video oproepen en om spraak berichten op te nemen.";
++"NSMicrophoneUsageDescription" = "Hearth heeft microfoon toegang nodig voor audio en video oproepen en om spraak berichten op te nemen.";
+ 
+ /* Privacy - Photo Library Additions Usage Description */
+-"NSPhotoLibraryAddUsageDescription" = "SimpleX heeft toegang tot Fotobibliotheek nodig om vastgelegde en ontvangen media op te slaan";
++"NSPhotoLibraryAddUsageDescription" = "Hearth heeft toegang tot Fotobibliotheek nodig om vastgelegde en ontvangen media op te slaan";
+ 
+diff --git a/apps/ios/pl.lproj/SimpleX--iOS--InfoPlist.strings b/apps/ios/pl.lproj/SimpleX--iOS--InfoPlist.strings
+index 8c0f71f..a557cfd 100644
+--- a/apps/ios/pl.lproj/SimpleX--iOS--InfoPlist.strings
++++ b/apps/ios/pl.lproj/SimpleX--iOS--InfoPlist.strings
+@@ -1,18 +1,18 @@
+ /* Bundle name */
+-"CFBundleName" = "SimpleX";
++"CFBundleName" = "Hearth";
+ 
+ /* Privacy - Camera Usage Description */
+-"NSCameraUsageDescription" = "SimpleX potrzebuje dostępu do kamery, w celu skanowania kodów QR aby połączyć się z innymi użytkownikami i połączeń wideo.";
++"NSCameraUsageDescription" = "Hearth potrzebuje dostępu do kamery, w celu skanowania kodów QR aby połączyć się z innymi użytkownikami i połączeń wideo.";
+ 
+ /* Privacy - Face ID Usage Description */
+-"NSFaceIDUsageDescription" = "SimpleX używa Face ID do lokalnego uwierzytelniania";
++"NSFaceIDUsageDescription" = "Hearth używa Face ID do lokalnego uwierzytelniania";
+ 
+ /* Privacy - Local Network Usage Description */
+-"NSLocalNetworkUsageDescription" = "SimpleX używa sieci lokalnej aby pozwolić na dostęp profilom czatu użytkownika przez aplikację komputerową na tej samej sieci.";
++"NSLocalNetworkUsageDescription" = "Hearth używa sieci lokalnej aby pozwolić na dostęp profilom czatu użytkownika przez aplikację komputerową na tej samej sieci.";
+ 
+ /* Privacy - Microphone Usage Description */
+-"NSMicrophoneUsageDescription" = "SimpleX potrzebuje dostępu do mikrofonu, w celu połączeń audio i wideo oraz nagrywania wiadomości głosowych.";
++"NSMicrophoneUsageDescription" = "Hearth potrzebuje dostępu do mikrofonu, w celu połączeń audio i wideo oraz nagrywania wiadomości głosowych.";
+ 
+ /* Privacy - Photo Library Additions Usage Description */
+-"NSPhotoLibraryAddUsageDescription" = "SimpleX potrzebuje dostępu do galerii zdjęć, w celu zapisywania i otrzymywania mediów";
++"NSPhotoLibraryAddUsageDescription" = "Hearth potrzebuje dostępu do galerii zdjęć, w celu zapisywania i otrzymywania mediów";
+ 
+diff --git a/apps/ios/ru.lproj/SimpleX--iOS--InfoPlist.strings b/apps/ios/ru.lproj/SimpleX--iOS--InfoPlist.strings
+index 2e11973..0de35fe 100644
+--- a/apps/ios/ru.lproj/SimpleX--iOS--InfoPlist.strings
++++ b/apps/ios/ru.lproj/SimpleX--iOS--InfoPlist.strings
+@@ -1,18 +1,18 @@
+ /* Bundle name */
+-"CFBundleName" = "SimpleX";
++"CFBundleName" = "Hearth";
+ 
+ /* Privacy - Camera Usage Description */
+-"NSCameraUsageDescription" = "SimpleX использует камеру для сканирования QR кодов при соединении с другими пользователями и для видео звонков.";
++"NSCameraUsageDescription" = "Hearth использует камеру для сканирования QR кодов при соединении с другими пользователями и для видео звонков.";
+ 
+ /* Privacy - Face ID Usage Description */
+-"NSFaceIDUsageDescription" = "SimpleX использует Face ID для аутентификации";
++"NSFaceIDUsageDescription" = "Hearth использует Face ID для аутентификации";
+ 
+ /* Privacy - Local Network Usage Description */
+-"NSLocalNetworkUsageDescription" = "SimpleX использует доступ к локальной сети, чтобы разрешить использование профиля чата через компьютер в той же сети.";
++"NSLocalNetworkUsageDescription" = "Hearth использует доступ к локальной сети, чтобы разрешить использование профиля чата через компьютер в той же сети.";
+ 
+ /* Privacy - Microphone Usage Description */
+-"NSMicrophoneUsageDescription" = "SimpleX использует микрофон для аудио и видео звонков, и для записи голосовых сообщений.";
++"NSMicrophoneUsageDescription" = "Hearth использует микрофон для аудио и видео звонков, и для записи голосовых сообщений.";
+ 
+ /* Privacy - Photo Library Additions Usage Description */
+-"NSPhotoLibraryAddUsageDescription" = "SimpleX использует доступ к Photo Library для сохранения сделанных и полученных фотографий";
++"NSPhotoLibraryAddUsageDescription" = "Hearth использует доступ к Photo Library для сохранения сделанных и полученных фотографий";
+ 
+diff --git a/apps/ios/th.lproj/SimpleX--iOS--InfoPlist.strings b/apps/ios/th.lproj/SimpleX--iOS--InfoPlist.strings
+index 0ac8725..80ab29c 100644
+--- a/apps/ios/th.lproj/SimpleX--iOS--InfoPlist.strings
++++ b/apps/ios/th.lproj/SimpleX--iOS--InfoPlist.strings
+@@ -1,15 +1,15 @@
+ /* Bundle name */
+-"CFBundleName" = "SimpleX";
++"CFBundleName" = "Hearth";
+ 
+ /* Privacy - Camera Usage Description */
+-"NSCameraUsageDescription" = "SimpleX ต้องการการเข้าถึงกล้องเพื่อสแกนรหัสคิวอาร์เพื่อเชื่อมต่อกับผู้ใช้รายอื่นและสำหรับการโทรวิดีโอ";
++"NSCameraUsageDescription" = "Hearth ต้องการการเข้าถึงกล้องเพื่อสแกนรหัสคิวอาร์เพื่อเชื่อมต่อกับผู้ใช้รายอื่นและสำหรับการโทรวิดีโอ";
+ 
+ /* Privacy - Face ID Usage Description */
+-"NSFaceIDUsageDescription" = "SimpleX ใช้ Face ID สำหรับการรับรองความถูกต้องในเครื่อง";
++"NSFaceIDUsageDescription" = "Hearth ใช้ Face ID สำหรับการรับรองความถูกต้องในเครื่อง";
+ 
+ /* Privacy - Microphone Usage Description */
+-"NSMicrophoneUsageDescription" = "SimpleX ต้องการการเข้าถึงไมโครโฟนสำหรับการโทรด้วยเสียงและวิดีโอ และเพื่อบันทึกข้อความเสียง";
++"NSMicrophoneUsageDescription" = "Hearth ต้องการการเข้าถึงไมโครโฟนสำหรับการโทรด้วยเสียงและวิดีโอ และเพื่อบันทึกข้อความเสียง";
+ 
+ /* Privacy - Photo Library Additions Usage Description */
+-"NSPhotoLibraryAddUsageDescription" = "SimpleX ต้องการเข้าถึง Photo Library เพื่อบันทึกสื่อที่ถ่ายและได้รับ";
++"NSPhotoLibraryAddUsageDescription" = "Hearth ต้องการเข้าถึง Photo Library เพื่อบันทึกสื่อที่ถ่ายและได้รับ";
+ 
+diff --git a/apps/ios/tr.lproj/SimpleX--iOS--InfoPlist.strings b/apps/ios/tr.lproj/SimpleX--iOS--InfoPlist.strings
+index fe0af4c..02b39a4 100644
+--- a/apps/ios/tr.lproj/SimpleX--iOS--InfoPlist.strings
++++ b/apps/ios/tr.lproj/SimpleX--iOS--InfoPlist.strings
+@@ -1,18 +1,18 @@
+ /* Bundle name */
+-"CFBundleName" = "SimpleX";
++"CFBundleName" = "Hearth";
+ 
+ /* Privacy - Camera Usage Description */
+-"NSCameraUsageDescription" = "SimpleX, diğer kullanıcılara bağlanmak amacıyla QR kodlarını taramak ve görüntülü aramalar için kamera erişimine ihtiyaç duyar.";
++"NSCameraUsageDescription" = "Hearth, diğer kullanıcılara bağlanmak amacıyla QR kodlarını taramak ve görüntülü aramalar için kamera erişimine ihtiyaç duyar.";
+ 
+ /* Privacy - Face ID Usage Description */
+-"NSFaceIDUsageDescription" = "SimpleX yerel kimlik doğrulama için Face ID kullanır";
++"NSFaceIDUsageDescription" = "Hearth yerel kimlik doğrulama için Face ID kullanır";
+ 
+ /* Privacy - Local Network Usage Description */
+-"NSLocalNetworkUsageDescription" = "SimpleX, aynı ağdaki masaüstü uygulaması aracılığıyla kullanıcı sohbet profilinin kullanılmasına izin vermek için yerel ağ erişimini kullanır.";
++"NSLocalNetworkUsageDescription" = "Hearth, aynı ağdaki masaüstü uygulaması aracılığıyla kullanıcı sohbet profilinin kullanılmasına izin vermek için yerel ağ erişimini kullanır.";
+ 
+ /* Privacy - Microphone Usage Description */
+-"NSMicrophoneUsageDescription" = "SimpleX'in sesli ve görüntülü aramalar ve sesli mesajları kaydetmek için mikrofon erişimine ihtiyacı vardır.";
++"NSMicrophoneUsageDescription" = "Hearth'in sesli ve görüntülü aramalar ve sesli mesajları kaydetmek için mikrofon erişimine ihtiyacı vardır.";
+ 
+ /* Privacy - Photo Library Additions Usage Description */
+-"NSPhotoLibraryAddUsageDescription" = "SimpleX'in çekilen ve alınan medyayı kaydetmek için Fotoğraf Kitaplığı'na erişmesi gerekir";
++"NSPhotoLibraryAddUsageDescription" = "Hearth'in çekilen ve alınan medyayı kaydetmek için Fotoğraf Kitaplığı'na erişmesi gerekir";
+ 
+diff --git a/apps/ios/uk.lproj/SimpleX--iOS--InfoPlist.strings b/apps/ios/uk.lproj/SimpleX--iOS--InfoPlist.strings
+index 081ea9b..ba92be0 100644
+--- a/apps/ios/uk.lproj/SimpleX--iOS--InfoPlist.strings
++++ b/apps/ios/uk.lproj/SimpleX--iOS--InfoPlist.strings
+@@ -1,18 +1,18 @@
+ /* Bundle name */
+-"CFBundleName" = "SimpleX";
++"CFBundleName" = "Hearth";
+ 
+ /* Privacy - Camera Usage Description */
+-"NSCameraUsageDescription" = "SimpleX потребує доступу до камери, щоб сканувати QR-коди для з'єднання з іншими користувачами та для відеодзвінків.";
++"NSCameraUsageDescription" = "Hearth потребує доступу до камери, щоб сканувати QR-коди для з'єднання з іншими користувачами та для відеодзвінків.";
+ 
+ /* Privacy - Face ID Usage Description */
+-"NSFaceIDUsageDescription" = "SimpleX використовує Face ID для локальної автентифікації";
++"NSFaceIDUsageDescription" = "Hearth використовує Face ID для локальної автентифікації";
+ 
+ /* Privacy - Local Network Usage Description */
+-"NSLocalNetworkUsageDescription" = "SimpleX використовує доступ до локальної мережі, щоб дозволити користувачеві користуватися профілем чату через десктопну програму в тій же мережі.";
++"NSLocalNetworkUsageDescription" = "Hearth використовує доступ до локальної мережі, щоб дозволити користувачеві користуватися профілем чату через десктопну програму в тій же мережі.";
+ 
+ /* Privacy - Microphone Usage Description */
+-"NSMicrophoneUsageDescription" = "SimpleX потребує доступу до мікрофона для аудіо та відео дзвінків, а також для запису голосових повідомлень.";
++"NSMicrophoneUsageDescription" = "Hearth потребує доступу до мікрофона для аудіо та відео дзвінків, а також для запису голосових повідомлень.";
+ 
+ /* Privacy - Photo Library Additions Usage Description */
+-"NSPhotoLibraryAddUsageDescription" = "SimpleX потребує доступу до фототеки для збереження захоплених та отриманих медіафайлів";
++"NSPhotoLibraryAddUsageDescription" = "Hearth потребує доступу до фототеки для збереження захоплених та отриманих медіафайлів";
+ 
+diff --git a/apps/ios/zh-Hans.lproj/SimpleX--iOS--InfoPlist.strings b/apps/ios/zh-Hans.lproj/SimpleX--iOS--InfoPlist.strings
+index 199d5fa..06a933c 100644
+--- a/apps/ios/zh-Hans.lproj/SimpleX--iOS--InfoPlist.strings
++++ b/apps/ios/zh-Hans.lproj/SimpleX--iOS--InfoPlist.strings
+@@ -1,18 +1,18 @@
+ /* Bundle name */
+-"CFBundleName" = "SimpleX";
++"CFBundleName" = "Hearth";
+ 
+ /* Privacy - Camera Usage Description */
+-"NSCameraUsageDescription" = "SimpleX 需要摄像头访问权限才能扫描二维码以连接到其他用户和进行视频通话。";
++"NSCameraUsageDescription" = "Hearth 需要摄像头访问权限才能扫描二维码以连接到其他用户和进行视频通话。";
+ 
+ /* Privacy - Face ID Usage Description */
+-"NSFaceIDUsageDescription" = "SimpleX 使用Face ID进行本地身份验证";
++"NSFaceIDUsageDescription" = "Hearth 使用Face ID进行本地身份验证";
+ 
+ /* Privacy - Local Network Usage Description */
+-"NSLocalNetworkUsageDescription" = "SimpleX 使用本地网络访问，允许通过同一网络上的桌面应用程序使用用户聊天配置文件。";
++"NSLocalNetworkUsageDescription" = "Hearth 使用本地网络访问，允许通过同一网络上的桌面应用程序使用用户聊天配置文件。";
+ 
+ /* Privacy - Microphone Usage Description */
+-"NSMicrophoneUsageDescription" = "SimpleX 需要麦克风访问权限才能进行音频和视频通话，以及录制语音消息。";
++"NSMicrophoneUsageDescription" = "Hearth 需要麦克风访问权限才能进行音频和视频通话，以及录制语音消息。";
+ 
+ /* Privacy - Photo Library Additions Usage Description */
+-"NSPhotoLibraryAddUsageDescription" = "SimpleX 需要访问照片库以保存已拍摄和接收的媒体";
++"NSPhotoLibraryAddUsageDescription" = "Hearth 需要访问照片库以保存已拍摄和接收的媒体";
+ 

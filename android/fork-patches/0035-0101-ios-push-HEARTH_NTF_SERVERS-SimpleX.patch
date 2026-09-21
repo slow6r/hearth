@@ -1,0 +1,57 @@
+From ddede05b1cc2a85d89e093a9d531a7fd138eb507 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=D0=A4=D1=91=D0=B4=D0=BE=D1=80=20=D0=9B=D0=BE=D0=B4=D0=B8?=
+ =?UTF-8?q?=D0=BA=D0=BE=D0=B2?= <fedor_ramoz@mail.ru>
+Date: Mon, 14 Sep 2026 15:37:47 +0300
+Subject: [PATCH 35/37] =?UTF-8?q?0101:=20ios=20=E2=80=94=20push-=D1=81?=
+ =?UTF-8?q?=D0=B5=D1=80=D0=B2=D0=B5=D1=80=D1=8B=20=D0=B8=D0=B7=20HEARTH=5F?=
+ =?UTF-8?q?NTF=5FSERVERS,=20=D0=B0=20=D0=BD=D0=B5=20=D1=81=D0=B5=D1=80?=
+ =?UTF-8?q?=D0=B2=D0=B5=D1=80=D1=8B=20SimpleX?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Ядро iOS берёт адрес push-сервера из переменной окружения, которую приложение
+выставляет до haskell_init. Нет переменной или она не разбирается — push-серверов
+нет вовсе. Единственная правка Haskell в форке, по ADR 0016 и
+ios/patches/haskell-allowlist.txt репозитория hearth.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Mx8aKjA6vdDtgovjS9kAMx
+---
+ src/Simplex/Chat/Library/Commands.hs | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/src/Simplex/Chat/Library/Commands.hs b/src/Simplex/Chat/Library/Commands.hs
+index 2226f80..5923bdd 100644
+--- a/src/Simplex/Chat/Library/Commands.hs
++++ b/src/Simplex/Chat/Library/Commands.hs
+@@ -120,9 +120,11 @@ import Simplex.Messaging.Util
+ import Simplex.Messaging.Version
+ import Simplex.RemoteControl.Invitation (RCInvitation (..), RCSignedInvitation (..))
+ import Simplex.RemoteControl.Types (RCCtrlAddress (..))
++import System.Environment (lookupEnv)
+ import System.Exit (ExitCode, exitSuccess)
+ import System.FilePath (takeExtension, takeFileName, (</>))
+ import System.IO (Handle, IOMode (..))
++import System.IO.Unsafe (unsafePerformIO)
+ import System.Random (randomRIO)
+ import System.Timeout (timeout)
+ import UnliftIO.Async
+@@ -144,12 +146,12 @@ import Simplex.Messaging.Agent.Store.Common (withConnection)
+ import Simplex.Messaging.Agent.Store.SQLite.DB (SlowQueryStats (..))
+ #endif
+ 
++-- hearth: the app puts its own push servers into HEARTH_NTF_SERVERS (space-separated ntf://
++-- addresses) before the core starts. Unset or unparsable means no push servers at all —
++-- never the SimpleX ones (docs/adr/0016 in the hearth repository).
+ _defaultNtfServers :: [NtfServer]
+-_defaultNtfServers =
+-  [ -- "ntf://FB-Uop7RTaZZEG0ZLD2CIaTjsPh-Fw0zFAnb7QyA8Ks=@ntf2.simplex.im,5ex3mupcazy3zlky64ab27phjhijpemsiby33qzq3pliejipbtx5xgad.onion"
+-    "ntf://KmpZNNXiVZJx_G2T7jRUmDFxWXM3OAnunz3uLT0tqAA=@ntf3.simplex.im,pxculznuryunjdvtvh6s6szmanyadumpbmvevgdpe4wk5c65unyt4yid.onion",
+-    "ntf://CJ5o7X6fCxj2FFYRU2KuCo70y4jSqz7td2HYhLnXWbU=@ntf4.simplex.im,wtvuhdj26jwprmomnyfu5wfuq2hjkzfcc72u44vi6gdhrwxldt6xauad.onion"
+-  ]
++_defaultNtfServers = unsafePerformIO $ maybe [] (either (const []) id . mapM (strDecode . B.pack) . words) <$> lookupEnv "HEARTH_NTF_SERVERS"
++{-# NOINLINE _defaultNtfServers #-}
+ 
+ maxImageSize :: Integer
+ maxImageSize = 261120 * 2 -- auto-receive on mobiles

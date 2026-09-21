@@ -1,0 +1,75 @@
+# Сборка Haskell-ядра iOS на Apple Silicon.
+#
+# Зачем CI, когда всё остальное собирается локально: ядро для телефона существует
+# только под arm64, а в flake.nix форка цель `aarch64-darwin-ios` объявлена под
+# системой `aarch64-darwin` — на Intel-маке её не за что зацепить. Раннер macos-15
+# у GitHub как раз Apple Silicon, и это единственное, ради чего он тут нужен.
+#
+# Секретов здесь нет и быть не должно: ядро собирается из открытых исходников,
+# подпись и загрузка в App Store остаются на машине владельца (ios/README.md).
+#
+# Результат — каталог Libraries/ артефактом. Дальше локально:
+#   unzip …; cp -R ios android/simplex-chat/apps/ios/Libraries/
+#   (cd android/simplex-chat && sh scripts/ios/update-pbxproj.sh)
+
+name: ядро iOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "device — arm64 для телефона и App Store; sim — симулятор"
+        default: device
+        type: choice
+        options: [device, sim]
+
+jobs:
+  core:
+    runs-on: macos-15          # Apple Silicon; macos-13 — Intel, он не подойдёт
+    timeout-minutes: 355       # потолок GitHub — 6 часов на задачу
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: проверить, что раннер действительно arm64
+        run: |
+          set -eu
+          arch="$(uname -m)"
+          echo "архитектура раннера: $arch"
+          [ "$arch" = "arm64" ] || { echo "нужен Apple Silicon, а тут $arch" >&2; exit 1; }
+          df -h /
+
+      - name: восстановить дерево форка
+        run: |
+          set -eux
+          # Порядок из android/FORK.md, «Как восстановить дерево сборки». Бандл
+          # содержит только наши коммиты и требует, чтобы тег v7.0.1 уже был в
+          # репозитории, поэтому клон полный по истории (blob'ы — по требованию).
+          git clone --filter=blob:none https://github.com/simplex-chat/simplex-chat.git android/simplex-chat
+          cd android/simplex-chat
+          git checkout "$(sed -n 's/^simplex_chat_tag=//p' "$GITHUB_WORKSPACE/ios/UPSTREAM")"
+          git fetch "$GITHUB_WORKSPACE/android/fork-patches/hearth-mobile-fork.bundle" HEAD
+          git checkout --detach FETCH_HEAD
+          git --no-pager log --oneline -1
+          git status --porcelain
+
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
+        with:
+          # cache.iog.io — бинарный кеш haskell.nix, тот же, что у upstream CI.
+          # Без него кросс-GHC собирается из исходников и в шесть часов не влезает.
+          extra-conf: |
+            substituters = https://cache.nixos.org https://cache.iog.io
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+
+      - name: собрать ядро
+        run: bash ios/scripts/build-core.sh "${{ inputs.target }}"
+
+      - name: сколько осталось места
+        if: always()
+        run: df -h / && du -sh /nix/store 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hearth-ios-core-${{ inputs.target }}
+          path: android/simplex-chat/apps/ios/Libraries/
+          if-no-files-found: error
+          retention-days: 14
