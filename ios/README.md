@@ -110,13 +110,37 @@ cd ios/overlay && swift test
 | SPM-зависимости проекта тянутся Xcode 26.2 | проверено |
 | `swift test` логики overlay: код, узел, bundle, ICE, TURN, порт релея, окружение ядра, клиент к узлу с пиннингом CA | проверено: 96 тестов, 0 падений (2026-09-14, Intel, Xcode 26.2) |
 | Swift-правки 0103–0108 компилируются в составе проекта: приложение, NSE, Share Extension, фреймворк | проверено для симулятора x86_64: `BUILD SUCCEEDED`, ядро подменено пустыми библиотеками и `-undefined dynamic_lookup` — символы Haskell не проверялись |
-| Приложение запускается и проходит онбординг | **нет**: нужно настоящее ядро |
-| `build-core.sh` | **нет**: нужен nix, первый прогон — часы |
-| Подпись, архив, загрузка | **нет**: нужны идентификаторы в аккаунте Apple |
-| Пуши end-to-end | **нет**: нужен `ntf-server` на узле и ключ APNs |
+| Приложение запускается и проходит онбординг | **нет**: сборка есть, на живом телефоне не проверялась |
+| `build-core.sh` | проверено 2026-09-21: GitHub Actions, `macos-15`, 3 ч 7 мин, ядро arm64 с патчем 0101 внутри |
+| Подпись, архив, загрузка | проверено 2026-09-21: сборка 1 залита в App Store Connect |
+| Пуши end-to-end | **нет**: `ntf-server` на узле не поднят, ключа APNs нет — сборка 1 выпущена без push (`bake-node.sh --no-ntf`) |
 | Пины сходятся: `ios/UPSTREAM` = `android/UPSTREAM` = `v7.0.1`, а `simplexmq_core_commit` — тот же `efaad8e7…`, что в `cabal.project` форка | проверено 2026-09-19 |
 | Точки интеграции патчей 0101–0108 существуют в `apps/ios` пинованного тега | проверено 2026-09-19, все восемь |
 | Публичные STUN/TURN в `apps/ios/Shared` upstream присутствуют — значит патч 0106 всё ещё нужен и бьёт по живому | проверено 2026-09-19 |
+
+## Подпись: ловушка errSecInternalComponent
+
+`xcodebuild -exportArchive` падает с `errSecInternalComponent` на пересборке подписи
+фреймворка, если закрытый ключ лежит в системной связке `login.keychain-db`: `codesign`
+просит подтверждения, а в неинтерактивной сессии подтвердить некому. Архив при этом
+собирается успешно — ошибка вылезает только на экспорте, и это сбивает с толку.
+
+Лечится отдельной связкой, пароль от которой известен скрипту, без пароля пользователя
+от системной:
+
+```bash
+security create-keychain -p "$KP" hearth-signing.keychain-db
+security set-keychain-settings -lut 21600 hearth-signing.keychain-db
+security unlock-keychain -p "$KP" hearth-signing.keychain-db
+security import distribution.p12 -k hearth-signing.keychain-db -P "$P12" \
+    -T /usr/bin/codesign -T /usr/bin/security -A
+security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" \
+    hearth-signing.keychain-db
+security list-keychains -d user -s hearth-signing.keychain-db login.keychain-db
+```
+
+`set-key-partition-list` здесь главный: без него импорт с `-A` всё равно оставляет ключ
+недоступным для `codesign`.
 
 ## Что из этого проверяется без Mac
 
