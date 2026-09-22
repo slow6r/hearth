@@ -22,20 +22,31 @@ on:
         default: device
         type: choice
         options: [device, sim]
+      runner:
+        description: "macos-15 — Apple Silicon; macos-13 — Intel (нужен для симулятора на Intel-маке)"
+        default: macos-15
+        type: choice
+        options: [macos-15, macos-13]
 
 jobs:
   core:
-    runs-on: macos-15          # Apple Silicon; macos-13 — Intel, он не подойдёт
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 355       # потолок GitHub — 6 часов на задачу
     steps:
       - uses: actions/checkout@v4
 
-      - name: проверить, что раннер действительно arm64
+      - name: сверить архитектуру раннера с целью
         run: |
           set -eu
           arch="$(uname -m)"
-          echo "архитектура раннера: $arch"
-          [ "$arch" = "arm64" ] || { echo "нужен Apple Silicon, а тут $arch" >&2; exit 1; }
+          echo "архитектура раннера: $arch, цель: ${{ inputs.target }}"
+          # build-core.sh берёт архитектуру от хоста, а не от цели: на arm64-раннере
+          # даже `sim` соберётся под arm64-симулятор и на Intel-маке не запустится.
+          case "${{ inputs.target }}:$arch" in
+              device:arm64) ;;
+              device:*)     echo "ядро для телефона собирается только на Apple Silicon" >&2; exit 1 ;;
+              sim:*)        echo "симулятор будет $arch — он должен совпасть с маком, где запускают" ;;
+          esac
           df -h /
 
       - name: восстановить дерево форка
@@ -69,7 +80,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: hearth-ios-core-${{ inputs.target }}
+          name: hearth-ios-core-${{ inputs.target }}-${{ inputs.runner }}
           path: android/simplex-chat/apps/ios/Libraries/
           if-no-files-found: error
           retention-days: 14
