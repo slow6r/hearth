@@ -22,6 +22,7 @@ FILE_TYPES = {
     ".swift": "sourcecode.swift",
     ".json": "text.json",
     ".pem": "text",
+    ".xcprivacy": "text.plist.xml",
 }
 
 
