@@ -51,7 +51,11 @@ for f in "$LIBS/$DEST"/*.a; do
     "$MAC2IOS" $FLAG "$f" >/dev/null
 done
 
-(cd "$FORK" && sh scripts/ios/update-pbxproj.sh)
+# Только для device: update-pbxproj.sh читает Libraries/ios и при сборке симулятора
+# падает на его отсутствии, обрывая скрипт уже после удачной сборки ядра.
+if [ "$DEST" = ios ]; then
+    (cd "$FORK" && sh scripts/ios/update-pbxproj.sh)
+fi
 
 (cd "$LIBS/$DEST" && shasum -a 256 ./*.a > SHA256SUMS)
 echo "== $LIBS/$DEST"
