@@ -14,6 +14,14 @@
 # Секретов здесь нет (ADR 0012): хост и порт device API, публичный CA и адрес
 # ntf-server — у push-сервера пароля нет. Адрес ntf печатает relays/ntf/init-ntf.sh.
 #
+# Заодно в Info.plist приложения и расширений прописывается исключение ATS для этого
+# хоста. Без него iOS обрывает соединение с узлом на своей проверке сертификата ещё до
+# того, как спросит наш делегат, и отдаёт NSURLErrorSecureConnectionFailed (-1200):
+# сертификат узла подписан частным CA, системе неизвестным. Исключение отключает ТОЛЬКО
+# системную проверку доверия для этого хоста — TLS 1.2 как минимум и forward secrecy
+# остаются обязательными, а вместо системной проверки работает наш пиннинг, который
+# строже: он требует схождения ровно к вшитому CA и совпадения имени.
+#
 # Почему адрес push-сервера вшивается, а не приходит с bundle: ядро читает его один раз
 # при старте процесса (ios/patches/0101), а первый старт случается раньше, чем узел
 # выдаст bundle. Приехавший с bundle адрес заработал бы только после перезапуска.
@@ -22,11 +30,50 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FORK="${FORK_DIR:-$HERE/../android/simplex-chat}"
 RES="$FORK/apps/ios/SimpleXChat/Hearth/Resources"
+IOS_DIR="$FORK/apps/ios"
+PLISTS=("$IOS_DIR/SimpleX--iOS--Info.plist" "$IOS_DIR/SimpleX NSE/Info.plist" "$IOS_DIR/SimpleX SE/Info.plist")
+
+# Исключение ATS переписывается целиком, а не дополняется: в сборке ровно один узел,
+# и остатки от прошлого адреса здесь опаснее, чем их отсутствие.
+ats_write() {
+    python3 - "$1" "${@:2}" <<'PYATS'
+import plistlib, sys
+host = sys.argv[1]
+for path in sys.argv[2:]:
+    try:
+        with open(path, 'rb') as f: pl = plistlib.load(f)
+    except FileNotFoundError:
+        continue
+    pl['NSAppTransportSecurity'] = {'NSExceptionDomains': {host: {
+        # Отключает системную проверку доверия для этого хоста — её заменяет наш
+        # пиннинг (HearthPinningDelegate). HTTP при этом не разрешается: схема https.
+        'NSExceptionAllowsInsecureHTTPLoads': True,
+        'NSExceptionMinimumTLSVersion': 'TLSv1.2',
+    }}}
+    with open(path, 'wb') as f: plistlib.dump(pl, f)
+    print(f"  ATS: {host} -> {path.split('/apps/ios/')[-1]}")
+PYATS
+}
+
+ats_remove() {
+    python3 - "$@" <<'PYATS'
+import plistlib, sys
+for path in sys.argv[1:]:
+    try:
+        with open(path, 'rb') as f: pl = plistlib.load(f)
+    except FileNotFoundError:
+        continue
+    if pl.pop('NSAppTransportSecurity', None) is not None:
+        with open(path, 'wb') as f: plistlib.dump(pl, f)
+        print(f"  ATS убран: {path.split('/apps/ios/')[-1]}")
+PYATS
+}
 NODE_JSON="$RES/hearth_node.json"
 CA_DST="$RES/hearth_ca.pem"
 
 if [ "${1:-}" = "--remove" ]; then
     rm -f "$NODE_JSON" "$CA_DST"
+    ats_remove "${PLISTS[@]}"
     echo "убрано: $NODE_JSON, $CA_DST"
     exit 0
 fi
@@ -69,5 +116,7 @@ cp "$CA_SRC" "$CA_DST"
 echo "вшито: $NODE_JSON"
 cat "$NODE_JSON"
 echo "CA: $(openssl x509 -in "$CA_DST" -noout -subject -fingerprint -sha256 2>/dev/null || echo "$CA_DST")"
+echo
+ats_write "$HOST" "${PLISTS[@]}"
 echo
 echo "Дальше: ios/scripts/sync-overlay.sh — ресурсы должны попасть в project.pbxproj."

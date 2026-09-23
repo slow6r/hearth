@@ -1,0 +1,241 @@
+From 302335bb781d75e980084940adf8b1edc39ad43a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=D0=A4=D1=91=D0=B4=D0=BE=D1=80=20=D0=9B=D0=BE=D0=B4=D0=B8?=
+ =?UTF-8?q?=D0=BA=D0=BE=D0=B2?= <fedor_ramoz@mail.ru>
+Date: Wed, 23 Sep 2026 11:24:56 +0300
+Subject: [PATCH 45/48] =?UTF-8?q?0116:=20ios=20=E2=80=94=20=D0=BE=D1=80?=
+ =?UTF-8?q?=D0=B0=D0=BD=D0=B6=D0=B5=D0=B2=D0=B0=D1=8F=20=D1=82=D0=B5=D0=BC?=
+ =?UTF-8?q?=D0=B0,=20=D0=BA=D0=B0=D0=BA=20=D0=B2=20Android?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Синий SimplexBlue заменён на пламя — те же значения, что в Android
+(apps/multiplatform/.../ui/theme/Color.kt, Theme.kt), чтобы платформы не расходились.
+
+HearthFlame #D9480F для светлой темы, HearthFlameBright #FF922B для тёмных. Два
+оттенка, потому что один на обеих не читается: на белом светлый оранжевый
+сливается, на чёрном тёмный уходит в грязь. Имя SimplexBlue оставлено псевдонимом —
+на него ссылается чужой код, переименование дало бы конфликт в каждом файле при
+ребейзе.
+
+Перекрашены все четыре палитры: светлая, тёмная, чёрная и та, что у upstream
+называлась SIMPLEX и была тёмно-синей, — она стала углями (#1A1109). Пузыри своих
+сообщений тёплые вместо голубых.
+
+Градиент карточек «Новый чат» задан в OKLCH, синева пряталась в тоне 240–267. Как и
+в Android, меняется ТОЛЬКО тон; светлота и насыщенность оставлены — они подобраны
+под контраст с подписью поверх карточки.
+
+QR рисовался тёмно-синим #062d56 (записан дробями UIColor), стал тёмно-коричневым
+#2e1d12 той же светлоты — контраст с белым фоном и читаемость кода не меняются.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ .../Views/NewChat/OnboardingCards.swift       | 26 ++++++----
+ apps/ios/Shared/Views/NewChat/QRCode.swift    |  9 ++--
+ apps/ios/SimpleXChat/Theme/Color.swift        | 12 ++++-
+ apps/ios/SimpleXChat/Theme/ThemeTypes.swift   | 51 ++++++++++---------
+ 4 files changed, 60 insertions(+), 38 deletions(-)
+
+diff --git a/apps/ios/Shared/Views/NewChat/OnboardingCards.swift b/apps/ios/Shared/Views/NewChat/OnboardingCards.swift
+index 0a0b3c1..1da9cc1 100644
+--- a/apps/ios/Shared/Views/NewChat/OnboardingCards.swift
++++ b/apps/ios/Shared/Views/NewChat/OnboardingCards.swift
+@@ -22,20 +22,26 @@ struct OnboardingCardView: View {
+     let labelHeightRatio: CGFloat
+     let action: () -> Void
+ 
++    // hearth: градиент карточек перекрашен из синего в огонь. Значения те же, что в
++    // Android (views/newchat/NewChatView.kt), чтобы платформы не расходились.
++    //
++    // Меняется ТОЛЬКО тон (третье число). Светлота и насыщенность оставлены как у
++    // upstream: они подобраны под контраст с подписью поверх карточки, и трогать их
++    // значило бы переделывать читаемость.
+     static let lightStops: [Gradient.Stop] = [
+-        .init(color: oklch(0.9219, 0.0431, 249.4), location: 0.0),
+-        .init(color: oklch(0.9198, 0.0471, 240.7), location: 0.5),
+-        .init(color: oklch(0.9772, 0.0358, 196.6), location: 0.9),
+-        .init(color: oklch(0.9829, 0.0104, 70.0), location: 0.95),
+-        .init(color: oklch(0.9886, 0.0272, 99.1), location: 1.0)
++        .init(color: oklch(0.9219, 0.0431, 45.0), location: 0.0),
++        .init(color: oklch(0.9198, 0.0471, 55.0), location: 0.5),
++        .init(color: oklch(0.9772, 0.0358, 70.0), location: 0.9),
++        .init(color: oklch(0.9829, 0.0104, 82.0), location: 0.95),
++        .init(color: oklch(0.9886, 0.0272, 95.0), location: 1.0)
+     ]
+ 
+     static let darkStops: [Gradient.Stop] = [
+-        .init(color: oklch(0.1578, 0.0609, 267.3), location: 0.4),
+-        .init(color: oklch(0.4729, 0.1574, 267.3), location: 0.72),
+-        .init(color: oklch(0.9024, 0.0760, 202.8), location: 0.9),
+-        .init(color: oklch(0.9384, 0.0354, 65.0), location: 0.95),
+-        .init(color: oklch(0.9744, 0.0370, 88.4), location: 1.0)
++        .init(color: oklch(0.1578, 0.0609, 40.0), location: 0.4),
++        .init(color: oklch(0.4729, 0.1574, 50.0), location: 0.72),
++        .init(color: oklch(0.9024, 0.0760, 70.0), location: 0.9),
++        .init(color: oklch(0.9384, 0.0354, 82.0), location: 0.95),
++        .init(color: oklch(0.9744, 0.0370, 95.0), location: 1.0)
+     ]
+ 
+     static let gradientAngle: Double = 80.0 * .pi / 180.0
+diff --git a/apps/ios/Shared/Views/NewChat/QRCode.swift b/apps/ios/Shared/Views/NewChat/QRCode.swift
+index 2b38065..b0fc805 100644
+--- a/apps/ios/Shared/Views/NewChat/QRCode.swift
++++ b/apps/ios/Shared/Views/NewChat/QRCode.swift
+@@ -15,7 +15,10 @@ struct MutableQRCode: View {
+     @Binding var uri: String
+     var small: Bool = false
+     var withLogo: Bool = true
+-    var tintColor = UIColor(red: 0.023, green: 0.176, blue: 0.337, alpha: 1)
++    // hearth: у upstream QR рисовался тёмно-синим (#062d56). Тёмно-коричневый
++    // той же светлоты (#2e1d12) — контраст с белым фоном не меняется, значит
++    // читаемость кода тоже. Те же значения, что в Android.
++    var tintColor = UIColor(red: 0.180, green: 0.114, blue: 0.071, alpha: 1)
+ 
+     var body: some View {
+         QRCode(uri: uri, small: small, withLogo: withLogo, tintColor: tintColor)
+@@ -36,7 +39,7 @@ struct SimpleXCreatedLinkQRCode: View {
+ struct SimpleXLinkQRCode: View {
+     let uri: String
+     var withLogo: Bool = true
+-    var tintColor = UIColor(red: 0.023, green: 0.176, blue: 0.337, alpha: 1)
++    var tintColor = UIColor(red: 0.180, green: 0.114, blue: 0.071, alpha: 1)
+     var onShare: (() -> Void)? = nil
+ 
+     var body: some View {
+@@ -50,7 +53,7 @@ struct QRCode: View {
+     let uri: String
+     var small: Bool = false
+     var withLogo: Bool = true
+-    var tintColor = UIColor(red: 0.023, green: 0.176, blue: 0.337, alpha: 1)
++    var tintColor = UIColor(red: 0.180, green: 0.114, blue: 0.071, alpha: 1)
+     var onShare: (() -> Void)? = nil
+     @State private var image: UIImage? = nil
+     @State private var makeScreenshotFunc: () -> Void = {}
+diff --git a/apps/ios/SimpleXChat/Theme/Color.swift b/apps/ios/SimpleXChat/Theme/Color.swift
+index 86eefa4..314b2d6 100644
+--- a/apps/ios/SimpleXChat/Theme/Color.swift
++++ b/apps/ios/SimpleXChat/Theme/Color.swift
+@@ -15,7 +15,17 @@ import SwiftUI
+ //let Teal200 = Color(0xFF03DAC5)
+ //let Gray = Color(0x22222222)
+ //let Indigo = Color(0xFF9966FF)
+-let SimplexBlue = Color(0, 136, 255, a: 255)
++// hearth: фирменный цвет — огонь, а не синий (иконка-костёр). Значения те же, что в
++// Android (apps/multiplatform/.../ui/theme/Color.kt), чтобы платформы не расходились.
++//
++// Два оттенка, потому что один и тот же на обеих темах не читается: на белом фоне
++// светлый оранжевый сливается, на чёрном тёмный уходит в грязь.
++let HearthFlame = Color(0xFFD9480F)        // светлая тема: контраст с белым ~4.7:1
++let HearthFlameBright = Color(0xFFFF922B)  // тёмная тема: контраст с #121212 ~8:1
++
++// Имя upstream оставлено: на него ссылается чужой код, и переименование дало бы
++// конфликт в каждом файле при ребейзе ради строчки, которой человек не видит.
++let SimplexBlue = HearthFlame
+ //let SimplexGreen = Color(77, 218, 103, a: 255)
+ //let SecretColor = Color(0x40808080)
+ let LightGray = Color(241, 242, 246, a: 255)
+diff --git a/apps/ios/SimpleXChat/Theme/ThemeTypes.swift b/apps/ios/SimpleXChat/Theme/ThemeTypes.swift
+index a4e8050..678abef 100644
+--- a/apps/ios/SimpleXChat/Theme/ThemeTypes.swift
++++ b/apps/ios/SimpleXChat/Theme/ThemeTypes.swift
+@@ -627,8 +627,9 @@ public struct ThemeModeOverride: Codable, Equatable, Hashable {
+ }
+ 
+ public let DarkColorPalette = Colors(
+-    primary: SimplexBlue,
+-    primaryVariant: SimplexBlue,
++    // hearth: на тёмном фоне нужен светлый оттенок пламени, иначе кнопки не читаются.
++    primary: HearthFlameBright,
++    primaryVariant: HearthFlameBright,
+     secondary: HighOrLowlight,
+     secondaryVariant: DarkGray,
+     background: Color.black,
+@@ -640,16 +641,16 @@ public let DarkColorPalette = Colors(
+ )
+ public let DarkColorPaletteApp = AppColors(
+     title: .white,
+-    primaryVariant2: Color(0xFF18262E),
+-    sentMessage: Color(0xFF18262E),
+-    sentQuote: Color(0xFF1D3847),
++    primaryVariant2: Color(0xFF2E1D12),
++    sentMessage: Color(0xFF2E1D12),
++    sentQuote: Color(0xFF47301D),
+     receivedMessage: Color(0xff262627),
+     receivedQuote: Color(0xff373739)
+ )
+ 
+ public let LightColorPalette = Colors (
+-    primary: SimplexBlue,
+-    primaryVariant: SimplexBlue,
++    primary: HearthFlame,
++    primaryVariant: HearthFlame,
+     secondary: HighOrLowlight,
+     secondaryVariant: LightGray,
+     background: Color.white,
+@@ -661,19 +662,21 @@ public let LightColorPalette = Colors (
+ )
+ public let LightColorPaletteApp = AppColors(
+     title: .black,
+-    primaryVariant2: Color(0xFFE9F7FF),
+-    sentMessage: Color(0xFFE9F7FF),
+-    sentQuote: Color(0xFFD6F0FF),
++    primaryVariant2: Color(0xFFFFF1E6),
++    sentMessage: Color(0xFFFFF1E6),
++    sentQuote: Color(0xFFFFE0C7),
+     receivedMessage: Color(0xfff5f5f6),
+     receivedQuote: Color(0xffececee)
+ )
+ 
+ public let SimplexColorPalette = Colors(
+-    primary: Color(0xFF70F0F9),
+-    primaryVariant: Color(0xFF1298A5),
++    // hearth: тема upstream была тёмно-синей, перекрашена в угли. Имя переменной
++    // оставлено — на него ссылается ThemeManager и перечисление тем в настройках.
++    primary: HearthFlameBright,
++    primaryVariant: Color(0xFFD9480F),
+     secondary: HighOrLowlight,
+-    secondaryVariant: Color(0xFF2C464D),
+-    background: Color(0xFF111528),
++    secondaryVariant: Color(0xFF4D372C),
++    background: Color(0xFF1A1109),
+     surface: Color(0xFF121C37),
+     error: Color.red,
+     onBackground: Color.white,
+@@ -682,16 +685,16 @@ public let SimplexColorPalette = Colors(
+ )
+ public let SimplexColorPaletteApp = AppColors(
+     title: .white,
+-    primaryVariant2: Color(0xFF172941),
+-    sentMessage: Color(0xFF172941),
+-    sentQuote: Color(0xFF1C3A57),
+-    receivedMessage: Color(0xff25283a),
+-    receivedQuote: Color(0xff36394a)
++    primaryVariant2: Color(0xFF33200F),
++    sentMessage: Color(0xFF33200F),
++    sentQuote: Color(0xFF4A3018),
++    receivedMessage: Color(0xff2a2622),
++    receivedQuote: Color(0xff3b3631)
+ )
+ 
+ public let BlackColorPalette = Colors(
+-    primary: Color(0xff0077e0),
+-    primaryVariant: Color(0xff0077e0),
++    primary: HearthFlameBright,
++    primaryVariant: HearthFlameBright,
+     secondary: HighOrLowlight,
+     secondaryVariant: DarkGray,
+     background: Color(0xff070707),
+@@ -703,9 +706,9 @@ public let BlackColorPalette = Colors(
+ )
+ public let BlackColorPaletteApp = AppColors(
+     title: .white,
+-    primaryVariant2: Color(0xff243747),
+-    sentMessage: Color(0xFF18262E),
+-    sentQuote: Color(0xFF1D3847),
++    primaryVariant2: Color(0xff3a2718),
++    sentMessage: Color(0xFF2A1B10),
++    sentQuote: Color(0xFF422C1A),
+     receivedMessage: Color(0xff1b1b1b),
+     receivedQuote: Color(0xff29292b)
+ )
