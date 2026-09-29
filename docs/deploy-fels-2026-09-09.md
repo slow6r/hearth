@@ -1097,3 +1097,31 @@ h23 простоял раздачей около получаса и снят; �
 уведомление в шторке впервые сработает только у того, кто уже стоит на h24 и увидит h25 —
 на телефонах, где сейчас старая сборка, этого кода нет, и про h24 им по-прежнему надо
 узнать вручную.
+
+## 2026-09-29. Push-сервер: инициализация
+
+`relays/ntf/init-ntf.sh` запущен на узле (`NODE_HOST=relay.myhearth.ru`). Перед запуском
+сверено: скрипт на узле байт в байт совпадает с репозиторием (`fc268eaf…`), бинарь
+`/usr/local/bin/ntf-server` совпадает с манифестом (`ac71436d…`, `v7.0.1+hearth.1`), в нём
+есть наш патч (`APNS_TEAM_ID`, `APNS_TOPIC`, `APNS_KEY_ID` из окружения), каталог
+`/etc/opt/simplex-ntf` пуст — первый init, ломать нечего.
+
+Адрес push-сервера — **вшивается в сборку iOS** (`ios/scripts/bake-node.sh`):
+
+```
+ntf://UApEy4ViY3KjZoJwUY2vhzVnL65LXiotV6qyGpq-VWY=@relay.myhearth.ru:2053
+```
+
+`verify-ini-keys.sh` — все ключи эталона на месте; `port = 2053`, `control_port = 5227`.
+`ca.key` оставлен на узле, как у SMP (`/etc/opt/simplex/ca.key` там же).
+
+**Найден пробел в бэкапе.** В боевом `hearthd.toml` в `[backup].paths` не было
+`/etc/opt/simplex-ntf` и `/var/opt/simplex-ntf`, хотя в эталоне (`hearthd/deploy/hearthd.toml`)
+они есть: CA push-сервера, от которого зависит адрес в сборках, не попадал бы в ночной
+архив. Пути добавлены (копия конфига — `hearthd.toml.bak-2026-09-29`), `hearthd check`
+пройден, `hearthd` перезапущен, релеи не задеты. Читать эти каталоги `hearthd` мог и
+раньше: группа `simplex-ntf` и `ReadOnlyPaths` в юните уже были.
+
+**Не сделано — нет ключа APNs.** Служба `ntf-server` выключена, `[ntf]` в `hearthd.toml`
+не включён, `ntf-server` не добавлен в `egress.relay_processes`. Порядок после получения
+ключа — `docs/runbook-ntf.md`, шаги 4 и 6. Проброс `2053/tcp` на роутере не проверен.
