@@ -43,7 +43,7 @@ RUST_VERSION=1.97.1
 # ЗАМЕНИТЬ на реальный digest перед первым выпуском: `docker buildx imagetools inspect
 # rust:1.97.1-alpine`. Тег без digest воспроизводимости не даёт — его переписывают.
 IMAGE="rust:$RUST_VERSION-alpine"
-IMAGE_DIGEST="${HEARTH_RUST_IMAGE_DIGEST:-}"
+IMAGE_DIGEST="${HEARTH_RUST_IMAGE_DIGEST:-sha256:3c38f3f82c2f3d73da3b38e18d279393a04cb43ddded0e35088a8c3324d40900}"
 [ -n "$IMAGE_DIGEST" ] && IMAGE="rust:$RUST_VERSION-alpine@$IMAGE_DIGEST"
 
 TARGET=x86_64-unknown-linux-musl
