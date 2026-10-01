@@ -23,8 +23,9 @@
 | 0012 | [Только arm64-v8a, и почему не флагом](0012-abi-arm64-only.md) | `android/build.gradle.kts` | ~15 |
 | 0013 | [Только свои серверы и свой вид ссылок](0013-own-servers-and-links.md) | онбординг, `Core.kt`, `WelcomeView.kt`, разбор и показ ссылок | ~60 |
 | 0014 | [Уведомление службы без значка в статус-баре](0014-hide-service-notification.md) | `SimplexService.kt` | ~25 |
+| 0015 | [Маленькая картинка забирается сама](0015-auto-accept-small-images.md) | `SimpleXAPI.kt` | ~8 |
 
-Итого ~475 строк + overlay-файлы (`android/overlay/`), которые в чужих файлах не живут
+Итого ~485 строк + overlay-файлы (`android/overlay/`), которые в чужих файлах не живут
 и при ребейзе не конфликтуют.
 
 ---
