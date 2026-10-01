@@ -120,7 +120,8 @@ docker run --rm --platform linux/amd64 \
     -v "$OUT_MOUNT:/out" \
     -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     -e CARGO_HOME=/cargo \
-    -e RUSTFLAGS="--remap-path-prefix=/src=/hearth --remap-path-prefix=/cargo=/cargo -C link-arg=-Wl,--build-id=sha1" \
+    -e CARGO_TARGET_DIR=/build \
+    -e RUSTFLAGS="--remap-path-prefix=/src=/hearth --remap-path-prefix=/cargo=/cargo --remap-path-prefix=/build=/build -C link-arg=-Wl,--build-id=sha1" \
     "$IMAGE" sh -euc '
         apk add --no-cache git musl-dev >/dev/null
         # git отказывается работать с чужим по uid деревом; выгрузки это дерево
@@ -128,9 +129,14 @@ docker run --rm --platform linux/amd64 \
         git config --global --add safe.directory /src
         rustup target add '"$TARGET"' >/dev/null
         cd /src/hearthd
+        # Каталог сборки вынесен из дерева: /src смонтирован только для чтения — сборка
+        # не имеет права менять дерево, из которого делает паспорт, — а cargo по
+        # умолчанию пишет target/ рядом с Cargo.toml и падает с «Read-only file system».
+        # /build лежит в слое контейнера и исчезает вместе с ним; путь к нему
+        # нормализован в RUSTFLAGS наравне с /src и /cargo, чтобы не попасть в бинарник.
         cargo build --locked --release --target '"$TARGET"'
         for b in hearthd hearthctl; do
-            install -m 0755 "target/'"$TARGET"'/release/$b" "/out/$b"
+            install -m 0755 "/build/'"$TARGET"'/release/$b" "/out/$b"
         done
     '
 
