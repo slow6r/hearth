@@ -90,6 +90,22 @@ echo "   таргет: $TARGET"
 
 mkdir -p "$OUT"
 
+# Пути монтирования под Git Bash. MSYS переписывает аргументы, похожие на пути Unix,
+# в пути Windows — и `-v "$REPO:/src:ro"` превращается в монтирование на
+# `C:/Program Files/Git/src`, после чего `cd /src/hearthd` внутри контейнера падает с
+# «No such file or directory». Отключить переписывание целиком (MSYS_NO_PATHCONV=1)
+# недостаточно: тогда Docker получит `/c/Users/...`, которого на Windows не существует.
+# Поэтому путь к дереву переводим в вид `C:/...` сами, а переписывание выключаем —
+# чтобы левая часть уцелела как путь Windows, а правая осталась путём Linux.
+if command -v cygpath >/dev/null 2>&1; then
+    REPO_MOUNT="$(cygpath -m "$REPO")"
+    OUT_MOUNT="$(cygpath -m "$OUT")"
+    export MSYS_NO_PATHCONV=1
+else
+    REPO_MOUNT="$REPO"
+    OUT_MOUNT="$OUT"
+fi
+
 # --remap-path-prefix: rustc по умолчанию вшивает абсолютные пути к исходникам и к
 # registry в panic-сообщения. У другого сборщика они другие, и бинарники разойдутся
 # побайтно при совершенно идентичном коде — то есть проверка «собери и сравни»
@@ -100,8 +116,8 @@ mkdir -p "$OUT"
 # Каталог с исходниками монтируется только для чтения: сборка не имеет права ничего
 # менять в дереве, из которого делает паспорт.
 docker run --rm --platform linux/amd64 \
-    -v "$REPO:/src:ro" \
-    -v "$OUT:/out" \
+    -v "$REPO_MOUNT:/src:ro" \
+    -v "$OUT_MOUNT:/out" \
     -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     -e CARGO_HOME=/cargo \
     -e RUSTFLAGS="--remap-path-prefix=/src=/hearth --remap-path-prefix=/cargo=/cargo -C link-arg=-Wl,--build-id=sha1" \
@@ -135,7 +151,7 @@ INFO="$OUT/hearthd.build-info.txt"
         echo "${b}_sha256=$("${SUM[@]}" "$OUT/$b" | cut -d' ' -f1)"
     done
     echo "# ниже — паспорт, вшитый в сам бинарник (hearthd build-info)"
-    docker run --rm --platform linux/amd64 -v "$OUT:/out:ro" "$IMAGE" /out/hearthd build-info
+    docker run --rm --platform linux/amd64 -v "$OUT_MOUNT:/out:ro" "$IMAGE" /out/hearthd build-info
 } > "$INFO"
 cat "$INFO"
 
