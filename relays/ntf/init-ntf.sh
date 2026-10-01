@@ -66,6 +66,12 @@ fi
 # только таблицы в ней.
 runuser -u "$NTF_USER" -- psql -v ON_ERROR_STOP=1 -qX -d "$DB_NAME" \
     -c "CREATE SCHEMA IF NOT EXISTS $DB_SCHEMA"
+# pgcrypto — тоже не создаёт, а миграции ntf-server зовут public.digest(...) при КАЖДОМ
+# старте (пересчёт smp_notifier_ids_hash). Без расширения служба падает сразу после
+# «Serving NTF protocol on port 2053» с «функция public.digest(bytea, unknown) не
+# существует» и уходит в цикл перезапусков. Найдено на узле 2026-10-01. Ставит только
+# суперпользователь, поэтому от postgres, и строго в схему public — так её и зовут.
+pg -d "$DB_NAME" -c "CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public"
 DB_CONNECTION="postgresql://$NTF_USER@/$DB_NAME"
 
 echo "== 2. ntf-server init"
