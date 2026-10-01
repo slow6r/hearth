@@ -31,7 +31,12 @@ relay-ip=192.168.1.72
 # The node is behind the provider NAT. Without this coturn advertises 192.168.1.72 as
 # an ICE candidate, signalling succeeds and the call is then silent.
 # <public>/<private>. If the ISP address changes, THIS LINE MUST CHANGE TOO.
-external-ip=185.145.126.254/192.168.1.72
+# Это уже случилось: 2026-10-01 белый адрес сменился с 185.145.126.254 на 91.202.185.13,
+# DDNS имя обновил сам, а эта строка осталась прежней — то есть coturn объявлял мёртвый
+# адрес, и звонок снаружи соединялся молча. runbook-router-udm.md §2 предупреждает, что
+# истории у белого адреса нет, значит повторится. Durable-решение — вынести значение в
+# hearthd.toml через placeholder и сверять с фактическим адресом, пока не сделано.
+external-ip=91.202.185.13/192.168.1.72
 
 {{TLS_PORT_LINE}}
 fingerprint
