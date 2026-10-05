@@ -71,9 +71,16 @@ xcodebuild -exportArchive -archivePath "$OUT/Hearth.xcarchive" \
     echo "fork_commit=$(git -C "$FORK" rev-parse HEAD)"
     echo "build=$BUILD"
     echo "destination=$DESTINATION"
-    find "$OUT/export" -name '*.ipa' -exec sh -c 'echo "ipa_sha256=$(shasum -a 256 "$1" | cut -d" " -f1)"' _ {} \;
+    if [ -d "$OUT/export" ]; then
+        find "$OUT/export" -name '*.ipa' -exec sh -c 'echo "ipa_sha256=$(shasum -a 256 "$1" | cut -d" " -f1)"' _ {} \;
+    else
+        # при destination=upload xcodebuild заливает напрямую и каталога export не создаёт;
+        # раньше find падал здесь под set -e, и паспорт обрывался на трёх строках
+        echo "ipa=нет локально: при destination=upload xcodebuild заливает напрямую"
+    fi
     sed 's/^/core_/' "$IOS/Libraries/ios/SHA256SUMS" 2>/dev/null || echo "core=без SHA256SUMS"
     echo "node=$(cat "$IOS/SimpleXChat/Hearth/Resources/hearth_node.json")"
+    echo "nse_filtering=$(grep -c usernotifications.filtering "$IOS/SimpleX NSE/SimpleX NSE.entitlements" || true)"
     echo "xcode=$(xcodebuild -version | tr '\n' ' ')"
 } > "$OUT/build-info.txt"
 cat "$OUT/build-info.txt"

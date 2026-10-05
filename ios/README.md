@@ -116,6 +116,8 @@ cd ios/overlay && swift test
 | Отправка на ревью | сборки 2–5 отклонены как `INVALID_BINARY` без объяснений; в 5 манифесты уже заполнены — не помогло; причина — только в письме Apple держателю учётной записи (см. раздел ниже) |
 | Иконка | своя: костёр из `hearth_icon_foreground.xml`, обе — основная и альтернативная в «Оформлении» |
 | Пуши end-to-end | **нет**: `ntf-server` на узле работает с 2026-10-01 (ключ APNs `V54A7ZKD83`), адрес вшит в сборку 7, но снаружи `2053` пока не пробрасывается роутером |
+| Ревью сборки 7 (2026-10-04) | вход по коду прошёл; отказ 2.1 — нужно видео всех функций CallKit на живом устройстве, ссылка в заметке для ревью, и так к каждой отправке. Входящий на заблокированный экран приходит только через push (NSE → `reportNewIncomingVoIPPushPayload`), так что без `2053` видео не снять |
+| Сборка 8 (2026-10-05) | под видео: на экране звонка CallKit, в «О приложении» и в узоре скрытого текста был логотип SimpleX — заменён (0127). Залита; Ad Hoc из того же архива — для установки на iPhone по кабелю |
 | Пины сходятся: `ios/UPSTREAM` = `android/UPSTREAM` = `v7.0.1`, а `simplexmq_core_commit` — тот же `efaad8e7…`, что в `cabal.project` форка | проверено 2026-09-19 |
 | Точки интеграции патчей 0101–0108 существуют в `apps/ios` пинованного тега | проверено 2026-09-19, все восемь |
 | Публичные STUN/TURN в `apps/ios/Shared` upstream присутствуют — значит патч 0106 всё ещё нужен и бьёт по живому | проверено 2026-09-19 |
@@ -213,20 +215,39 @@ secrecy остаётся обязательным по умолчанию, HTTP 
 от системной:
 
 ```bash
+# пароль связки живёт в login, а не во временном каталоге: тот чистится, и связку
+# потом не открыть (так случилось 2026-10-05)
+security add-generic-password -U -a "$USER" -s hearth-signing-keychain -w "$KP" \
+    ~/Library/Keychains/login.keychain-db
 security create-keychain -p "$KP" hearth-signing.keychain-db
-security set-keychain-settings -lut 21600 hearth-signing.keychain-db
+security set-keychain-settings hearth-signing.keychain-db
 security unlock-keychain -p "$KP" hearth-signing.keychain-db
 security import distribution.p12 -k hearth-signing.keychain-db -P "$P12" \
     -T /usr/bin/codesign -T /usr/bin/security -A
+security import AppleWWDRCAG3.cer -k hearth-signing.keychain-db
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" \
     hearth-signing.keychain-db
-security list-keychains -d user -s hearth-signing.keychain-db login.keychain-db
+security list-keychains -d user -s hearth-signing.keychain-db login.keychain-db \
+    <остальные связки — после login>
 ```
 
 `set-key-partition-list` здесь главный: без него импорт с `-A` всё равно оставляет ключ
 недоступным для `codesign`. Второй обязательный шаг — `set-keychain-settings` **без**
 флагов: по умолчанию связка блокируется при засыпании ноутбука, и следующий экспорт
 падает с тем же `errSecInternalComponent`, хотя архив снова собирается успешно.
+
+Ещё две ловушки, обе вылезли на сборке 8:
+
+- **Промежуточный сертификат WWDR G3 — в ту же связку.** Без него `codesign` пишет
+  `unable to build chain to self-signed root`, а `security find-identity -v` показывает
+  0 действительных подписей, хотя сертификат и ключ на месте.
+- **`login` — второй в списке, чужие связки — после него.** Архив подписывается
+  сертификатом Apple Development, и его ключ Xcode создал в `login`. Если перед `login`
+  стоит заблокированная связка (здесь их заводят и другие проекты, например
+  `chronum-signing`), поиск обрывается на ней с `User canceled the operation`, до
+  `login` не доходит, и архив падает с `Revoke certificate: Your account already has an
+  Apple Development signing certificate for this machine, but its private key is not
+  installed`. Сертификат при этом отзывать не надо — надо поменять порядок связок.
 
 ## Что из этого проверяется без Mac
 
