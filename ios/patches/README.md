@@ -22,6 +22,7 @@ Android и iOS общий, simplex-chat это один монорепозито
 | 0107 | Тексты про push-сервер SimpleX на экране уведомлений | `NotificationsView.swift` | не начато |
 | 0108 | [Дефолты: приватный роутинг, блокировка](0108-defaults.md) | `AppGroup.swift`, `ContentView.swift` | собрано (симулятор, ядро-заглушка) |
 | 0109 | Ссылки на публичную сеть и сайт SimpleX, экран «О программе» с AGPLv3 | настройки, «Что нового», справка | не начато |
+| 0129 | [Без CallKit и PushKit: звонки только внутри приложения](0129-no-callkit.md) | `CallController.swift`, `NotificationService.swift`, `ContentView.swift`, `CallSettings.swift`, Info.plist, pbxproj | сборка 9 (2026-10-28) |
 
 «Ядро-заглушка» значит: Swift-код собран в составе проекта, а вместо Haskell-ядра
 линковались пустые библиотеки. На устройстве и с настоящим ядром ничего не запускалось

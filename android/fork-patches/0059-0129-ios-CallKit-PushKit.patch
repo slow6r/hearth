@@ -1,0 +1,761 @@
+From caf017f0d78aff4ca17069c624a120d56aed885b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=D0=A4=D1=91=D0=B4=D0=BE=D1=80=20=D0=9B=D0=BE=D0=B4=D0=B8?=
+ =?UTF-8?q?=D0=BA=D0=BE=D0=B2?= <fedor_ramoz@mail.ru>
+Date: Wed, 28 Oct 2026 17:59:01 +0300
+Subject: [PATCH 59/60] =?UTF-8?q?0129:=20ios=20=E2=80=94=20=D0=B1=D0=B5?=
+ =?UTF-8?q?=D0=B7=20CallKit=20=D0=B8=20PushKit,=20=D0=B7=D0=B2=D0=BE=D0=BD?=
+ =?UTF-8?q?=D0=BA=D0=B8=20=D1=82=D0=BE=D0=BB=D1=8C=D0=BA=D0=BE=20=D0=B2?=
+ =?UTF-8?q?=D0=BD=D1=83=D1=82=D1=80=D0=B8=20=D0=BF=D1=80=D0=B8=D0=BB=D0=BE?=
+ =?UTF-8?q?=D0=B6=D0=B5=D0=BD=D0=B8=D1=8F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+App Review (сборка 7, 2026-10-04, 2.1) требует видео всех функций CallKit на живом
+устройстве — и «обновлённое видео к каждой отправке». Снять его — два телефона, человек
+и открытый порт push-сервера; за три недели этого не случилось, выпуск стоит.
+
+Звонки остаются: в upstream уже есть полный путь без CallKit — он включается
+переключателем «Использовать интерфейс iOS для звонков» и всегда работает в Китае. Здесь
+он единственный:
+- CallController: без CXProvider, CXCallController и PKPushRegistry; useCallKit() —
+  всегда false, ветки «else» upstream оставлены как есть. hasActiveCalls() вместо
+  CXCallObserver смотрит на ChatModel.activeCall.
+- NSE: приглашение к звонку — обычное уведомление (createCallInvitationNtf), без
+  CXProvider.reportNewIncomingVoIPPushPayload.
+- ContentView: без перезвона из «Недавних» (INStartCallIntent и Intents).
+- Настройки звонков: без переключателей интерфейса iOS и пункта про «Не беспокоить»,
+  который на него ссылался.
+- Info.plist: без фонового режима voip и NSUserActivityTypes; audio оставлен — на нём
+  держится звонок, когда приложение уходит в фон.
+- pbxproj: без явной линковки PushKit.framework.
+
+Что теряется: входящий не звонит «как телефон» на заблокированном экране — приходит
+уведомление о звонке, принять его можно, открыв приложение. Вернуть CallKit можно
+отдельным обновлением, когда будет готово видео (ios/patches/0129-no-callkit.md).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01WTPLQy8EWAV8r551MkKixt
+---
+ apps/ios/Shared/ContentView.swift             |  36 --
+ .../Shared/Views/Call/CallController.swift    | 375 +-----------------
+ .../Views/UserSettings/CallSettings.swift     |  25 +-
+ .../ios/SimpleX NSE/NotificationService.swift |  61 +--
+ apps/ios/SimpleX--iOS--Info.plist             |   5 -
+ apps/ios/SimpleX.xcodeproj/project.pbxproj    |   4 -
+ 6 files changed, 34 insertions(+), 472 deletions(-)
+
+diff --git a/apps/ios/Shared/ContentView.swift b/apps/ios/Shared/ContentView.swift
+index fecb16a..9a81fc7 100644
+--- a/apps/ios/Shared/ContentView.swift
++++ b/apps/ios/Shared/ContentView.swift
+@@ -7,7 +7,6 @@
+ // Spec: spec/client/navigation.md
+ 
+ import SwiftUI
+-import Intents
+ import SimpleXChat
+ 
+ private enum NoticesSheet: Identifiable {
+@@ -303,9 +302,6 @@ struct ContentView: View {
+             }
+             IncomingCallView()
+         }
+-        .onContinueUserActivity("INStartCallIntent", perform: processUserActivity)
+-        .onContinueUserActivity("INStartAudioCallIntent", perform: processUserActivity)
+-        .onContinueUserActivity("INStartVideoCallIntent", perform: processUserActivity)
+         .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { userActivity in
+             if let url = userActivity.webpageURL {
+                 logger.debug("onContinueUserActivity.NSUserActivityTypeBrowsingWeb: \(url)")
+@@ -323,38 +319,6 @@ struct ContentView: View {
+         }
+     }
+ 
+-    private func processUserActivity(_ activity: NSUserActivity) {
+-        let intent = activity.interaction?.intent
+-        if let intent = intent as? INStartCallIntent {
+-            callToRecentContact(intent.contacts, intent.callCapability == .videoCall ? .video : .audio)
+-        } else if let intent = intent as? INStartAudioCallIntent {
+-            callToRecentContact(intent.contacts, .audio)
+-        } else if let intent = intent as? INStartVideoCallIntent {
+-            callToRecentContact(intent.contacts, .video)
+-        }
+-    }
+-
+-    private func callToRecentContact(_ contacts: [INPerson]?, _ mediaType: CallMediaType) {
+-        logger.debug("callToRecentContact")
+-        if let contactId = contacts?.first?.personHandle?.value,
+-           let chat = chatModel.getChat(contactId),
+-           case let .direct(contact) = chat.chatInfo {
+-            let activeCall = chatModel.activeCall
+-            // This line works when a user clicks on a video button in CallKit UI while in call.
+-            // The app tries to make another call to the same contact and overwite activeCall instance making its state broken
+-            if let activeCall, contactId == activeCall.contact.id, mediaType == .video, !activeCall.hasVideo {
+-                Task {
+-                    await chatModel.callCommand.processCommand(.media(source: .camera, enable: true))
+-                }
+-            } else if activeCall == nil {
+-                logger.debug("callToRecentContact: schedule call")
+-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+-                    CallController.shared.startCall(contact, mediaType)
+-                }
+-            }
+-        }
+-    }
+-
+     // Spec: spec/client/navigation.md#unlockedRecently
+     private func unlockedRecently() -> Bool {
+         if let lastSuccessfulUnlock = lastSuccessfulUnlock {
+diff --git a/apps/ios/Shared/Views/Call/CallController.swift b/apps/ios/Shared/Views/Call/CallController.swift
+index 9df0c2f..d9770b7 100644
+--- a/apps/ios/Shared/Views/Call/CallController.swift
++++ b/apps/ios/Shared/Views/Call/CallController.swift
+@@ -8,364 +8,58 @@
+ // Spec: spec/services/calls.md
+ 
+ import Foundation
+-import CallKit
+-import StoreKit
+-import PushKit
+-import AVFoundation
+ import SimpleXChat
+-import WebRTC
+ 
++// hearth: без CallKit и PushKit (ios/patches/0129-no-callkit.md). App Review требует к
++// каждой отправке видео всех функций CallKit на живом устройстве; звонки остаются внутри
++// приложения — это ветки upstream для выключенного «Использовать интерфейс iOS для
++// звонков» (и для Китая), здесь они единственные.
+ // Spec: spec/services/calls.md#CallController
+-class CallController: NSObject, CXProviderDelegate, PKPushRegistryDelegate, ObservableObject {
++class CallController: NSObject, ObservableObject {
+     static let shared = CallController()
+-    static let isInChina = SKStorefront().countryCode == "CHN"
+-    static func useCallKit() -> Bool { !isInChina && callKitEnabledGroupDefault.get() }
++    static func useCallKit() -> Bool { false }
+ 
+-    private let provider = CXProvider(configuration: {
+-        let configuration = CXProviderConfiguration()
+-        configuration.supportsVideo = true
+-        configuration.supportedHandleTypes = [.generic]
+-        configuration.includesCallsInRecents = UserDefaults.standard.bool(forKey: DEFAULT_CALL_KIT_CALLS_IN_RECENTS)
+-        configuration.maximumCallGroups = 1
+-        configuration.maximumCallsPerCallGroup = 1
+-        configuration.iconTemplateImageData = UIImage(named: "icon-transparent")?.pngData()
+-        return configuration
+-    }())
+-    private let controller = CXCallController()
+     private let callManager = CallManager()
+     @Published var activeCallInvitation: RcvCallInvitation?
++    // Ставился только для звонков CallKit; оставлен, потому что его сбрасывает SimpleXApp.
+     var shouldSuspendChat: Bool = false
+-    var fulfillOnConnect: CXAnswerCallAction? = nil
+-
+-    // PKPushRegistry is used from notification service extension
+-    private let registry = PKPushRegistry(queue: nil)
+-
+-    override init() {
+-        super.init()
+-        provider.setDelegate(self, queue: nil)
+-        registry.delegate = self
+-        registry.desiredPushTypes = [.voIP]
+-    }
+-
+-    func providerDidReset(_ provider: CXProvider) {
+-        logger.debug("CallController.providerDidReset")
+-    }
+-
+-    // Spec: spec/services/calls.md#CXStartCallAction
+-    func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
+-        logger.debug("CallController.provider CXStartCallAction")
+-        if callManager.startOutgoingCall(callUUID: action.callUUID.uuidString.lowercased()) {
+-            action.fulfill()
+-            provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: nil)
+-        } else {
+-            action.fail()
+-        }
+-    }
+-
+-    // Spec: spec/services/calls.md#CXAnswerCallAction
+-    func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
+-        logger.debug("CallController.provider CXAnswerCallAction")
+-        Task {
+-            let chatIsReady = await waitUntilChatStarted(timeoutMs: 30_000, stepMs: 500)
+-            logger.debug("CallController chat started \(chatIsReady) \(ChatModel.shared.chatInitialized) \(ChatModel.shared.chatRunning == true) \(String(describing: AppChatState.shared.value))")
+-            if !chatIsReady {
+-                action.fail()
+-                return
+-            }
+-            if !ChatModel.shared.callInvitations.values.contains(where: { inv in inv.callUUID == action.callUUID.uuidString.lowercased() }) {
+-                try? await justRefreshCallInvitations()
+-                logger.debug("CallController: updated call invitations chat")
+-            }
+-            await MainActor.run {
+-                logger.debug("CallController.provider will answer on call")
+-
+-                if callManager.answerIncomingCall(callUUID: action.callUUID.uuidString.lowercased()) {
+-                    logger.debug("CallController.provider answered on call")
+-                    // WebRTC call should be in connected state to fulfill.
+-                    // Otherwise no audio and mic working on lockscreen
+-                    fulfillOnConnect = action
+-                } else {
+-                    logger.debug("CallController.provider will fail the call")
+-                    action.fail()
+-                }
+-            }
+-        }
+-    }
+-
+-    // Spec: spec/services/calls.md#CXEndCallAction
+-    func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
+-        logger.debug("CallController.provider CXEndCallAction")
+-        // Should be nil here if connection was in connected state
+-        fulfillOnConnect?.fail()
+-        fulfillOnConnect = nil
+-        callManager.endCall(callUUID: action.callUUID.uuidString.lowercased()) { ok in
+-            if ok {
+-                action.fulfill()
+-            } else {
+-                action.fail()
+-            }
+-            self.suspendOnEndCall()
+-        }
+-    }
+-
+-    // Spec: spec/services/calls.md#CXSetMutedCallAction
+-    func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
+-        if callManager.enableMedia(source: .mic, enable: !action.isMuted, callUUID:  action.callUUID.uuidString.lowercased()) {
+-            action.fulfill()
+-        } else {
+-            action.fail()
+-        }
+-    }
+-
+-    func provider(_ provider: CXProvider, timedOutPerforming action: CXAction) {
+-        logger.debug("timed out: \(String(describing: action))")
+-        action.fulfill()
+-    }
+-
+-    func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
+-        logger.debug("CallController: activating audioSession and audio in WebRTCClient")
+-        RTCAudioSession.sharedInstance().audioSessionDidActivate(audioSession)
+-        RTCAudioSession.sharedInstance().isAudioEnabled = true
+-        do {
+-            let hasVideo = ChatModel.shared.activeCall?.hasVideo == true
+-            if hasVideo {
+-                try audioSession.setCategory(.playAndRecord, mode: .videoChat, options: [.defaultToSpeaker, .mixWithOthers, .allowBluetooth, .allowAirPlay, .allowBluetoothA2DP])
+-            } else {
+-                try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.mixWithOthers, .allowBluetooth, .allowAirPlay, .allowBluetoothA2DP])
+-            }
+-            // Without any delay sound is not playing from speaker or external device in incoming call
+-            Task {
+-                for i in 0 ... 3 {
+-                    try? await Task.sleep(nanoseconds: UInt64(i) * 300_000000)
+-                    if let preferred = audioSession.preferredInputDevice() {
+-                        await MainActor.run { try? audioSession.setPreferredInput(preferred) }
+-                    } else if hasVideo {
+-                        await MainActor.run { try? audioSession.overrideOutputAudioPort(.speaker) }
+-                    }
+-                }
+-            }
+-            logger.debug("audioSession category set")
+-            try audioSession.setActive(true)
+-            logger.debug("audioSession activated")
+-        } catch {
+-            logger.error("failed activating audio session")
+-        }
+-    }
+-
+-    func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
+-        logger.debug("CallController: deactivating audioSession and audio in WebRTCClient")
+-        RTCAudioSession.sharedInstance().audioSessionDidDeactivate(audioSession)
+-        RTCAudioSession.sharedInstance().isAudioEnabled = false
+-        do {
+-            try audioSession.setActive(false)
+-            logger.debug("audioSession deactivated")
+-        } catch {
+-            logger.error("failed deactivating audio session")
+-        }
+-        suspendOnEndCall()
+-    }
+-
+-    func suspendOnEndCall() {
+-        if shouldSuspendChat {
+-            // The delay allows to accept the second call before suspending a chat
+-            // see `.onChange(of: scenePhase)` in SimpleXApp
+-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+-                logger.debug("CallController: shouldSuspendChat \(String(describing: self?.shouldSuspendChat))")
+-                if ChatModel.shared.activeCall == nil && self?.shouldSuspendChat == true {
+-                    self?.shouldSuspendChat = false
+-                    suspendChat()
+-                    BGManager.shared.schedule()
+-                }
+-            }
+-        }
+-    }
+-
+-    private func waitUntilChatStarted(timeoutMs: UInt64, stepMs: UInt64) async -> Bool {
+-        logger.debug("CallController waiting until chat started")
+-        var t: UInt64 = 0
+-        repeat {
+-            if ChatModel.shared.chatInitialized, ChatModel.shared.chatRunning == true, case .active = AppChatState.shared.value {
+-                return true
+-            }
+-            _ = try? await Task.sleep(nanoseconds: stepMs * 1000000)
+-            t += stepMs
+-        } while t < timeoutMs
+-        return false
+-    }
+-
+-    @objc(pushRegistry:didUpdatePushCredentials:forType:)
+-    func pushRegistry(_ registry: PKPushRegistry, didUpdate pushCredentials: PKPushCredentials, for type: PKPushType) {
+-        logger.debug("CallController: didUpdate push credentials for type \(type.rawValue)")
+-    }
+-
+-    // Spec: spec/services/calls.md#pushRegistryDidReceive
+-    func pushRegistry(_ registry: PKPushRegistry, didReceiveIncomingPushWith payload: PKPushPayload, for type: PKPushType, completion: @escaping () -> Void) {
+-        logger.debug("CallController: did receive push with type \(type.rawValue)")
+-        if type != .voIP {
+-            completion()
+-            return
+-        }
+-        if AppChatState.shared.value == .stopped {
+-            self.reportExpiredCall(payload: payload, completion)
+-            return
+-        }
+-        // Extract the call information from the push notification payload
+-        let m = ChatModel.shared
+-        if let contactId = payload.dictionaryPayload["contactId"] as? String,
+-           let displayName = payload.dictionaryPayload["displayName"] as? String,
+-           let callUUID = payload.dictionaryPayload["callUUID"] as? String,
+-           let uuid = UUID(uuidString: callUUID),
+-           let callTsInterval = payload.dictionaryPayload["callTs"] as? TimeInterval,
+-           let mediaStr = payload.dictionaryPayload["media"] as? String,
+-           let media = CallMediaType(rawValue: mediaStr) {
+-            let update = self.cxCallUpdate(contactId, displayName, media)
+-            let callTs = Date(timeIntervalSince1970: callTsInterval)
+-            if callTs.timeIntervalSinceNow >= -180 {
+-                logger.debug("CallController: report pushkit call via CallKit")
+-                self.provider.reportNewIncomingCall(with: uuid, update: update) { error in
+-                    if error != nil {
+-                        m.callInvitations.removeValue(forKey: contactId)
+-                    }
+-                    // Tell PushKit that the notification is handled.
+-                    completion()
+-                }
+-            } else {
+-                logger.debug("CallController will expire call 1")
+-                self.reportExpiredCall(update: update, completion)
+-            }
+-        } else {
+-            logger.debug("CallController will expire call 2")
+-            self.reportExpiredCall(payload: payload, completion)
+-        }
+-
+-        //DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+-        if (!ChatModel.shared.chatInitialized) {
+-            logger.debug("CallController: initializing chat")
+-            do {
+-                try initializeChat(start: true, refreshInvitations: false)
+-            } catch let error {
+-                logger.error("CallController: initializing chat error: \(error)")
+-                if let call = ChatModel.shared.activeCall {
+-                    self.endCall(call: call, completed: completion)
+-                }
+-                return
+-            }
+-        }
+-        logger.debug("CallController: initialized chat")
+-        startChatForCall()
+-        logger.debug("CallController: started chat")
+-        self.shouldSuspendChat = true
+-    }
+-
+-    // This function fulfils the requirement to always report a call when PushKit notification is received,
+-    // even when there is no more active calls by the time PushKit payload is processed.
+-    // See the note in the bottom of this article:
+-    // https://developer.apple.com/documentation/pushkit/pkpushregistrydelegate/2875784-pushregistry
+-    private func reportExpiredCall(update: CXCallUpdate, _ completion: @escaping () -> Void) {
+-        logger.debug("CallController: report expired pushkit call via CallKit")
+-        let uuid = UUID()
+-        provider.reportNewIncomingCall(with: uuid, update: update) { error in
+-            if error == nil {
+-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+-                    self.provider.reportCall(with: uuid, endedAt: nil, reason: .remoteEnded)
+-                }
+-            }
+-            completion()
+-        }
+-    }
+-
+-    private func reportExpiredCall(payload: PKPushPayload, _ completion: @escaping () -> Void) {
+-        let update = CXCallUpdate()
+-        let displayName = payload.dictionaryPayload["displayName"] as? String
+-        let media = payload.dictionaryPayload["media"] as? String
+-        update.localizedCallerName = displayName ?? NSLocalizedString("Unknown caller", comment: "callkit banner")
+-        update.hasVideo = media == CallMediaType.video.rawValue
+-        reportExpiredCall(update: update, completion)
+-    }
+ 
+     // Spec: spec/services/calls.md#reportNewIncomingCall
+     func reportNewIncomingCall(invitation: RcvCallInvitation, completion: @escaping (Error?) -> Void) {
+         logger.debug("CallController.reportNewIncomingCall, UUID=\(String(describing: invitation.callUUID))")
+-        if CallController.useCallKit(), let callUUID = invitation.callUUID, let uuid = UUID(uuidString: callUUID) {
+-            if invitation.callTs.timeIntervalSinceNow >= -180 {
+-                let update = cxCallUpdate(invitation: invitation)
+-                provider.reportNewIncomingCall(with: uuid, update: update, completion: completion)
+-            }
+-        } else {
+-            NtfManager.shared.notifyCallInvitation(invitation)
+-            if invitation.callTs.timeIntervalSinceNow >= -180 {
+-                activeCallInvitation = invitation
+-            }
++        NtfManager.shared.notifyCallInvitation(invitation)
++        if invitation.callTs.timeIntervalSinceNow >= -180 {
++            activeCallInvitation = invitation
+         }
+     }
+ 
+-    private func cxCallUpdate(invitation: RcvCallInvitation) -> CXCallUpdate {
+-        let update = CXCallUpdate()
+-        update.remoteHandle = CXHandle(type: .generic, value: invitation.contact.id)
+-        update.hasVideo = invitation.callType.media == .video
+-        update.localizedCallerName = invitation.contact.displayName
+-        return update
+-    }
+-
+-    private func cxCallUpdate(_ contactId: String, _ displayName: String, _ media: CallMediaType) -> CXCallUpdate {
+-        let update = CXCallUpdate()
+-        update.remoteHandle = CXHandle(type: .generic, value: contactId)
+-        update.hasVideo = media == .video
+-        update.localizedCallerName = displayName
+-        return update
+-    }
+-
+     func reportIncomingCall(call: Call, connectedAt dateConnected: Date?) {
+         logger.debug("CallController: reporting incoming call connected")
+-        if CallController.useCallKit() {
+-            // Fulfilling this action only after connect, otherwise there are no audio and mic on lockscreen
+-            fulfillOnConnect?.fulfill()
+-            fulfillOnConnect = nil
+-        }
+     }
+ 
+     // Spec: spec/services/calls.md#reportOutgoingCall
+     func reportOutgoingCall(call: Call, connectedAt dateConnected: Date?) {
+         logger.debug("CallController: reporting outgoing call connected")
+-        if CallController.useCallKit(), let callUUID = call.callUUID, let uuid = UUID(uuidString: callUUID) {
+-            provider.reportOutgoingCall(with: uuid, connectedAt: dateConnected)
+-        }
+     }
+ 
+     func reportCallRemoteEnded(invitation: RcvCallInvitation) {
+         logger.debug("CallController: reporting remote ended")
+-        if CallController.useCallKit(), let callUUID = invitation.callUUID, let uuid = UUID(uuidString: callUUID) {
+-            provider.reportCall(with: uuid, endedAt: nil, reason: .remoteEnded)
+-        } else if invitation.contact.id == activeCallInvitation?.contact.id {
++        if invitation.contact.id == activeCallInvitation?.contact.id {
+             activeCallInvitation = nil
+         }
+     }
+ 
+     func reportCallRemoteEnded(call: Call) {
+         logger.debug("CallController: reporting remote ended")
+-        if CallController.useCallKit(), let callUUID = call.callUUID, let uuid = UUID(uuidString: callUUID) {
+-            provider.reportCall(with: uuid, endedAt: nil, reason: .remoteEnded)
+-        }
+     }
+ 
+     func startCall(_ contact: Contact, _ media: CallMediaType) {
+         logger.debug("CallController.startCall")
+         let callUUID = callManager.newOutgoingCall(contact, media)
+-        guard let uuid = UUID(uuidString: callUUID) else {
++        guard UUID(uuidString: callUUID) != nil else {
+             return
+         }
+-        if CallController.useCallKit() {
+-            let handle = CXHandle(type: .generic, value: contact.id)
+-            let action = CXStartCallAction(call: uuid, handle: handle)
+-            action.isVideo = media == .video
+-            requestTransaction(with: action) {
+-                let update = CXCallUpdate()
+-                update.remoteHandle = CXHandle(type: .generic, value: contact.id)
+-                update.hasVideo = media == .video
+-                update.localizedCallerName = contact.displayName
+-                self.provider.reportCall(with: uuid, updated: update)
+-            }
+-        } else if callManager.startOutgoingCall(callUUID: callUUID) {
++        if callManager.startOutgoingCall(callUUID: callUUID) {
+             logger.debug("CallController.startCall: call started")
+         } else {
+             logger.error("CallController.startCall: no active call")
+@@ -374,30 +68,19 @@ class CallController: NSObject, CXProviderDelegate, PKPushRegistryDelegate, Obse
+ 
+     func answerCall(invitation: RcvCallInvitation) {
+         logger.debug("CallController: answering a call")
+-        if CallController.useCallKit(), let callUUID = invitation.callUUID, let uuid = UUID(uuidString: callUUID) {
+-            requestTransaction(with: CXAnswerCallAction(call: uuid))
+-        } else {
+-            callManager.answerIncomingCall(invitation: invitation)
+-        }
++        callManager.answerIncomingCall(invitation: invitation)
+         if invitation.contact.id == self.activeCallInvitation?.contact.id {
+             self.activeCallInvitation = nil
+         }
+     }
+ 
+     func endCall(callUUID: String) {
+-        let uuid = UUID(uuidString: callUUID)
+         logger.debug("CallController: ending the call with UUID \(callUUID)")
+-        if CallController.useCallKit() {
+-            if let uuid {
+-                requestTransaction(with: CXEndCallAction(call: uuid))
+-            }
+-        } else {
+-            callManager.endCall(callUUID: callUUID) { ok in
+-                if ok {
+-                    logger.debug("CallController.endCall: call ended")
+-                } else {
+-                    logger.error("CallController.endCall: no active call pr call invitation to end")
+-                }
++        callManager.endCall(callUUID: callUUID) { ok in
++            if ok {
++                logger.debug("CallController.endCall: call ended")
++            } else {
++                logger.error("CallController.endCall: no active call pr call invitation to end")
+             }
+         }
+     }
+@@ -425,25 +108,9 @@ class CallController: NSObject, CXProviderDelegate, PKPushRegistryDelegate, Obse
+         }
+     }
+ 
+-    func showInRecents(_ show: Bool) {
+-        let conf = provider.configuration
+-        conf.includesCallsInRecents = show
+-        provider.configuration = conf
+-    }
+-
+     // Spec: spec/services/calls.md#hasActiveCalls
++    // Upstream спрашивал CXCallObserver; без CallKit свой звонок знает только модель.
+     func hasActiveCalls() -> Bool {
+-        controller.callObserver.calls.count > 0
+-    }
+-
+-    private func requestTransaction(with action: CXAction, onSuccess: @escaping () -> Void = {}) {
+-        controller.request(CXTransaction(action: action)) { error in
+-            if let error = error {
+-                logger.error("CallController.requestTransaction error requesting transaction: \(error.localizedDescription)")
+-            } else {
+-                logger.debug("CallController.requestTransaction requested transaction successfully")
+-                onSuccess()
+-            }
+-        }
++        ChatModel.shared.activeCall != nil
+     }
+ }
+diff --git a/apps/ios/Shared/Views/UserSettings/CallSettings.swift b/apps/ios/Shared/Views/UserSettings/CallSettings.swift
+index cd5b3c2..7974a30 100644
+--- a/apps/ios/Shared/Views/UserSettings/CallSettings.swift
++++ b/apps/ios/Shared/Views/UserSettings/CallSettings.swift
+@@ -12,8 +12,6 @@ import SimpleXChat
+ struct CallSettings: View {
+     @EnvironmentObject var theme: AppTheme
+     @AppStorage(DEFAULT_WEBRTC_POLICY_RELAY) private var webrtcPolicyRelay = true
+-    @AppStorage(GROUP_DEFAULT_CALL_KIT_ENABLED, store: groupDefaults) private var callKitEnabled = true
+-    @AppStorage(DEFAULT_CALL_KIT_CALLS_IN_RECENTS) private var callKitCallsInRecents = false
+     private let allowChangingCallsHistory = false
+ 
+     var body: some View {
+@@ -44,30 +42,11 @@ struct CallSettings: View {
+                     }
+                 }
+ 
+-                if !CallController.isInChina {
+-                    Section {
+-                        Toggle("Use iOS call interface", isOn: $callKitEnabled)
+-                        Toggle("Show calls in phone history", isOn: $callKitCallsInRecents)
+-                        .disabled(!callKitEnabled)
+-                        .onChange(of: callKitCallsInRecents) { value in
+-                            CallController.shared.showInRecents(value)
+-                        }
+-                    } header: {
+-                        Text("Interface")
+-                            .foregroundColor(theme.colors.secondary)
+-                    } footer: {
+-                        if callKitEnabled {
+-                            Text("You can accept calls from lock screen, without device and app authentication.")
+-                        } else {
+-                            Text("Authentication is required before the call is connected, but you may miss calls.")
+-                        }
+-                    }
+-                }
+-
+                 Section(header: Text("Limitations").foregroundColor(theme.colors.secondary)) {
+                     VStack(alignment: .leading, spacing: 8) {
++                        // hearth: без CallKit (ios/patches/0129-no-callkit.md) — пункт про интерфейс
++                        // iOS для звонков убран, переключателей этого интерфейса больше нет.
+                         textListItem("1.", "Do NOT use SimpleX for emergency calls.")
+-                        textListItem("2.", "Unless you use iOS call interface, enable Do Not Disturb mode to avoid interruptions.")
+                     }
+                     .font(.callout)
+                     .padding(.vertical, 8)
+diff --git a/apps/ios/SimpleX NSE/NotificationService.swift b/apps/ios/SimpleX NSE/NotificationService.swift
+index f09df3a..936e4f5 100644
+--- a/apps/ios/SimpleX NSE/NotificationService.swift	
++++ b/apps/ios/SimpleX NSE/NotificationService.swift	
+@@ -9,8 +9,6 @@
+ 
+ import UserNotifications
+ import OSLog
+-import StoreKit
+-import CallKit
+ import SimpleXChat
+ 
+ let logger = Logger()
+@@ -624,44 +622,26 @@ class NotificationService: UNNotificationServiceExtension {
+         }
+     }
+ 
++    // hearth: без CallKit (ios/patches/0129-no-callkit.md) — приглашение к звонку приходит
++    // обычным уведомлением; ветка upstream для звонка через CallKit и PushKit убрана.
+     @inline(__always)
+     private func deliverCallkitOrNotification(urgent: Bool, suspend: Bool = false, handler: @escaping (UNNotificationContent) -> Void) {
+         let callInv = notificationEntities.lazy.compactMap({ $0.value.msgBestAttemptNtf.callInvitation }).first
+-        if callInv != nil && useCallKit() {
+-            logger.debug("NotificationService.deliverCallkitOrNotification: will suspend, callkit")
+-            // suspending NSE even though there may be other notifications
+-            // to allow the app to process callkit call
++        if suspend {
++            logger.debug("NotificationService.deliverCallkitOrNotification: will suspend")
+             if urgent {
+                 suspendChat(0)
+-                deliverNotification(handler, callInv)
+             } else {
+-                // when not "urgent", suspending NSE with delay and delivering after the suspension
+-                // because pushkit notification must be processed without delay
+-                // to avoid app termination.
+-                DispatchQueue.global().asyncAfter(deadline: .now() + fastNSESuspendSchedule.delay) {
+-                    suspendChat(fastNSESuspendSchedule.timeout)
+-                    DispatchQueue.global().asyncAfter(deadline: .now() + Double(fastNSESuspendSchedule.timeout)) {
+-                        self.deliverNotification(handler, callInv)
++                // suspension is delayed to allow chat core finalise any processing
++                // (e.g., send delivery receipts)
++                DispatchQueue.global().asyncAfter(deadline: .now() + nseSuspendSchedule.delay) {
++                    if NSEThreads.shared.noThreads {
++                        suspendChat(nseSuspendSchedule.timeout)
+                     }
+                 }
+             }
+-        } else {
+-            if suspend {
+-                logger.debug("NotificationService.deliverCallkitOrNotification: will suspend")
+-                if urgent {
+-                    suspendChat(0)
+-                } else {
+-                    // suspension is delayed to allow chat core finalise any processing
+-                    // (e.g., send delivery receipts)
+-                    DispatchQueue.global().asyncAfter(deadline: .now() + nseSuspendSchedule.delay) {
+-                        if NSEThreads.shared.noThreads {
+-                            suspendChat(nseSuspendSchedule.timeout)
+-                        }
+-                    }
+-                }
+-            }
+-            deliverNotification(handler, callInv)
+         }
++        deliverNotification(handler, callInv)
+     }
+ 
+     private func deliverNotification(_ handler: @escaping (UNNotificationContent) -> Void, _ callInv: RcvCallInvitation?) {
+@@ -669,21 +649,7 @@ class NotificationService: UNNotificationServiceExtension {
+             serviceBestAttemptNtf = nil
+             contentHandler = nil
+             if let callInv {
+-                if useCallKit() {
+-                    logger.debug("NotificationService reportNewIncomingVoIPPushPayload for \(callInv.contact.id)")
+-                    CXProvider.reportNewIncomingVoIPPushPayload([
+-                        "displayName": callInv.contact.displayName,
+-                        "contactId": callInv.contact.id,
+-                        "callUUID": callInv.callUUID ?? "",
+-                        "media": callInv.callType.media.rawValue,
+-                        "callTs": callInv.callTs.timeIntervalSince1970
+-                    ]) { error in
+-                        logger.debug("reportNewIncomingVoIPPushPayload result: \(error)")
+-                        handler(error == nil ? UNMutableNotificationContent() : createCallInvitationNtf(callInv, self.badgeCount))
+-                    }
+-                } else {
+-                    handler(createCallInvitationNtf(callInv, badgeCount))
+-                }
++                handler(createCallInvitationNtf(callInv, badgeCount))
+             } else if notificationEntities.isEmpty {
+                 handler(serviceNtf)
+             } else {
+@@ -995,11 +961,6 @@ func chatRecvMsg() async -> APIResult<NSEChatEvent>? {
+     }
+ }
+ 
+-private let isInChina = SKStorefront().countryCode == "CHN"
+-
+-@inline(__always)
+-private func useCallKit() -> Bool { !isInChina && callKitEnabledGroupDefault.get() }
+-
+ @inline(__always)
+     // Spec: spec/services/notifications.md#receivedMsgNtf
+ func receivedMsgNtf(_ res: NSEChatEvent) async -> (String, NSENotificationData)? {
+diff --git a/apps/ios/SimpleX--iOS--Info.plist b/apps/ios/SimpleX--iOS--Info.plist
+index e16e2b4..3920061 100644
+--- a/apps/ios/SimpleX--iOS--Info.plist
++++ b/apps/ios/SimpleX--iOS--Info.plist
+@@ -60,16 +60,11 @@
+ 			</dict>
+ 		</dict>
+ 	</dict>
+-	<key>NSUserActivityTypes</key>
+-	<array>
+-		<string>INStartCallIntent</string>
+-	</array>
+ 	<key>UIBackgroundModes</key>
+ 	<array>
+ 		<string>audio</string>
+ 		<string>fetch</string>
+ 		<string>remote-notification</string>
+-		<string>voip</string>
+ 	</array>
+ 	<key>UIDesignRequiresCompatibility</key>
+ 	<true/>
+diff --git a/apps/ios/SimpleX.xcodeproj/project.pbxproj b/apps/ios/SimpleX.xcodeproj/project.pbxproj
+index cf48519..53a87f6 100644
+--- a/apps/ios/SimpleX.xcodeproj/project.pbxproj
++++ b/apps/ios/SimpleX.xcodeproj/project.pbxproj
+@@ -263,7 +263,6 @@
+ 		D7197A1829AE89660055C05A /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = D7197A1729AE89660055C05A /* WebRTC */; };
+ 		D72A9088294BD7A70047C86D /* NativeTextEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D72A9087294BD7A70047C86D /* NativeTextEditor.swift */; };
+ 		D741547829AF89AF0022400A /* StoreKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D741547729AF89AF0022400A /* StoreKit.framework */; };
+-		D741547A29AF90B00022400A /* PushKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D741547929AF90B00022400A /* PushKit.framework */; };
+ 		D77B92DC2952372200A5A1CC /* SwiftyGif in Frameworks */ = {isa = PBXBuildFile; productRef = D77B92DB2952372200A5A1CC /* SwiftyGif */; };
+ 		D7F0E33929964E7E0068AF69 /* LZString in Frameworks */ = {isa = PBXBuildFile; productRef = D7F0E33829964E7E0068AF69 /* LZString */; };
+ 		E51CC1E62C62085600DB91FE /* OneHandUICard.swift in Sources */ = {isa = PBXBuildFile; fileRef = E51CC1E52C62085600DB91FE /* OneHandUICard.swift */; };
+@@ -657,7 +656,6 @@
+ 		CEFB2EDE2CA1BCC7004B1ECE /* SheetRepresentable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SheetRepresentable.swift; sourceTree = "<group>"; };
+ 		D72A9087294BD7A70047C86D /* NativeTextEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTextEditor.swift; sourceTree = "<group>"; };
+ 		D741547729AF89AF0022400A /* StoreKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = StoreKit.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS16.1.sdk/System/Library/Frameworks/StoreKit.framework; sourceTree = DEVELOPER_DIR; };
+-		D741547929AF90B00022400A /* PushKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = PushKit.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS16.1.sdk/System/Library/Frameworks/PushKit.framework; sourceTree = DEVELOPER_DIR; };
+ 		D7AA2C3429A936B400737B40 /* MediaEncryption.playground */ = {isa = PBXFileReference; lastKnownFileType = file.playground; name = MediaEncryption.playground; path = Shared/MediaEncryption.playground; sourceTree = SOURCE_ROOT; xcLanguageSpecificationIdentifier = xcode.lang.swift; };
+ 		E51CC1E52C62085600DB91FE /* OneHandUICard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OneHandUICard.swift; sourceTree = "<group>"; };
+ 		E559A0A02E3F77EE00B26F74 /* CommandsMenuView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandsMenuView.swift; sourceTree = "<group>"; };
+@@ -739,7 +737,6 @@
+ 				D7197A1829AE89660055C05A /* WebRTC in Frameworks */,
+ 				D77B92DC2952372200A5A1CC /* SwiftyGif in Frameworks */,
+ 				D7F0E33929964E7E0068AF69 /* LZString in Frameworks */,
+-				D741547A29AF90B00022400A /* PushKit.framework in Frameworks */,
+ 				646BB38C283BEEB9001CE359 /* LocalAuthentication.framework in Frameworks */,
+ 				5C8F01CD27A6F0D8007D2C8D /* CodeScanner in Frameworks */,
+ 			);
+@@ -900,7 +897,6 @@
+ 		5C764E7A279C71D4000C6508 /* Frameworks */ = {
+ 			isa = PBXGroup;
+ 			children = (
+-				D741547929AF90B00022400A /* PushKit.framework */,
+ 				D741547729AF89AF0022400A /* StoreKit.framework */,
+ 				646BB38B283BEEB9001CE359 /* LocalAuthentication.framework */,
+ 				5CDCAD6028187D7900503DA2 /* libz.tbd */,
