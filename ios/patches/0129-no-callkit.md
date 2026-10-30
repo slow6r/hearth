@@ -1,5 +1,9 @@
 # 0129 — без CallKit и PushKit: звонки только внутри приложения
 
+> **Откатан коммитом 0131 (2026-10-30).** App Store отказал по 4.3, раздача — Ad Hoc
+> ([ADR 0017](../../docs/adr/0017-ios-ad-hoc.md)), проверки Apple нет, CallKit вернулся.
+> Описание оставлено на случай, если когда-нибудь снова понадобится App Store.
+
 ## Что делаем
 - `CallController`: нет `CXProvider`, `CXCallController` и `PKPushRegistry`;
   `useCallKit()` всегда `false`. Остались ветки upstream для выключенного «Использовать

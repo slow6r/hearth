@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Hearth для iPhone</title>
+<style>
+  :root {
+    --bg: #fbf8f4; --card: #ffffff; --text: #2e1d12; --muted: #7a6656;
+    --flame: #d9480f; --flame-text: #ffffff; --line: #eadfd4; --warn-bg: #fff4e6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1310; --card: #261c17; --text: #f2efea; --muted: #b3a294;
+      --flame: #ff922b; --flame-text: #1a1310; --line: #3a2c24; --warn-bg: #33241a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 17px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 560px; margin: 0 auto; padding: 32px 16px 48px; }
+  header { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
+  header img { width: 72px; height: 72px; border-radius: 16px; }
+  h1 { font-size: 28px; line-height: 1.2; margin: 0; }
+  .version { color: var(--muted); font-size: 15px; margin: 4px 0 0; }
+  .install {
+    display: block; text-align: center; text-decoration: none; font-weight: 600;
+    background: var(--flame); color: var(--flame-text);
+    padding: 16px; border-radius: 14px; font-size: 19px; margin: 8px 0 12px;
+  }
+  .note { color: var(--muted); font-size: 15px; margin: 0 0 28px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+            padding: 4px 18px; margin-bottom: 16px; }
+  h2 { font-size: 19px; margin: 16px 0 8px; }
+  ol, ul { padding-left: 22px; margin: 8px 0 16px; }
+  li { margin-bottom: 6px; }
+  .warn { background: var(--warn-bg); }
+  code { font: 15px ui-monospace, Menlo, monospace; word-break: break-all; }
+  footer { color: var(--muted); font-size: 13px; margin-top: 28px; word-break: break-all; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="icon-512.png" alt="">
+    <div>
+      <h1>Hearth для iPhone</h1>
+      <p class="version">Версия {{VERSION}} ({{BUILD}}), выпущена {{DATE}}</p>
+    </div>
+  </header>
+
+  <a class="install" href="itms-services://?action=download-manifest&amp;url={{MANIFEST_URL}}">Установить Hearth</a>
+  <p class="note">Открывайте эту страницу в Safari на самом iPhone. На вопрос «Установить приложение Hearth?» ответьте «Установить», иконка появится на экране «Домой».</p>
+
+  <section>
+    <h2>После установки</h2>
+    <ol>
+      <li>Откройте Hearth.</li>
+      <li>Введите код доступа — его даёт владелец узла.</li>
+      <li>Разрешите уведомления, иначе пропустите сообщения и звонки.</li>
+    </ol>
+  </section>
+
+  <section class="warn">
+    <h2>Если пишет «Не удаётся установить»</h2>
+    <p>Hearth ставится только на iPhone из списка. Пришлите владельцу узла номер UDID своего телефона: после того как он добавит телефон, откройте эту страницу заново.</p>
+    <p>Как узнать UDID:</p>
+    <ul>
+      <li><b>С компьютером Mac:</b> подключите iPhone кабелем, откройте Finder и выберите iPhone слева. Под именем телефона щёлкайте по строке с моделью, пока не появится UDID, затем правая кнопка → «Скопировать UDID».</li>
+      <li><b>Без компьютера:</b> откройте в Safari <code>https://udid.tech</code> и следуйте подсказкам. Сайт поставит временный профиль и покажет UDID. Это сторонний сервис, профиль потом можно удалить в Настройки → Основные → VPN и управление устройством.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Обновление</h2>
+    <p>Откройте эту страницу и снова нажмите «Установить Hearth». Переписка и контакты сохранятся.</p>
+    <p>Эта версия работает до {{EXPIRES}}. Раньше этой даты здесь появится новая.</p>
+  </section>
+
+  <footer>
+    SHA-256 файла приложения: <code>{{SHA256}}</code><br>
+    Исходный код: <a href="https://github.com/slow6r/hearth">github.com/slow6r/hearth</a> (на основе SimpleX Chat, AGPLv3).
+  </footer>
+</main>
+</body>
+</html>
